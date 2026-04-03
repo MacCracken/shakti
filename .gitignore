@@ -1,0 +1,37 @@
+# Build
+/target/
+**/*.rs.bk
+
+# Cargo
+Cargo.lock
+!Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage / profiling
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.*
+
+# Claude Code
+.claude/
+
+# Benchmarks (CSV history is tracked, raw criterion output is not)
+/target/criterion/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
