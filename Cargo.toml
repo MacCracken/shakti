@@ -1,0 +1,24 @@
+[package]
+name = "shakti"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "GPL-3.0-only"
+description = "Shakti — AGNOS privilege escalation tool with PAM authentication and audit logging"
+homepage = "https://github.com/MacCracken/shakti"
+repository = "https://github.com/MacCracken/shakti"
+readme = "README.md"
+publish = false
+exclude = [".claude/", ".github/", "docs/", "scripts/"]
+
+[[bin]]
+name = "shakti"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+nix = { version = "0.29", features = ["user", "process", "signal"] }
