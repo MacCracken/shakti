@@ -11,9 +11,20 @@ readme = "README.md"
 publish = false
 exclude = [".claude/", ".github/", "docs/", "scripts/"]
 
+[lib]
+name = "shakti"
+path = "src/lib.rs"
+
 [[bin]]
 name = "shakti"
 path = "src/main.rs"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "core"
+harness = false
 
 [dependencies]
 anyhow = "1"
