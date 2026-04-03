@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use tracing::{error, info, warn};
+use zeroize::Zeroize;
 
 use shakti::{
-    AuthzResult, DEFAULT_POLICY_PATH, MAX_AUTH_ATTEMPTS, check_authorization, check_timestamp,
-    invalidate_timestamp, load_policy, resolve_command, sanitize_environment, update_timestamp,
-    validate_command,
+    AuditAction, AuthzResult, DEFAULT_POLICY_PATH, MAX_AUTH_ATTEMPTS, audit_log, authenticate,
+    check_authorization, check_timestamp, init_tracing, invalidate_timestamp, load_policy,
+    resolve_command, sanitize_environment, update_timestamp, validate_command,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,13 +75,13 @@ impl Drop for EchoGuard {
 }
 
 /// Read a password from stdin with terminal echo disabled.
-#[cfg(target_os = "linux")]
 fn read_password() -> Result<String> {
     use std::io::{self, BufRead};
 
     let stdin = io::stdin();
 
     // Try to disable echo — if it fails (e.g., not a terminal), fall back to plain read
+    #[cfg(target_os = "linux")]
     let guard = if let Ok(original) = nix::sys::termios::tcgetattr(&stdin) {
         let mut noecho = original.clone();
         noecho
@@ -99,17 +100,18 @@ fn read_password() -> Result<String> {
     let password = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
 
     // Explicitly drop guard to restore echo before printing newline
+    #[cfg(target_os = "linux")]
     drop(guard);
     eprintln!(); // newline after password (since echo was off)
 
     Ok(password)
 }
 
-/// Authenticate the calling user.
+/// Authenticate the calling user interactively.
 ///
-/// Uses `/usr/bin/su` to verify the password (delegates to PAM under the hood).
-/// Terminal echo is disabled during password input.
-#[cfg(target_os = "linux")]
+/// Prompts for a password (with echo disabled), then delegates to the library's
+/// `authenticate()` function which tries PAM first, then falls back to `/usr/bin/su`.
+/// Password buffers are zeroized after use.
 fn authenticate_user(username: &str) -> Result<bool> {
     use std::io::{self, Write};
 
@@ -117,9 +119,10 @@ fn authenticate_user(username: &str) -> Result<bool> {
         eprint!("[shakti] password for {}: ", username);
         io::stderr().flush()?;
 
-        let password = read_password()?;
+        let mut password = read_password()?;
 
         if password.is_empty() {
+            password.zeroize();
             if attempt < MAX_AUTH_ATTEMPTS {
                 eprintln!("Sorry, try again.");
                 continue;
@@ -127,32 +130,17 @@ fn authenticate_user(username: &str) -> Result<bool> {
             return Ok(false);
         }
 
-        // Use PAM via /usr/bin/su to validate
-        let result = std::process::Command::new("/usr/bin/su")
-            .arg("-c")
-            .arg("true")
-            .arg(username)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let result = authenticate(username, &password);
+
+        // Clear password from memory immediately after use
+        password.zeroize();
 
         match result {
-            Ok(mut child) => {
-                if let Some(ref mut stdin_pipe) = child.stdin
-                    && let Err(e) = stdin_pipe
-                        .write_all(password.as_bytes())
-                        .and_then(|_| stdin_pipe.write_all(b"\n"))
-                {
-                    eprintln!("Warning: failed to write credentials to su: {}", e);
-                }
-                match child.wait() {
-                    Ok(status) if status.success() => return Ok(true),
-                    _ => {}
-                }
-            }
-            Err(_) => {
-                // su not available, fall through
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => {
+                // Auth backend error — log but continue to next attempt
+                tracing::debug!("Authentication backend error: {}", e);
             }
         }
 
@@ -162,70 +150,6 @@ fn authenticate_user(username: &str) -> Result<bool> {
     }
 
     Ok(false)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn authenticate_user(_username: &str) -> Result<bool> {
-    bail!("Authentication not supported on this platform");
-}
-
-// ---------------------------------------------------------------------------
-// Audit logging
-// ---------------------------------------------------------------------------
-
-fn audit_log(action: &str, caller: &str, target: &str, command: &str, success: bool, reason: &str) {
-    let status = if success { "ALLOWED" } else { "DENIED" };
-    let msg = format!(
-        "shakti: {} : {} ; USER={} ; COMMAND={} ; STATUS={} ; REASON={}",
-        action, caller, target, command, status, reason
-    );
-
-    if success {
-        info!("{}", msg);
-    } else {
-        warn!("{}", msg);
-    }
-
-    // Also write to syslog-style audit trail
-    #[cfg(target_os = "linux")]
-    {
-        let log_line = format!(
-            "{} {} : TTY={} ; PWD={} ; USER={} ; COMMAND={}\n",
-            chrono_now(),
-            caller,
-            tty_name(),
-            env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "unknown".to_string()),
-            target,
-            command,
-        );
-        if let Err(e) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/var/log/agnos/sudo.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(log_line.as_bytes())
-            })
-        {
-            eprintln!("WARNING: Failed to write sudo audit log: {}", e);
-        }
-    }
-}
-
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let d = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", d.as_secs())
-}
-
-fn tty_name() -> String {
-    env::var("TTY")
-        .or_else(|_| env::var("SSH_TTY"))
-        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -437,24 +361,8 @@ fn list_permissions(policy: &shakti::SudoPolicy, username: &str, groups: &[Strin
 // ---------------------------------------------------------------------------
 
 fn main() {
-    // Initialize tracing
-    let format = env::var("AGNOS_LOG_FORMAT").unwrap_or_default();
-    if format == "json" {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "warn".into()),
-            )
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "warn".into()),
-            )
-            .init();
-    }
+    // Initialize tracing with journald + stderr layers
+    init_tracing();
 
     if let Err(e) = run() {
         error!("{:#}", e);
@@ -511,7 +419,7 @@ fn run() -> Result<()> {
     match authz {
         AuthzResult::Denied(reason) => {
             audit_log(
-                "COMMAND",
+                AuditAction::Command,
                 &caller,
                 &cli.target_user,
                 &cmd_str,
@@ -539,7 +447,7 @@ fn run() -> Result<()> {
                     let authenticated = authenticated?;
                     if !authenticated {
                         audit_log(
-                            "AUTH_FAILURE",
+                            AuditAction::AuthFailure,
                             &caller,
                             &cli.target_user,
                             &cmd_str,
@@ -557,7 +465,7 @@ fn run() -> Result<()> {
 
             // Audit log the allowed execution
             audit_log(
-                "COMMAND",
+                AuditAction::Command,
                 &caller,
                 &cli.target_user,
                 &cmd_str,

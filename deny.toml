@@ -3,6 +3,13 @@ all-features = true
 
 [advisories]
 version = 2
+# `users` crate advisories are transitive via `pam` — we don't call group
+# enumeration APIs, so these don't affect shakti. Track upstream fix:
+# https://github.com/1wilkens/pam/issues
+ignore = [
+    "RUSTSEC-2025-0040", # users: root appended to group listings (transitive via pam)
+    "RUSTSEC-2023-0040", # users: unmaintained (transitive via pam)
+]
 
 [licenses]
 version = 2

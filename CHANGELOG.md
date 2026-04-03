@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Real PAM authentication via `pam` crate (feature-gated, `--features pam`)
+- `auth` module with `authenticate()`, `pam_authenticate()`, `su_authenticate()`
+- PAM falls back to `/usr/bin/su` shim when PAM service is unavailable
+- PAM service config example (`etc/pam.d/shakti`)
+- `audit` module with structured journald logging via `tracing-journald`
+- `AuditAction` enum for typed audit events (`Command`, `AuthFailure`, `TimestampInvalidated`)
+- `init_tracing()` — unified tracing setup with journald + stderr layers
+- Policy fragment support via `include_dir` in `[defaults]`
+- Fragment files (`*.toml`) loaded in lexicographic order with security checks
+- Secure memory clearing of password buffers via `zeroize` crate
 - Consumer API module (`api.rs`) with `ShaktiConfig`, `Evaluation`, `AuthMode`
 - `ShaktiConfig::builder()` for ergonomic programmatic configuration
 - `evaluate()` / `evaluate_with_policy()` — high-level entry points for consumers

@@ -1,0 +1,9 @@
+# PAM configuration for Shakti privilege escalation
+# Install to /etc/pam.d/shakti
+
+# Authenticate against system password database
+auth       required     pam_unix.so
+# Account management (check expiry, etc.)
+account    required     pam_unix.so
+# Optional: rate limiting
+auth       optional     pam_faildelay.so delay=3000000

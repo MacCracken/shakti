@@ -46,6 +46,11 @@ pub struct PolicyDefaults {
     /// Maximum command length.
     #[serde(default = "default_max_cmd_len")]
     pub max_command_len: usize,
+    /// Directory containing policy fragment files (`*.toml`).
+    /// Each fragment may contain `[[rules]]` entries that are merged
+    /// into the main policy. Fragments are loaded in lexicographic order.
+    #[serde(default)]
+    pub include_dir: Option<String>,
 }
 
 impl Default for PolicyDefaults {
@@ -56,6 +61,7 @@ impl Default for PolicyDefaults {
             audit_log: true,
             env_keep: Vec::new(),
             max_command_len: MAX_COMMAND_LEN,
+            include_dir: None,
         }
     }
 }
@@ -146,10 +152,102 @@ pub fn load_policy(path: &Path) -> Result<SudoPolicy> {
 
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
-    let policy: SudoPolicy =
+    let mut policy: SudoPolicy =
         toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
 
+    // Load policy fragments from include directory
+    if let Some(ref dir) = policy.defaults.include_dir {
+        let fragment_rules = load_fragments(Path::new(dir))?;
+        policy.rules.extend(fragment_rules);
+    }
+
     Ok(policy)
+}
+
+/// Load policy rule fragments from a directory.
+///
+/// Each `*.toml` file in the directory is parsed as a [`SudoPolicy`].
+/// Only the `[[rules]]` from each fragment are extracted — fragment-level
+/// `[defaults]` are ignored (the main policy file owns defaults).
+///
+/// Files are loaded in lexicographic order for deterministic rule priority.
+/// Each file undergoes the same security checks as the main policy file
+/// (root-owned, not world-writable).
+fn load_fragments(dir: &Path) -> Result<Vec<PolicyRule>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    if !dir.is_dir() {
+        bail!("Policy include path is not a directory: {}", dir.display());
+    }
+
+    // Security: include directory must be owned by root and not world-writable
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(dir)
+            .with_context(|| format!("Cannot stat include directory: {}", dir.display()))?;
+        if meta.uid() != 0 {
+            bail!(
+                "Include directory {} is not owned by root (uid={}). Refusing to use it.",
+                dir.display(),
+                meta.uid()
+            );
+        }
+        if meta.mode() & 0o002 != 0 {
+            bail!(
+                "Include directory {} is world-writable (mode {:o}). Refusing to use it.",
+                dir.display(),
+                meta.mode()
+            );
+        }
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to read include directory: {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+        .collect();
+
+    // Sort lexicographically for deterministic ordering
+    entries.sort_by_key(|e| e.file_name());
+
+    let mut rules = Vec::new();
+    for entry in entries {
+        let fpath = entry.path();
+
+        // Security: each fragment must be root-owned and not world-writable
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&fpath)
+                .with_context(|| format!("Cannot stat fragment: {}", fpath.display()))?;
+            if meta.uid() != 0 {
+                bail!(
+                    "Policy fragment {} is not owned by root (uid={}). Refusing to use it.",
+                    fpath.display(),
+                    meta.uid()
+                );
+            }
+            if meta.mode() & 0o002 != 0 {
+                bail!(
+                    "Policy fragment {} is world-writable (mode {:o}). Refusing to use it.",
+                    fpath.display(),
+                    meta.mode()
+                );
+            }
+        }
+
+        let content = std::fs::read_to_string(&fpath)
+            .with_context(|| format!("Failed to read fragment: {}", fpath.display()))?;
+        let fragment: SudoPolicy = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse fragment: {}", fpath.display()))?;
+
+        rules.extend(fragment.rules);
+    }
+
+    Ok(rules)
 }
 
 /// Parse policy from a TOML string (for testing).
@@ -498,5 +596,103 @@ commands = ["ALL"]
     #[test]
     fn test_default_policy_path() {
         assert_eq!(DEFAULT_POLICY_PATH, "/etc/agnos/sudoers.toml");
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy fragments
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_policy_with_include_dir() {
+        let policy = parse_policy(
+            r#"
+[defaults]
+include_dir = "/etc/agnos/sudoers.d"
+
+[[rules]]
+user = "admin"
+commands = []
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.defaults.include_dir.as_deref(),
+            Some("/etc/agnos/sudoers.d")
+        );
+        assert_eq!(policy.rules.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_policy_without_include_dir() {
+        let policy = parse_policy("").unwrap();
+        assert!(policy.defaults.include_dir.is_none());
+    }
+
+    #[test]
+    fn test_load_fragments_nonexistent_dir() {
+        // Non-existent directory returns empty rules
+        let rules = load_fragments(std::path::Path::new("/nonexistent/path/xyz")).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_load_fragments_from_temp_dir() {
+        use std::io::Write;
+
+        // Fragment loading requires root-owned directories on Linux.
+        // Skip this test when running as non-root.
+        if nix::unistd::getuid().as_raw() != 0 {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("shakti_test_fragments");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write two fragment files
+        let mut f1 = std::fs::File::create(dir.join("10-docker.toml")).unwrap();
+        writeln!(
+            f1,
+            r#"
+[[rules]]
+group = "docker"
+commands = ["/usr/bin/docker"]
+description = "Docker access"
+"#
+        )
+        .unwrap();
+
+        let mut f2 = std::fs::File::create(dir.join("20-deploy.toml")).unwrap();
+        writeln!(
+            f2,
+            r#"
+[[rules]]
+user = "deploy"
+commands = ["/usr/bin/systemctl"]
+require_auth = false
+description = "Deploy access"
+"#
+        )
+        .unwrap();
+
+        // Also write a non-toml file that should be ignored
+        std::fs::write(dir.join("README.md"), "ignored").unwrap();
+
+        let rules = load_fragments(&dir).unwrap();
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Should have 2 rules, in lexicographic order
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].description, "Docker access");
+        assert_eq!(rules[1].description, "Deploy access");
+    }
+
+    #[test]
+    fn test_load_fragments_not_a_directory() {
+        // Point at a file, not a directory
+        let result = load_fragments(std::path::Path::new("/etc/passwd"));
+        assert!(result.is_err());
     }
 }

@@ -4,6 +4,8 @@
 //! command validation, and timestamp management for privilege escalation.
 
 pub mod api;
+pub mod audit;
+pub mod auth;
 pub mod env;
 pub mod policy;
 pub mod timestamp;
@@ -23,6 +25,9 @@ pub use timestamp::{
 /// Maximum authentication attempts before lockout.
 pub const MAX_AUTH_ATTEMPTS: u32 = 3;
 pub use validate::{command_matches, resolve_command, validate_command, validate_username};
+
+pub use audit::{AuditAction, audit_log, init_tracing};
+pub use auth::authenticate;
 
 // Consumer API re-exports
 pub use api::{AuthMode, Evaluation, ShaktiConfig, evaluate, evaluate_with_policy};

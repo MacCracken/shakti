@@ -25,14 +25,17 @@
 
 *All v0.1.x backlog items complete.*
 
-## Future (v0.2+)
+## Completed (v0.2)
 
-- Real PAM integration via `pam-client` or direct `libpam` FFI
+- [x] Real PAM integration via `pam` crate (feature-gated, falls back to su shim)
+- [x] Syslog/journald audit backend via `tracing-journald`
+- [x] Policy include files and directory-based policy fragments (`include_dir`)
+- [x] Secure memory clearing for password buffers (`zeroize`)
+
+## Future (v0.3+)
+
 - Session logging / I/O recording
-- Syslog/journald audit backend
-- Policy include files and directory-based policy fragments
 - TOML policy linting tool
-- Secure memory clearing for password buffers
 - Capability-based privilege (CAP_* instead of full root)
 - SELinux/AppArmor context transitions
 - Remote policy fetch (for fleet management)
