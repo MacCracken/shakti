@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Module structure: split into `policy`, `env`, `timestamp`, `validate` modules
+- Consumer API module (`api.rs`) with `ShaktiConfig`, `Evaluation`, `AuthMode`
+- `ShaktiConfig::builder()` for ergonomic programmatic configuration
+- `evaluate()` / `evaluate_with_policy()` — high-level entry points for consumers
+- `AuthMode::Interactive` / `TimestampOnly` / `Skip` for different consumer needs
+- Non-interactive auth path for daimon (agent operations via `AuthMode::TimestampOnly`)
+- Module structure: split into `policy`, `env`, `timestamp`, `validate`, `api` modules
 - Library crate (`lib.rs`) alongside binary for consumer and benchmark access
 - Criterion benchmarks for all hot paths (`benches/core.rs`)
 - Benchmark history tracking script (`scripts/bench-history.sh`)

@@ -18,12 +18,12 @@
 - [x] Signal handling: mask SIGINT/SIGTSTP/SIGQUIT during auth, restore before exec
 - [x] fd sanitization: close fds > stderr before exec
 
+- [x] Consumer library API: `ShaktiConfig`, `Evaluation`, `AuthMode`, `evaluate()`
+- [x] Non-interactive auth: `AuthMode::TimestampOnly` for daimon, `AuthMode::Skip` for pre-authenticated
+
 ## Backlog (v0.1.x)
 
-### Consumer library API
-- Typed `ShaktiConfig` for programmatic use by argonaut/agnoshi/daimon
-- Non-interactive auth path for daimon (agent operations)
-- Builder pattern for policy evaluation without full CLI
+*All v0.1.x backlog items complete.*
 
 ## Future (v0.2+)
 

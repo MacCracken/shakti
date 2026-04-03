@@ -1,8 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use shakti::{
-    check_authorization, command_matches, parse_policy, sanitize_environment, validate_command,
-    validate_username,
+    AuthMode, ShaktiConfig, check_authorization, command_matches, evaluate_with_policy,
+    parse_policy, sanitize_environment, validate_command, validate_username,
 };
 
 fn sample_policy_str() -> &'static str {
@@ -135,6 +135,25 @@ fn bench_validate_username(c: &mut Criterion) {
     });
 }
 
+fn bench_evaluate_with_policy(c: &mut Criterion) {
+    let policy = parse_policy(sample_policy_str()).unwrap();
+    let config = ShaktiConfig::builder().auth_mode(AuthMode::Skip).build();
+    let args = vec!["/usr/bin/env".to_string()];
+
+    c.bench_function("evaluate_with_policy", |b| {
+        b.iter(|| {
+            evaluate_with_policy(
+                black_box(&config),
+                black_box(&policy),
+                black_box("admin"),
+                black_box(&[]),
+                black_box(&args),
+            )
+            .unwrap()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_parse_policy,
@@ -143,5 +162,6 @@ criterion_group!(
     bench_validate_command,
     bench_sanitize_environment,
     bench_validate_username,
+    bench_evaluate_with_policy,
 );
 criterion_main!(benches);
