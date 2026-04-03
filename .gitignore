@@ -2,9 +2,8 @@
 /target/
 **/*.rs.bk
 
-# Cargo
-Cargo.lock
-!Cargo.lock
+# Cargo (binary crate — lock file should be tracked)
+# Cargo.lock
 
 # IDE
 .idea/
