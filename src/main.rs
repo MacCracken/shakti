@@ -14,25 +14,110 @@ use shakti::{
 };
 
 // ---------------------------------------------------------------------------
+// Signal handling
+// ---------------------------------------------------------------------------
+
+/// Mask interactive signals (SIGINT, SIGTSTP, SIGQUIT) during authentication.
+///
+/// Returns the previous signal mask so it can be restored after auth completes.
+#[cfg(target_os = "linux")]
+fn mask_auth_signals() -> Option<nix::sys::signal::SigSet> {
+    use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
+
+    let mut mask = SigSet::empty();
+    mask.add(Signal::SIGINT);
+    mask.add(Signal::SIGTSTP);
+    mask.add(Signal::SIGQUIT);
+
+    let mut old_mask = SigSet::empty();
+    if sigprocmask(SigmaskHow::SIG_BLOCK, Some(&mask), Some(&mut old_mask)).is_ok() {
+        Some(old_mask)
+    } else {
+        None
+    }
+}
+
+/// Restore the signal mask saved before authentication.
+#[cfg(target_os = "linux")]
+fn restore_signals(old_mask: Option<nix::sys::signal::SigSet>) {
+    if let Some(mask) = old_mask {
+        let _ = nix::sys::signal::sigprocmask(
+            nix::sys::signal::SigmaskHow::SIG_SETMASK,
+            Some(&mask),
+            None,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
 
+/// RAII guard that restores terminal echo on drop.
+///
+/// This ensures echo is re-enabled even if the function panics or returns early.
+#[cfg(target_os = "linux")]
+struct EchoGuard {
+    original: nix::sys::termios::Termios,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        // Restore original terminal settings on stdin
+        let _ = nix::sys::termios::tcsetattr(
+            std::io::stdin(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.original,
+        );
+    }
+}
+
+/// Read a password from stdin with terminal echo disabled.
+#[cfg(target_os = "linux")]
+fn read_password() -> Result<String> {
+    use std::io::{self, BufRead};
+
+    let stdin = io::stdin();
+
+    // Try to disable echo — if it fails (e.g., not a terminal), fall back to plain read
+    let guard = if let Ok(original) = nix::sys::termios::tcgetattr(&stdin) {
+        let mut noecho = original.clone();
+        noecho
+            .local_flags
+            .remove(nix::sys::termios::LocalFlags::ECHO);
+        if nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, &noecho).is_ok()
+        {
+            Some(EchoGuard { original })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let password = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
+
+    // Explicitly drop guard to restore echo before printing newline
+    drop(guard);
+    eprintln!(); // newline after password (since echo was off)
+
+    Ok(password)
+}
+
 /// Authenticate the calling user.
 ///
-/// On a real system this would call PAM. For now we use `/usr/bin/su` to
-/// verify the password, which delegates to PAM under the hood.
+/// Uses `/usr/bin/su` to verify the password (delegates to PAM under the hood).
+/// Terminal echo is disabled during password input.
 #[cfg(target_os = "linux")]
 fn authenticate_user(username: &str) -> Result<bool> {
-    use std::io::{self, BufRead, Write};
+    use std::io::{self, Write};
 
     for attempt in 1..=MAX_AUTH_ATTEMPTS {
         eprint!("[shakti] password for {}: ", username);
         io::stderr().flush()?;
 
-        // Read password (in a real implementation, we'd disable echo via termios)
-        let stdin = io::stdin();
-        let password = stdin.lock().lines().next().unwrap_or(Ok(String::new()))?;
-        eprintln!(); // newline after password
+        let password = read_password()?;
 
         if password.is_empty() {
             if attempt < MAX_AUTH_ATTEMPTS {
@@ -441,7 +526,17 @@ fn run() -> Result<()> {
             if require_auth {
                 let ttl = Duration::from_secs(policy.defaults.timestamp_ttl);
                 if !check_timestamp(&caller, ttl) {
-                    let authenticated = authenticate_user(&caller)?;
+                    // Mask signals during auth to prevent SIGINT leaving us in
+                    // a partially-privileged state
+                    #[cfg(target_os = "linux")]
+                    let saved_mask = mask_auth_signals();
+
+                    let authenticated = authenticate_user(&caller);
+
+                    #[cfg(target_os = "linux")]
+                    restore_signals(saved_mask);
+
+                    let authenticated = authenticated?;
                     if !authenticated {
                         audit_log(
                             "AUTH_FAILURE",
@@ -494,9 +589,24 @@ fn run() -> Result<()> {
                 cmd.env(k, v);
             }
 
-            // Set uid/gid before exec
+            // Set uid/gid and close leaked fds before exec
             unsafe {
                 cmd.pre_exec(move || {
+                    // Close all file descriptors > stderr to prevent fd leaking
+                    // to the child process. Read from /proc/self/fd to find open fds.
+                    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+                        for entry in entries.flatten() {
+                            if let Ok(fd_str) = entry.file_name().into_string()
+                                && let Ok(fd) = fd_str.parse::<i32>()
+                                && fd > 2
+                            {
+                                // Ignore errors — the fd used to read /proc/self/fd
+                                // will also appear and may already be closed
+                                let _ = nix::unistd::close(fd);
+                            }
+                        }
+                    }
+
                     // Set supplementary groups
                     nix::unistd::setgroups(&[nix::unistd::Gid::from_raw(target_gid)]).map_err(
                         |e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e),
