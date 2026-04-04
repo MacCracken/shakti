@@ -8,6 +8,10 @@
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
 - **Version**: SemVer 0.1.0
+- **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
+- **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
+- **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
 ## Consumers
 
@@ -27,6 +31,7 @@ argonaut (init system), agnoshi (shell `sudo` equivalent), daimon (agent privile
 7. Additional tests/benchmarks from findings
 8. Post-review benchmarks — prove the wins
 9. Repeat if heavy
+10. Documentation audit — ADRs, source citations, guides, examples (see Documentation Standards in first-party-standards.md)
 
 ### Work Loop / Working Loop (continuous)
 
@@ -39,8 +44,8 @@ argonaut (init system), agnoshi (shell `sudo` equivalent), daimon (agent privile
 7. Deeper tests/benchmarks from review observations
 8. Run benchmarks again — prove the wins
 9. If review heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs
-11. Version check — VERSION, Cargo.toml, recipe all in sync
+10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
+11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
 12. Return to step 1
 
 ### Task Sizing
@@ -88,7 +93,11 @@ docs/ (required):
 
 docs/ (when earned):
   adr/ — architectural decision records
-  guides/usage.md — patterns and examples
+  guides/ — usage guides, integration patterns
+  examples/ — worked examples
+  standards/ — external spec conformance
+  compliance/ — regulatory, audit, security compliance
+  sources.md — source citations for algorithms/formulas (required for science/math crates)
 ```
 
 ## CHANGELOG Format
