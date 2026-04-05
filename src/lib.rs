@@ -14,8 +14,8 @@ pub mod validate;
 // Re-export primary API at crate root for ergonomic access.
 pub use env::{SAFE_ENV_VARS, UNSAFE_ENV_VARS, sanitize_environment};
 pub use policy::{
-    AuthzResult, DEFAULT_POLICY_PATH, MAX_COMMAND_LEN, PolicyDefaults, PolicyRule, SudoPolicy,
-    check_authorization, load_policy, parse_policy,
+    AuthzResult, DEFAULT_POLICY_PATH, MAX_COMMAND_LEN, PolicyDefaults, PolicyRule, PolicyWarning,
+    SudoPolicy, check_authorization, lint_policy, load_policy, parse_policy,
 };
 pub use timestamp::{
     DEFAULT_TIMESTAMP_DIR, DEFAULT_TIMESTAMP_TTL_SECS, check_timestamp, invalidate_timestamp,

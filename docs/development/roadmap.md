@@ -31,21 +31,28 @@
 - [x] Syslog/journald audit backend via `tracing-journald`
 - [x] Policy include files and directory-based policy fragments (`include_dir`)
 - [x] Secure memory clearing for password buffers (`zeroize`)
+- [x] P(-1) hardening: authorization bypass fix (full command string), timestamp TOCTOU fix (O_NOFOLLOW)
+- [x] P(-1) hardening: argument-level wildcard matching in policy patterns
+- [x] P(-1) hardening: NSS-aware group resolution (getgrouplist), initgroups for target user
+- [x] P(-1) hardening: expanded env sanitization (BASH_FUNC_*, Ruby/Lua/PHP/Perl injection vars)
+- [x] Fuzz testing: cargo-fuzz harnesses for parse_policy, validate_command, command_matches, validate_username
+- [x] TOML policy linting tool (`--check` flag and `lint_policy()` API)
+- [x] Security-critical test coverage: 130 tests (up from 77)
+- [x] Architecture documentation, 4 ADRs, dependency watch tracking
 
 ## Future (v0.3+)
 
 - Session logging / I/O recording
-- TOML policy linting tool
 - Capability-based privilege (CAP_* instead of full root)
 - SELinux/AppArmor context transitions
 - Remote policy fetch (for fleet management)
 
 ## v1.0 Criteria
 
-- All backlog items complete
-- Real PAM integration (not `/usr/bin/su` shim)
-- Full test coverage of all security-critical paths
-- Fuzz testing on policy parser and command validation
-- Security audit by at least one external reviewer
-- Documentation complete (architecture, usage guide, ADRs)
-- All three consumers (argonaut, agnoshi, daimon) integrated and tested
+- [x] All backlog items complete
+- [x] Real PAM integration (not `/usr/bin/su` shim)
+- [x] Full test coverage of all security-critical paths (130 tests)
+- [x] Fuzz testing on policy parser and command validation (4 harnesses)
+- [ ] Security audit by at least one external reviewer
+- [x] Documentation complete (architecture, usage guide, ADRs)
+- [ ] All three consumers (argonaut, agnoshi, daimon) integrated and tested

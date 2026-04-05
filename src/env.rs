@@ -44,6 +44,7 @@ pub const UNSAFE_ENV_VARS: &[&str] = &[
     "BASHOPTS",
     "PS4",
     "PROMPT_COMMAND",
+    "INPUTRC",
     // Interpreter code injection
     "PYTHONPATH",
     "PYTHONSTARTUP",
@@ -51,12 +52,19 @@ pub const UNSAFE_ENV_VARS: &[&str] = &[
     "PERL5LIB",
     "PERL5OPT",
     "PERLLIB",
+    "PERL_MM_OPT",
     "RUBYLIB",
     "RUBYOPT",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_GEMFILE",
     "NODE_PATH",
     "NODE_OPTIONS",
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
+    "LUA_PATH",
+    "LUA_CPATH",
+    "PHPRC",
 ];
 
 /// Environment variables preserved by default.
@@ -107,6 +115,10 @@ pub fn sanitize_environment(
     for (key, value) in env::vars() {
         // Block all LD_* regardless of explicit list — the linker namespace is unbounded
         if key.starts_with("LD_") {
+            continue;
+        }
+        // Block BASH_FUNC_* — exported bash functions (ShellShock attack vector)
+        if key.starts_with("BASH_FUNC_") {
             continue;
         }
         if keep_set.contains(key.as_str()) && !UNSAFE_ENV_VARS.contains(&key.as_str()) {
@@ -216,10 +228,129 @@ env_keep = ["LD_FUTURE_EXPLOIT"]
         assert!(UNSAFE_ENV_VARS.contains(&"PYTHONPATH"));
         assert!(UNSAFE_ENV_VARS.contains(&"PYTHONSTARTUP"));
         assert!(UNSAFE_ENV_VARS.contains(&"PERL5LIB"));
+        assert!(UNSAFE_ENV_VARS.contains(&"PERL_MM_OPT"));
         assert!(UNSAFE_ENV_VARS.contains(&"RUBYLIB"));
+        assert!(UNSAFE_ENV_VARS.contains(&"GEM_HOME"));
+        assert!(UNSAFE_ENV_VARS.contains(&"GEM_PATH"));
+        assert!(UNSAFE_ENV_VARS.contains(&"BUNDLE_GEMFILE"));
         assert!(UNSAFE_ENV_VARS.contains(&"NODE_PATH"));
         assert!(UNSAFE_ENV_VARS.contains(&"NODE_OPTIONS"));
         assert!(UNSAFE_ENV_VARS.contains(&"CLASSPATH"));
         assert!(UNSAFE_ENV_VARS.contains(&"JAVA_TOOL_OPTIONS"));
+        assert!(UNSAFE_ENV_VARS.contains(&"LUA_PATH"));
+        assert!(UNSAFE_ENV_VARS.contains(&"LUA_CPATH"));
+        assert!(UNSAFE_ENV_VARS.contains(&"PHPRC"));
+    }
+
+    #[test]
+    fn test_unsafe_env_vars_shell_extras() {
+        assert!(UNSAFE_ENV_VARS.contains(&"INPUTRC"));
+    }
+
+    #[test]
+    fn test_sanitize_environment_blocks_bash_func() {
+        let policy = parse_policy("").unwrap();
+
+        // SAFETY: test runs are single-threaded for this test
+        unsafe { std::env::set_var("BASH_FUNC_exploit%%", "() { evil; }") };
+        let env = sanitize_environment(&policy, "alice", "root", "/root", "/bin/bash");
+        let keys: HashSet<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !keys.contains("BASH_FUNC_exploit%%"),
+            "BASH_FUNC_* prefix should be blocked (ShellShock)"
+        );
+        // SAFETY: test cleanup
+        unsafe { std::env::remove_var("BASH_FUNC_exploit%%") };
+    }
+
+    #[test]
+    fn test_sanitize_environment_actually_removes_set_unsafe_vars() {
+        // Set a representative subset of unsafe vars and verify they are stripped
+        let dangerous = [
+            "LD_PRELOAD",
+            "PYTHONPATH",
+            "IFS",
+            "BASH_ENV",
+            "NODE_OPTIONS",
+            "GEM_HOME",
+        ];
+
+        // SAFETY: test isolation
+        for var in &dangerous {
+            unsafe { std::env::set_var(var, "evil") };
+        }
+
+        let policy = parse_policy("").unwrap();
+        let env = sanitize_environment(&policy, "alice", "root", "/root", "/bin/bash");
+        let keys: HashSet<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+
+        for var in &dangerous {
+            assert!(
+                !keys.contains(var),
+                "Unsafe var {} was present in sanitized env after being set",
+                var
+            );
+        }
+
+        // SAFETY: test cleanup
+        for var in &dangerous {
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    fn test_sanitize_env_keep_does_not_override_unsafe() {
+        // Even if an unsafe var is in env_keep, it must still be blocked
+        let policy = parse_policy(
+            r#"
+[defaults]
+env_keep = ["PYTHONPATH", "IFS", "BASH_ENV"]
+"#,
+        )
+        .unwrap();
+
+        // SAFETY: test isolation
+        unsafe {
+            std::env::set_var("PYTHONPATH", "evil");
+            std::env::set_var("IFS", "evil");
+            std::env::set_var("BASH_ENV", "evil");
+        }
+
+        let env = sanitize_environment(&policy, "alice", "root", "/root", "/bin/bash");
+        let keys: HashSet<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+
+        assert!(
+            !keys.contains("PYTHONPATH"),
+            "PYTHONPATH leaked through env_keep"
+        );
+        assert!(!keys.contains("IFS"), "IFS leaked through env_keep");
+        assert!(
+            !keys.contains("BASH_ENV"),
+            "BASH_ENV leaked through env_keep"
+        );
+
+        // SAFETY: test cleanup
+        unsafe {
+            std::env::remove_var("PYTHONPATH");
+            std::env::remove_var("IFS");
+            std::env::remove_var("BASH_ENV");
+        }
+    }
+
+    #[test]
+    fn test_sanitize_bash_func_via_env_keep_still_blocked() {
+        let policy = parse_policy(
+            r#"
+[defaults]
+env_keep = ["BASH_FUNC_exploit%%"]
+"#,
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("BASH_FUNC_exploit%%", "() { evil; }") };
+        let env = sanitize_environment(&policy, "alice", "root", "/root", "/bin/bash");
+        let keys: HashSet<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains("BASH_FUNC_exploit%%"));
+        unsafe { std::env::remove_var("BASH_FUNC_exploit%%") };
     }
 }

@@ -257,6 +257,154 @@ pub fn parse_policy(content: &str) -> Result<SudoPolicy> {
 }
 
 // ---------------------------------------------------------------------------
+// Policy linting
+// ---------------------------------------------------------------------------
+
+/// A single diagnostic from the policy linter.
+#[derive(Debug, Clone)]
+pub struct PolicyWarning {
+    /// `"error"` or `"warning"`.
+    pub severity: &'static str,
+    /// Which rule index (0-based), or `None` for global issues.
+    pub rule_index: Option<usize>,
+    /// Human-readable description of the issue.
+    pub message: String,
+}
+
+/// Lint a policy for common mistakes and security concerns.
+///
+/// Returns a list of warnings/errors. An empty list means the policy looks good.
+#[must_use]
+pub fn lint_policy(policy: &SudoPolicy) -> Vec<PolicyWarning> {
+    let mut warnings = Vec::new();
+
+    // Global checks
+    if policy.rules.is_empty() {
+        warnings.push(PolicyWarning {
+            severity: "warning",
+            rule_index: None,
+            message: "Policy has no rules — all commands will be denied".into(),
+        });
+    }
+
+    if policy.defaults.timestamp_ttl == 0 && policy.defaults.require_auth {
+        warnings.push(PolicyWarning {
+            severity: "warning",
+            rule_index: None,
+            message:
+                "timestamp_ttl is 0 with require_auth=true — password required on every invocation"
+                    .into(),
+        });
+    }
+
+    if !policy.defaults.require_auth {
+        warnings.push(PolicyWarning {
+            severity: "warning",
+            rule_index: None,
+            message: "Global require_auth is false — all rules default to NOPASSWD".into(),
+        });
+    }
+
+    for (i, rule) in policy.rules.iter().enumerate() {
+        // Rule with no user and no group — unreachable
+        if rule.user.is_none() && rule.group.is_none() {
+            warnings.push(PolicyWarning {
+                severity: "error",
+                rule_index: Some(i),
+                message: "Rule has neither 'user' nor 'group' — it will never match".into(),
+            });
+        }
+
+        // Empty deny_commands with no commands — deny is unreachable
+        if !rule.deny_commands.is_empty() && rule.commands.is_empty() {
+            warnings.push(PolicyWarning {
+                severity: "warning",
+                rule_index: Some(i),
+                message: "Rule has deny_commands but commands is empty (allows all) — \
+                    deny patterns will still be checked, but consider listing explicit \
+                    allowed commands for defense-in-depth"
+                    .into(),
+            });
+        }
+
+        // Wildcard user with NOPASSWD is dangerous
+        if rule.user.as_deref() == Some("*") && !rule.require_auth {
+            warnings.push(PolicyWarning {
+                severity: "warning",
+                rule_index: Some(i),
+                message: "Rule grants all users (*) NOPASSWD access — verify this is intended"
+                    .into(),
+            });
+        }
+
+        // Wildcard user with empty commands = full NOPASSWD root for everyone
+        if rule.user.as_deref() == Some("*") && rule.commands.is_empty() && !rule.require_auth {
+            warnings.push(PolicyWarning {
+                severity: "error",
+                rule_index: Some(i),
+                message: "Rule grants ALL commands to ALL users with NOPASSWD — \
+                    this effectively disables privilege escalation security"
+                    .into(),
+            });
+        }
+
+        // run_as = "*" with empty commands is very permissive
+        if rule.run_as == "*" && rule.commands.is_empty() {
+            warnings.push(PolicyWarning {
+                severity: "warning",
+                rule_index: Some(i),
+                message: "Rule allows running as any user with all commands — \
+                    consider restricting run_as or commands"
+                    .into(),
+            });
+        }
+
+        // Deny pattern that can't match any allow pattern (common mistake)
+        for deny in &rule.deny_commands {
+            if !rule.commands.is_empty()
+                && !rule.commands.iter().any(|allow| {
+                    // Check if deny could possibly overlap with an allow pattern
+                    allow == "ALL"
+                        || allow == "*"
+                        || deny.starts_with(allow.trim_end_matches(" *"))
+                        || crate::validate::command_matches(deny, allow)
+                })
+            {
+                warnings.push(PolicyWarning {
+                    severity: "warning",
+                    rule_index: Some(i),
+                    message: format!(
+                        "deny_commands pattern '{}' doesn't overlap with any commands entry — \
+                        it may be unreachable",
+                        deny
+                    ),
+                });
+            }
+        }
+
+        // Check for duplicate rules (same user+group+run_as)
+        for (j, other) in policy.rules.iter().enumerate() {
+            if j <= i {
+                continue;
+            }
+            if rule.user == other.user && rule.group == other.group && rule.run_as == other.run_as {
+                warnings.push(PolicyWarning {
+                    severity: "warning",
+                    rule_index: Some(i),
+                    message: format!(
+                        "Rule {} has the same user/group/run_as as rule {} — \
+                        only the first matching rule is used; consider merging",
+                        i, j
+                    ),
+                });
+            }
+        }
+    }
+
+    warnings
+}
+
+// ---------------------------------------------------------------------------
 // Authorization
 // ---------------------------------------------------------------------------
 
@@ -598,6 +746,54 @@ commands = ["ALL"]
         assert_eq!(DEFAULT_POLICY_PATH, "/etc/agnos/sudoers.toml");
     }
 
+    #[test]
+    fn test_authz_deny_with_args() {
+        let policy = parse_policy(sample_policy()).unwrap();
+        // Deploy rule denies "/usr/bin/systemctl stop firewall" — must match with args
+        let result = check_authorization(
+            &policy,
+            "deploy",
+            &[],
+            "root",
+            "/usr/bin/systemctl stop firewall",
+        );
+        assert!(matches!(result, AuthzResult::Denied(_)));
+    }
+
+    #[test]
+    fn test_authz_allow_with_arg_wildcard() {
+        let policy = parse_policy(sample_policy()).unwrap();
+        // Deploy rule allows "/usr/bin/systemctl restart *"
+        let result = check_authorization(
+            &policy,
+            "deploy",
+            &[],
+            "root",
+            "/usr/bin/systemctl restart nginx",
+        );
+        assert_eq!(
+            result,
+            AuthzResult::Allowed {
+                require_auth: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_authz_deny_takes_precedence_over_arg_wildcard() {
+        let policy = parse_policy(sample_policy()).unwrap();
+        // Deny "/usr/bin/systemctl stop firewall" should still match even though
+        // it doesn't match the allow pattern "restart *"
+        let result = check_authorization(
+            &policy,
+            "deploy",
+            &[],
+            "root",
+            "/usr/bin/systemctl stop firewall",
+        );
+        assert!(matches!(result, AuthzResult::Denied(_)));
+    }
+
     // -----------------------------------------------------------------------
     // Policy fragments
     // -----------------------------------------------------------------------
@@ -694,5 +890,273 @@ description = "Deploy access"
         // Point at a file, not a directory
         let result = load_fragments(std::path::Path::new("/etc/passwd"));
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy linting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lint_clean_policy() {
+        let policy = parse_policy(sample_policy()).unwrap();
+        let warnings = lint_policy(&policy);
+        // The sample policy is well-formed — should have no errors
+        assert!(
+            warnings.iter().all(|w| w.severity != "error"),
+            "Clean policy should have no errors: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_lint_empty_policy() {
+        let policy = parse_policy("").unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(warnings.iter().any(|w| w.message.contains("no rules")));
+    }
+
+    #[test]
+    fn test_lint_no_user_no_group() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+commands = ["/usr/bin/ls"]
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.severity == "error" && w.message.contains("neither"))
+        );
+    }
+
+    #[test]
+    fn test_lint_wildcard_nopasswd_all() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "*"
+commands = []
+require_auth = false
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.severity == "error" && w.message.contains("ALL commands"))
+        );
+    }
+
+    #[test]
+    fn test_lint_global_nopasswd() {
+        let policy = parse_policy(
+            r#"
+[defaults]
+require_auth = false
+
+[[rules]]
+user = "admin"
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("Global require_auth is false"))
+        );
+    }
+
+    #[test]
+    fn test_lint_ttl_zero_with_auth() {
+        let policy = parse_policy(
+            r#"
+[defaults]
+timestamp_ttl = 0
+require_auth = true
+
+[[rules]]
+user = "admin"
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("timestamp_ttl is 0"))
+        );
+    }
+
+    #[test]
+    fn test_lint_run_as_wildcard_all_commands() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "admin"
+run_as = "*"
+commands = []
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("running as any user"))
+        );
+    }
+
+    #[test]
+    fn test_lint_duplicate_rules() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "admin"
+commands = ["/usr/bin/ls"]
+
+[[rules]]
+user = "admin"
+commands = ["/usr/bin/rm"]
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(warnings.iter().any(|w| w.message.contains("merging")));
+    }
+
+    #[test]
+    fn test_lint_unreachable_deny() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "admin"
+commands = ["/usr/bin/ls"]
+deny_commands = ["/usr/bin/rm"]
+"#,
+        )
+        .unwrap();
+        let warnings = lint_policy(&policy);
+        assert!(warnings.iter().any(|w| w.message.contains("unreachable")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Malformed / edge-case policy parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_policy_invalid_toml() {
+        assert!(parse_policy("[[[ bad toml").is_err());
+    }
+
+    #[test]
+    fn test_parse_policy_wrong_types() {
+        assert!(
+            parse_policy(
+                r#"
+[defaults]
+timestamp_ttl = "not_a_number"
+"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_policy_user_and_group_both_set() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "admin"
+group = "wheel"
+commands = ["/usr/bin/ls"]
+"#,
+        )
+        .unwrap();
+        // Should match if either user OR group matches
+        let result = check_authorization(&policy, "admin", &[], "root", "/usr/bin/ls");
+        assert_eq!(result, AuthzResult::Allowed { require_auth: true });
+
+        let groups = vec!["wheel".to_string()];
+        let result = check_authorization(&policy, "nobody", &groups, "root", "/usr/bin/ls");
+        assert_eq!(result, AuthzResult::Allowed { require_auth: true });
+    }
+
+    #[test]
+    fn test_authz_deny_wildcard_in_rule() {
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "deploy"
+commands = ["/usr/bin/systemctl *"]
+deny_commands = ["/usr/bin/systemctl stop *"]
+"#,
+        )
+        .unwrap();
+        // Allow: restart nginx
+        let result = check_authorization(
+            &policy,
+            "deploy",
+            &[],
+            "root",
+            "/usr/bin/systemctl restart nginx",
+        );
+        assert_eq!(result, AuthzResult::Allowed { require_auth: true });
+        // Deny: stop anything
+        let result = check_authorization(
+            &policy,
+            "deploy",
+            &[],
+            "root",
+            "/usr/bin/systemctl stop nginx",
+        );
+        assert!(matches!(result, AuthzResult::Denied(_)));
+    }
+
+    #[test]
+    fn test_authz_deny_does_not_bleed_across_rules() {
+        // Rule 0 denies /usr/bin/rm for user "admin".
+        // Rule 1 allows /usr/bin/rm for group "root-ops".
+        // A user in "root-ops" should be allowed despite the deny in rule 0
+        // (deny only applies to the rule it's in).
+        let policy = parse_policy(
+            r#"
+[[rules]]
+user = "admin"
+commands = ["ALL"]
+deny_commands = ["/usr/bin/rm"]
+
+[[rules]]
+group = "root-ops"
+commands = ["/usr/bin/rm"]
+"#,
+        )
+        .unwrap();
+        let groups = vec!["root-ops".to_string()];
+        let result = check_authorization(&policy, "operator", &groups, "root", "/usr/bin/rm");
+        assert_eq!(result, AuthzResult::Allowed { require_auth: true });
+    }
+
+    #[test]
+    fn test_parse_policy_fragment_defaults_ignored() {
+        // Fragments are parsed as SudoPolicy but only rules are extracted.
+        // This tests the parse side — the fragment loading function ignores defaults.
+        let fragment = parse_policy(
+            r#"
+[defaults]
+timestamp_ttl = 999
+
+[[rules]]
+user = "test"
+commands = ["/usr/bin/ls"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(fragment.defaults.timestamp_ttl, 999);
+        // But load_fragments only takes .rules — verified by load_fragments code
     }
 }

@@ -137,6 +137,7 @@ impl ShaktiConfigBuilder {
 
 /// Result of evaluating a privilege escalation request.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Evaluation {
     /// Whether the request is authorized by policy.
     pub authorized: bool,
@@ -199,15 +200,21 @@ pub fn evaluate_with_policy(
 
     // Resolve command to absolute path
     let resolved = resolve_command(&command_args[0])?;
+    let resolved_str = resolved.to_str().ok_or_else(|| {
+        anyhow::anyhow!("Command path is not valid UTF-8: {}", resolved.display())
+    })?;
 
-    // Authorization check
-    let authz = policy::check_authorization(
-        policy,
-        caller,
-        groups,
-        &config.target_user,
-        resolved.to_str().unwrap_or(""),
-    );
+    // Build full command string with arguments for authorization
+    let full_command = if command_args.len() > 1 {
+        format!("{} {}", resolved_str, command_args[1..].join(" "))
+    } else {
+        resolved_str.to_string()
+    };
+
+    // Authorization check — pass full command with arguments so that
+    // argument-level patterns in commands/deny_commands are evaluated.
+    let authz =
+        policy::check_authorization(policy, caller, groups, &config.target_user, &full_command);
 
     match authz {
         AuthzResult::Denied(reason) => {
@@ -579,5 +586,109 @@ require_auth = false
     fn test_target_user_shell_fallback() {
         let shell = target_user_shell("nonexistent_user_xyz_12345");
         assert_eq!(shell, "/bin/sh");
+    }
+
+    // -- Additional API edge cases --
+
+    #[test]
+    fn test_evaluate_empty_command_args() {
+        let policy = test_policy();
+        let config = ShaktiConfig::builder().auth_mode(AuthMode::Skip).build();
+
+        let result = evaluate_with_policy(&config, &policy, "admin", &[], &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_evaluate_custom_max_command_len() {
+        let policy = crate::policy::parse_policy(
+            r#"
+[defaults]
+max_command_len = 20
+
+[[rules]]
+user = "admin"
+commands = []
+"#,
+        )
+        .unwrap();
+        let config = ShaktiConfig::builder().auth_mode(AuthMode::Skip).build();
+
+        // Short command should pass
+        let result =
+            evaluate_with_policy(&config, &policy, "admin", &[], &["/usr/bin/ls".to_string()]);
+        assert!(result.is_ok());
+
+        // Long command should be rejected by the policy's max_command_len
+        let result = evaluate_with_policy(
+            &config,
+            &policy,
+            "admin",
+            &[],
+            &["/usr/bin/very_long_command_name_that_exceeds".to_string()],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_evaluate_interactive_mode_flows_through() {
+        let policy = test_policy();
+        let config = ShaktiConfig::builder()
+            .auth_mode(AuthMode::Interactive)
+            .build();
+
+        // For a NOPASSWD rule, Interactive mode should still succeed
+        let eval = evaluate_with_policy(
+            &config,
+            &policy,
+            "deploy",
+            &[],
+            &["/usr/bin/docker".to_string()],
+        )
+        .unwrap();
+
+        assert!(eval.authorized);
+        assert!(!eval.require_auth);
+    }
+
+    #[test]
+    fn test_evaluate_environment_no_unsafe_vars() {
+        let policy = test_policy();
+        let config = ShaktiConfig::builder().auth_mode(AuthMode::Skip).build();
+
+        let eval = evaluate_with_policy(
+            &config,
+            &policy,
+            "admin",
+            &[],
+            &["/usr/bin/env".to_string()],
+        )
+        .unwrap();
+
+        let keys: std::collections::HashSet<&str> =
+            eval.environment.iter().map(|(k, _)| k.as_str()).collect();
+        for var in crate::env::UNSAFE_ENV_VARS {
+            assert!(
+                !keys.contains(var),
+                "Unsafe var {} in eval environment",
+                var
+            );
+        }
+    }
+
+    #[test]
+    fn test_evaluate_resolved_command_is_absolute() {
+        let policy = test_policy();
+        let config = ShaktiConfig::builder().auth_mode(AuthMode::Skip).build();
+
+        // Pass basename — resolved_command should be an absolute path
+        let eval =
+            evaluate_with_policy(&config, &policy, "admin", &[], &["env".to_string()]).unwrap();
+
+        assert!(
+            eval.resolved_command.is_absolute(),
+            "resolved_command should be absolute, got: {}",
+            eval.resolved_command.display()
+        );
     }
 }

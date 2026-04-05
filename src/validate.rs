@@ -64,31 +64,58 @@ pub fn validate_command(args: &[String], max_len: usize) -> Result<()> {
 
 /// Check if a command matches a pattern.
 ///
+/// The `command` string may contain arguments (e.g., `/usr/bin/systemctl restart nginx`).
+///
 /// Patterns:
-/// - Exact path: `/usr/bin/systemctl` matches only that binary
-/// - Glob-style: `/usr/bin/*` matches any binary in that dir
-/// - Basename: `systemctl` matches any path ending in `systemctl`
 /// - `ALL` or `*`: matches everything
+/// - Exact: `/usr/bin/systemctl restart nginx` matches only that exact string
+/// - Prefix wildcard: `/usr/bin/systemctl restart *` matches any command starting
+///   with `/usr/bin/systemctl restart ` (trailing ` *` acts as argument wildcard)
+/// - Directory glob: `/usr/bin/*` matches any binary path under `/usr/bin/`
+///   (only the binary portion is checked — the part before the first space)
+/// - Basename: `systemctl` matches any path whose binary basename is `systemctl`
 #[must_use]
 pub fn command_matches(command: &str, pattern: &str) -> bool {
     if pattern == "ALL" || pattern == "*" {
         return true;
     }
 
-    let cmd_path = Path::new(command);
-    // Exact match
+    // Exact match (including arguments)
     if command == pattern {
         return true;
     }
 
-    // Glob: pattern ends with /*
-    if let Some(prefix) = pattern.strip_suffix("/*")
-        && let Some(parent) = cmd_path.parent()
-    {
-        return parent == Path::new(prefix);
+    // Prefix wildcard: pattern ends with " *" — match command prefix
+    // e.g., "/usr/bin/systemctl restart *" matches "/usr/bin/systemctl restart nginx"
+    if let Some(prefix) = pattern.strip_suffix(" *") {
+        return command == prefix
+            || (command.len() > prefix.len()
+                && command.as_bytes()[prefix.len()] == b' '
+                && command.starts_with(prefix));
     }
 
-    // Basename match (pattern has no /)
+    // Extract just the binary path (part before first space) for path-level matching.
+    // Avoid allocation — find the space index and slice.
+    let cmd_binary = match command.find(' ') {
+        Some(idx) => &command[..idx],
+        None => command,
+    };
+    let cmd_path = Path::new(cmd_binary);
+
+    // Directory glob: pattern ends with /*
+    if let Some(dir_prefix) = pattern.strip_suffix("/*")
+        && let Some(parent) = cmd_path.parent()
+    {
+        // Handle "/*" → dir_prefix is "" but parent is "/"
+        let expected = if dir_prefix.is_empty() {
+            Path::new("/")
+        } else {
+            Path::new(dir_prefix)
+        };
+        return parent == expected;
+    }
+
+    // Basename match (pattern has no / — matches just the binary name)
     if !pattern.contains('/')
         && let Some(basename) = cmd_path.file_name()
     {
@@ -271,6 +298,155 @@ mod tests {
     #[test]
     fn test_command_matches_no_match() {
         assert!(!command_matches("/usr/bin/rm", "/usr/bin/ls"));
+    }
+
+    // -- Argument-level wildcard matching --
+
+    #[test]
+    fn test_command_matches_arg_wildcard() {
+        assert!(command_matches(
+            "/usr/bin/systemctl restart nginx",
+            "/usr/bin/systemctl restart *"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_arg_wildcard_different_args() {
+        assert!(command_matches(
+            "/usr/bin/systemctl restart sshd",
+            "/usr/bin/systemctl restart *"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_arg_wildcard_no_args() {
+        // Pattern requires at least "restart" argument — bare binary should not match
+        assert!(!command_matches(
+            "/usr/bin/systemctl",
+            "/usr/bin/systemctl restart *"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_arg_wildcard_wrong_subcommand() {
+        assert!(!command_matches(
+            "/usr/bin/systemctl stop nginx",
+            "/usr/bin/systemctl restart *"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_arg_wildcard_exact_prefix() {
+        // Pattern "/usr/bin/systemctl restart *" with command matching just the prefix
+        assert!(command_matches(
+            "/usr/bin/systemctl restart",
+            "/usr/bin/systemctl restart *"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_exact_with_args() {
+        assert!(command_matches(
+            "/usr/bin/systemctl stop firewall",
+            "/usr/bin/systemctl stop firewall"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_exact_with_args_no_match() {
+        assert!(!command_matches(
+            "/usr/bin/systemctl stop nginx",
+            "/usr/bin/systemctl stop firewall"
+        ));
+    }
+
+    #[test]
+    fn test_command_matches_glob_with_args() {
+        // Directory glob should match just the binary part
+        assert!(command_matches("/usr/bin/ls -la", "/usr/bin/*"));
+    }
+
+    #[test]
+    fn test_command_matches_basename_with_args() {
+        assert!(command_matches(
+            "/usr/bin/systemctl restart nginx",
+            "systemctl"
+        ));
+    }
+
+    // -- Command matching edge cases --
+
+    #[test]
+    fn test_command_matches_empty_command_against_all() {
+        assert!(command_matches("", "ALL"));
+        assert!(command_matches("", "*"));
+    }
+
+    #[test]
+    fn test_command_matches_empty_pattern() {
+        assert!(!command_matches("/usr/bin/ls", ""));
+    }
+
+    #[test]
+    fn test_command_matches_root_glob() {
+        assert!(command_matches("/ls", "/*"));
+    }
+
+    #[test]
+    fn test_command_matches_basename_no_parent() {
+        // Bare command name against a directory glob
+        assert!(!command_matches("ls", "/bin/*"));
+    }
+
+    // -- Validate command edge cases --
+
+    #[test]
+    fn test_validate_command_exact_boundary_len() {
+        // Command at exactly max_len should pass
+        let cmd = "a".repeat(10);
+        let args = vec![cmd];
+        // Total = 10 (command) + 1 (args.len()) = 11
+        assert!(validate_command(&args, 11).is_ok());
+        assert!(validate_command(&args, 10).is_err());
+    }
+
+    #[test]
+    fn test_validate_command_pure_metachar() {
+        assert!(validate_command(&["|".to_string()], 4096).is_err());
+        assert!(validate_command(&["$".to_string()], 4096).is_err());
+        assert!(validate_command(&[";".to_string()], 4096).is_err());
+    }
+
+    #[test]
+    fn test_validate_command_unicode_accepted() {
+        // Unicode command name without metacharacters should be accepted
+        assert!(validate_command(&["/usr/bin/tëst".to_string()], 4096).is_ok());
+    }
+
+    #[test]
+    fn test_validate_command_unicode_with_metachar() {
+        // Unicode + shell metachar should be rejected
+        assert!(validate_command(&["/usr/bin/tëst;evil".to_string()], 4096).is_err());
+    }
+
+    // -- Username edge cases --
+
+    #[test]
+    fn test_validate_username_very_long() {
+        // Very long username should be accepted (no length limit in current impl)
+        let long_name = "a".repeat(10000);
+        assert!(validate_username(&long_name).is_ok());
+    }
+
+    #[test]
+    fn test_validate_username_unicode() {
+        // Unicode names without / or null should be accepted
+        assert!(validate_username("ünïcödë").is_ok());
+    }
+
+    #[test]
+    fn test_validate_username_null_in_middle() {
+        assert!(validate_username("alice\0").is_err());
     }
 
     // -- Command resolution --

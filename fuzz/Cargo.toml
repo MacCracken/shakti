@@ -1,0 +1,43 @@
+[package]
+name = "shakti-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.shakti]
+path = ".."
+
+[[bin]]
+name = "fuzz_parse_policy"
+path = "fuzz_targets/fuzz_parse_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_validate_command"
+path = "fuzz_targets/fuzz_validate_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_command_matches"
+path = "fuzz_targets/fuzz_command_matches.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_validate_username"
+path = "fuzz_targets/fuzz_validate_username.rs"
+test = false
+doc = false
+bench = false

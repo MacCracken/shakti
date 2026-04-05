@@ -10,8 +10,8 @@ use zeroize::Zeroize;
 
 use shakti::{
     AuditAction, AuthzResult, DEFAULT_POLICY_PATH, MAX_AUTH_ATTEMPTS, audit_log, authenticate,
-    check_authorization, check_timestamp, init_tracing, invalidate_timestamp, load_policy,
-    resolve_command, sanitize_environment, update_timestamp, validate_command,
+    check_authorization, check_timestamp, init_tracing, invalidate_timestamp, lint_policy,
+    load_policy, resolve_command, sanitize_environment, update_timestamp, validate_command,
 };
 
 // ---------------------------------------------------------------------------
@@ -164,29 +164,30 @@ fn get_caller_username() -> Result<String> {
 }
 
 fn get_user_groups(username: &str) -> Vec<String> {
-    let content = match std::fs::read_to_string("/etc/group") {
+    // Use getgrouplist(3) via nix — this queries NSS (including LDAP/sssd),
+    // not just /etc/group. This matches what sudo and other privilege tools do.
+    let user = match nix::unistd::User::from_name(username) {
+        Ok(Some(u)) => u,
+        _ => return Vec::new(),
+    };
+
+    let cname = match std::ffi::CString::new(username) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let mut groups = Vec::new();
-    for line in content.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 4 {
-            let group_name = fields[0];
-            let members: Vec<&str> = fields[3].split(',').collect();
-            if members.iter().any(|m| m.trim() == username) {
-                groups.push(group_name.to_string());
-            }
-        }
-    }
+    let gids = match nix::unistd::getgrouplist(&cname, user.gid) {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
 
-    // Also add primary group
-    if let Ok(Some(user)) = nix::unistd::User::from_name(username)
-        && let Ok(Some(group)) = nix::unistd::Group::from_gid(user.gid)
-        && !groups.contains(&group.name)
-    {
-        groups.push(group.name);
+    let mut groups = Vec::new();
+    for gid in gids {
+        if let Ok(Some(group)) = nix::unistd::Group::from_gid(gid)
+            && !groups.contains(&group.name)
+        {
+            groups.push(group.name);
+        }
     }
 
     groups
@@ -212,6 +213,7 @@ struct CliArgs {
     policy_path: PathBuf,
     invalidate: bool,
     list: bool,
+    check: bool,
     command: Vec<String>,
 }
 
@@ -222,6 +224,7 @@ fn parse_args() -> Result<CliArgs> {
     let mut policy_path = PathBuf::from(DEFAULT_POLICY_PATH);
     let mut invalidate = false;
     let mut list = false;
+    let mut check = false;
     let mut command = Vec::new();
     let mut i = 0;
 
@@ -246,6 +249,9 @@ fn parse_args() -> Result<CliArgs> {
             }
             "-l" | "--list" => {
                 list = true;
+            }
+            "-c" | "--check" => {
+                check = true;
             }
             "-h" | "--help" => {
                 print_usage();
@@ -275,6 +281,7 @@ fn parse_args() -> Result<CliArgs> {
         policy_path,
         invalidate,
         list,
+        check,
         command,
     })
 }
@@ -290,13 +297,16 @@ Options:
   -p, --policy FILE    Use alternate policy file (default: {})
   -k, --invalidate     Invalidate cached credentials
   -l, --list           List allowed commands for current user
+  -c, --check          Lint the policy file for errors and warnings
   -h, --help           Show this help message
   -V, --version        Show version
 
 Examples:
   shakti systemctl restart llm-gateway
   shakti -u postgres psql
-  shakti -k",
+  shakti -k
+  shakti --check
+  shakti -c -p /etc/agnos/custom.toml",
         DEFAULT_POLICY_PATH
     );
 }
@@ -357,6 +367,57 @@ fn list_permissions(policy: &shakti::SudoPolicy, username: &str, groups: &[Strin
 }
 
 // ---------------------------------------------------------------------------
+// Policy check mode
+// ---------------------------------------------------------------------------
+
+fn check_policy(policy: &shakti::SudoPolicy) -> Result<()> {
+    let warnings = lint_policy(policy);
+
+    println!(
+        "Policy: {} rules, timestamp_ttl={}s, require_auth={}",
+        policy.rules.len(),
+        policy.defaults.timestamp_ttl,
+        policy.defaults.require_auth
+    );
+    println!();
+
+    if warnings.is_empty() {
+        println!("No issues found.");
+        return Ok(());
+    }
+
+    let mut errors = 0u32;
+    let mut warns = 0u32;
+
+    for w in &warnings {
+        let prefix = match w.severity {
+            "error" => {
+                errors += 1;
+                "ERROR"
+            }
+            _ => {
+                warns += 1;
+                "WARN"
+            }
+        };
+
+        match w.rule_index {
+            Some(i) => println!("  [{}] rule[{}]: {}", prefix, i, w.message),
+            None => println!("  [{}] {}", prefix, w.message),
+        }
+    }
+
+    println!();
+    println!("Summary: {} error(s), {} warning(s)", errors, warns);
+
+    if errors > 0 {
+        bail!("Policy has errors — fix before use");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -388,6 +449,11 @@ fn run() -> Result<()> {
     // Load policy
     let policy = load_policy(&cli.policy_path)?;
 
+    // Handle policy check mode
+    if cli.check {
+        return check_policy(&policy);
+    }
+
     // Handle list mode
     if cli.list {
         list_permissions(&policy, &caller, &groups);
@@ -405,16 +471,20 @@ fn run() -> Result<()> {
 
     // Resolve command to absolute path
     let resolved = resolve_command(&cli.command[0])?;
-    let cmd_str = format!("{} {}", resolved.display(), cli.command[1..].join(" "));
+    let resolved_str = resolved.to_str().ok_or_else(|| {
+        anyhow::anyhow!("Command path is not valid UTF-8: {}", resolved.display())
+    })?;
 
-    // Authorization check
-    let authz = check_authorization(
-        &policy,
-        &caller,
-        &groups,
-        &cli.target_user,
-        resolved.to_str().unwrap_or(""),
-    );
+    // Build full command string with arguments for authorization and audit
+    let cmd_str = if cli.command.len() > 1 {
+        format!("{} {}", resolved_str, cli.command[1..].join(" "))
+    } else {
+        resolved_str.to_string()
+    };
+
+    // Authorization check — pass full command with arguments so that
+    // argument-level patterns in commands/deny_commands are evaluated.
+    let authz = check_authorization(&policy, &caller, &groups, &cli.target_user, &cmd_str);
 
     match authz {
         AuthzResult::Denied(reason) => {
@@ -497,6 +567,10 @@ fn run() -> Result<()> {
                 cmd.env(k, v);
             }
 
+            // Prepare target username as CString for initgroups (before pre_exec closure)
+            let target_cname = std::ffi::CString::new(cli.target_user.as_bytes())
+                .map_err(|_| anyhow::anyhow!("Target username contains null byte"))?;
+
             // Set uid/gid and close leaked fds before exec
             unsafe {
                 cmd.pre_exec(move || {
@@ -515,12 +589,15 @@ fn run() -> Result<()> {
                         }
                     }
 
-                    // Set supplementary groups
-                    nix::unistd::setgroups(&[nix::unistd::Gid::from_raw(target_gid)]).map_err(
-                        |e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e),
-                    )?;
+                    // Set all supplementary groups for the target user via initgroups(3).
+                    // This queries NSS (including LDAP/sssd) for the full group list,
+                    // unlike the previous setgroups() which only set the primary GID.
+                    let target_gid = nix::unistd::Gid::from_raw(target_gid);
+                    nix::unistd::initgroups(&target_cname, target_gid).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
+                    })?;
                     // Set GID first (must be done before setuid)
-                    nix::unistd::setgid(nix::unistd::Gid::from_raw(target_gid)).map_err(|e| {
+                    nix::unistd::setgid(target_gid).map_err(|e| {
                         std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
                     })?;
                     // Set UID last
