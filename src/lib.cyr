@@ -75,6 +75,7 @@ fn default_timestamp_dir() { return "/var/run/agnos/sudo"; }
 
 include "src/validate.cyr"
 include "src/env.cyr"
+include "src/identity.cyr"
 include "src/timestamp.cyr"
 include "src/audit.cyr"
 include "src/auth.cyr"

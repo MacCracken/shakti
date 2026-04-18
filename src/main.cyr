@@ -38,132 +38,8 @@ var TERMIOS_SIZE = 64;
 var ECHO_FLAG = 8;        # 0o10
 
 # ── Caller identity ────────────────────
-
-# Look up a user's UID / primary GID / username from /etc/passwd.
-# Writes results through the provided output pointers.
-# Returns 1 on success, 0 on not found.
-fn _lookup_uid(uid, out_name_ptr, out_gid_ptr) {
-    var buf = alloc(65536);
-    var n = file_read_all("/etc/passwd", buf, 65536);
-    if (n <= 0) { return 0; }
-    var pos = 0;
-    while (pos < n) {
-        var line_start = pos;
-        while (pos < n) {
-            if (load8(buf + pos) == 10) { break; }
-            pos = pos + 1;
-        }
-        # Parse: name:x:uid:gid:gecos:home:shell
-        var nend = line_start;
-        while (nend < pos) {
-            if (load8(buf + nend) == 58) { break; }
-            nend = nend + 1;
-        }
-        # Skip x field
-        var p = nend + 1;
-        while (p < pos) {
-            if (load8(buf + p) == 58) { p = p + 1; break; }
-            p = p + 1;
-        }
-        # uid field
-        var uid_start = p;
-        while (p < pos) {
-            if (load8(buf + p) == 58) { break; }
-            p = p + 1;
-        }
-        # Parse uid
-        var parsed_uid = 0;
-        var q = uid_start;
-        while (q < p) {
-            var c = load8(buf + q);
-            if (c < 48 || c > 57) { parsed_uid = 0 - 1; q = p; }
-            else { parsed_uid = parsed_uid * 10 + (c - 48); }
-            q = q + 1;
-        }
-        if (parsed_uid == uid) {
-            # Extract name
-            var name = alloc(nend - line_start + 1);
-            memcpy(name, buf + line_start, nend - line_start);
-            store8(name + nend - line_start, 0);
-            store64(out_name_ptr, name);
-            # Parse gid field
-            p = p + 1;
-            var gid_start = p;
-            while (p < pos) {
-                if (load8(buf + p) == 58) { break; }
-                p = p + 1;
-            }
-            var parsed_gid = 0;
-            var g = gid_start;
-            while (g < p) {
-                var c2 = load8(buf + g);
-                parsed_gid = parsed_gid * 10 + (c2 - 48);
-                g = g + 1;
-            }
-            store64(out_gid_ptr, parsed_gid);
-            return 1;
-        }
-        pos = pos + 1;
-    }
-    return 0;
-}
-
-# Resolve all groups the given username belongs to (by scanning /etc/group).
-# Returns vec<cstr>.
-fn _lookup_groups(username) {
-    var groups = vec_new();
-    var buf = alloc(65536);
-    var n = file_read_all("/etc/group", buf, 65536);
-    if (n <= 0) { return groups; }
-    var ulen = strlen(username);
-    var pos = 0;
-    while (pos < n) {
-        var line_start = pos;
-        while (pos < n) {
-            if (load8(buf + pos) == 10) { break; }
-            pos = pos + 1;
-        }
-        # Line: group:x:gid:members
-        var nend = line_start;
-        while (nend < pos) {
-            if (load8(buf + nend) == 58) { break; }
-            nend = nend + 1;
-        }
-        # Skip to 4th field (members)
-        var colons = 0;
-        var p = line_start;
-        while (p < pos) {
-            if (load8(buf + p) == 58) {
-                colons = colons + 1;
-                if (colons == 3) { p = p + 1; break; }
-            }
-            p = p + 1;
-        }
-        # Scan members, comma-separated
-        var mstart = p;
-        while (p <= pos) {
-            var at_sep = 0;
-            if (p == pos) { at_sep = 1; }
-            elif (load8(buf + p) == 44) { at_sep = 1; }
-            if (at_sep == 1) {
-                var mlen = p - mstart;
-                if (mlen == ulen) {
-                    if (memeq(buf + mstart, username, ulen) == 1) {
-                        # Capture group name
-                        var gname = alloc(nend - line_start + 1);
-                        memcpy(gname, buf + line_start, nend - line_start);
-                        store8(gname + nend - line_start, 0);
-                        vec_push(groups, gname);
-                    }
-                }
-                mstart = p + 1;
-            }
-            p = p + 1;
-        }
-        pos = pos + 1;
-    }
-    return groups;
-}
+# Lookups live in src/identity.cyr (identity_lookup_uid /
+# identity_lookup_user / identity_lookup_groups / identity_lookup_gids).
 
 # ── Signal masking ────────────────────
 
@@ -474,12 +350,20 @@ fn _check_policy(policy) {
 
 # ── exec target command ────────────────────
 
-fn _exec_target(resolved, argv_vec, env_vec, target_uid, target_gid) {
+fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid) {
     # Close fds > stderr to prevent leaking inherited fds to child
     syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # close_range is available on modern kernels; ignore error
 
+    # Populate supplementary groups for the target user (initgroups
+    # parity). Always at least the primary GID; /etc/group entries
+    # naming target_user are appended, deduplicated.
+    # MAX_SUPP_GIDS == 256 — well above any realistic per-user count
+    # while keeping the on-stack array small (1 KiB).
+    var supp_gids[1024];
+    var ngids = identity_lookup_gids(target_user, target_gid, &supp_gids, 256);
+
     # setgroups → setgid → setuid (must be in this order)
-    sys_setgroups(0, 0);
+    sys_setgroups(ngids, &supp_gids);
     sys_setgid(target_gid);
     sys_setuid(target_uid);
 
@@ -529,12 +413,12 @@ fn run() {
     store64(name_ptr, 0);
     var gid_ptr = alloc(8);
     store64(gid_ptr, 0);
-    if (_lookup_uid(caller_uid, name_ptr, gid_ptr) == 0) {
+    if (identity_lookup_uid(caller_uid, name_ptr, gid_ptr) <= 0) {
         file_write(2, "shakti: cannot resolve caller username\n", 39);
         return 1;
     }
     var caller = load64(name_ptr);
-    var groups = _lookup_groups(caller);
+    var groups = identity_lookup_groups(caller);
 
     # Invalidate mode
     if (load64(cli + CLI_INVALIDATE) == 1) {
@@ -615,49 +499,20 @@ fn run() {
         eval_resolved_command(eval), 1, "authorized");
 
     # Resolve target uid / gid
-    var tbuf = alloc(65536);
-    var tbn = file_read_all("/etc/passwd", tbuf, 65536);
-    var target_uid = 0;
-    var target_gid = 0;
-    var tlen = strlen(target);
-    var pos = 0;
-    while (pos < tbn) {
-        if (pos + tlen < tbn) {
-            if (memeq(tbuf + pos, target, tlen) == 1) {
-                if (load8(tbuf + pos + tlen) == 58) {
-                    # Skip name:x:
-                    var p = pos + tlen + 1;
-                    while (p < tbn) {
-                        if (load8(tbuf + p) == 58) { p = p + 1; break; }
-                        p = p + 1;
-                    }
-                    # UID
-                    while (p < tbn) {
-                        var c = load8(tbuf + p);
-                        if (c == 58) { break; }
-                        target_uid = target_uid * 10 + (c - 48);
-                        p = p + 1;
-                    }
-                    p = p + 1;
-                    while (p < tbn) {
-                        var c2 = load8(tbuf + p);
-                        if (c2 == 58) { break; }
-                        target_gid = target_gid * 10 + (c2 - 48);
-                        p = p + 1;
-                    }
-                    pos = tbn;
-                }
-            }
-        }
-        while (pos < tbn) {
-            if (load8(tbuf + pos) == 10) { pos = pos + 1; break; }
-            pos = pos + 1;
-        }
+    var t_uid_ptr = alloc(8);
+    var t_gid_ptr = alloc(8);
+    store64(t_uid_ptr, 0);
+    store64(t_gid_ptr, 0);
+    if (identity_lookup_user(target, t_uid_ptr, t_gid_ptr) <= 0) {
+        file_write(2, "shakti: cannot resolve target user\n", 35);
+        return 1;
     }
+    var target_uid = load64(t_uid_ptr);
+    var target_gid = load64(t_gid_ptr);
 
     _exec_target(eval_resolved_command(eval),
         load64(cli + CLI_ARGV), eval_environment(eval),
-        target_uid, target_gid);
+        target, target_uid, target_gid);
     return 127;
 }
 

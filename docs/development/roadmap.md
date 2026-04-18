@@ -40,6 +40,30 @@
 - [x] Security-critical test coverage: 130 tests (up from 77)
 - [x] Architecture documentation, 4 ADRs, dependency watch tracking
 
+## Cyrius port regressions (close before v1.0)
+
+Tracked here to keep them visible against the v1.0 criteria below.
+Each is a feature present in the Rust 0.1.x build that did not survive
+the port to Cyrius 5.2.1 in 0.2.0.
+
+- [x] `initgroups` parity — populate target user's supplementary
+      groups before privilege drop instead of `setgroups(0, NULL)`
+      (closed via `src/identity.cyr` / `identity_lookup_gids`).
+- [ ] NSS group resolution via libc `getgrouplist(3)` (restore
+      LDAP/sssd support; replaces the `/etc/group` parsing path
+      in `identity_lookup_groups` / `identity_lookup_gids` behind
+      the same API).
+      **Blocked on cyrius v5.3.1** — `dynlib_open` resolves libc
+      symbols but calling NSS-using functions SIGSEGVs because
+      `lib/dynlib.cyr` skips IRELATIVE relocations and init arrays
+      (the CPU-features struct + libc constructors aren't run).
+      Tracked in cyrius `docs/development/roadmap.md` under v5.3.1.
+      Probe verified: `getpid` works, `getgrouplist` segfaults.
+- [ ] Real PAM authentication via `dlopen("libpam.so.0")` and a
+      conversation callback (replaces the `/usr/bin/su` fallback
+      currently used unconditionally in `src/auth.cyr`).
+      **Blocked on cyrius v5.3.1** — same dynlib limitation as NSS.
+
 ## Future (v0.3+)
 
 - Session logging / I/O recording

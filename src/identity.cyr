@@ -1,0 +1,224 @@
+# identity.cyr — user/group identity lookup
+#
+# Local-files identity backend: parses /etc/passwd and /etc/group.
+# This is the third /etc parser to land in main.cyr (uid lookup, group
+# lookup for caller, target uid lookup), so it earns its own module
+# with shared field-walking helpers.
+#
+# Restoring NSS resolution (LDAP/sssd) for remote identity stores is
+# tracked separately and will replace these implementations behind
+# the same public API via a libc binding.
+
+# Maximum bytes read from /etc/passwd and /etc/group. Real systems
+# rarely exceed a few KB locally; remote NSS will not pass through
+# these paths.
+var IDENTITY_BUF_MAX = 65536;
+
+# ── Internal: parse a decimal integer from buf[start..end) ──
+# Returns -1 on any non-digit byte. Empty range returns 0.
+fn _identity_parse_uint(buf, start, end) {
+    var v = 0;
+    var p = start;
+    while (p < end) {
+        var c = load8(buf + p);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        p = p + 1;
+    }
+    return v;
+}
+
+# Find the next byte equal to `needle` in buf[start..end).
+# Returns end if not found.
+fn _identity_find_byte(buf, start, end, needle) {
+    var p = start;
+    while (p < end) {
+        if (load8(buf + p) == needle) { return p; }
+        p = p + 1;
+    }
+    return end;
+}
+
+# Internal: scan group members field (comma-separated) for `username`.
+# Returns 1 if found, 0 otherwise.
+fn _identity_member_match(buf, mstart, line_end, username, ulen) {
+    var p = mstart;
+    while (p <= line_end) {
+        var at_sep = 0;
+        if (p == line_end) { at_sep = 1; }
+        elif (load8(buf + p) == 44) { at_sep = 1; }
+        if (at_sep == 1) {
+            if (p - mstart == ulen) {
+                if (memeq(buf + mstart, username, ulen) == 1) { return 1; }
+            }
+            mstart = p + 1;
+        }
+        p = p + 1;
+    }
+    return 0;
+}
+
+# ── Public: look up a passwd entry by uid ──
+# On success, writes a freshly-allocated null-terminated name into
+# *out_name_ptr and the primary GID into *out_gid_ptr; returns 1.
+# Returns 0 on not-found, negative SHK_ERR_* on I/O error.
+fn identity_lookup_uid(uid, out_name_ptr, out_gid_ptr) {
+    var buf = alloc(IDENTITY_BUF_MAX);
+    var n = file_read_all("/etc/passwd", buf, IDENTITY_BUF_MAX);
+    if (n < 0) { return 0 - SHK_ERR_IO; }
+    if (n == 0) { return 0; }
+
+    var pos = 0;
+    while (pos < n) {
+        var line_end = _identity_find_byte(buf, pos, n, 10);
+        var c1 = _identity_find_byte(buf, pos, line_end, 58);
+        if (c1 == line_end) { pos = line_end + 1; continue; }
+        var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
+        if (c2 == line_end) { pos = line_end + 1; continue; }
+        var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
+        if (c3 == line_end) { pos = line_end + 1; continue; }
+
+        var parsed_uid = _identity_parse_uint(buf, c2 + 1, c3);
+        if (parsed_uid == uid) {
+            var c4 = _identity_find_byte(buf, c3 + 1, line_end, 58);
+            var parsed_gid = _identity_parse_uint(buf, c3 + 1, c4);
+            if (parsed_gid < 0) { return 0; }
+            var nlen = c1 - pos;
+            var name = alloc(nlen + 1);
+            memcpy(name, buf + pos, nlen);
+            store8(name + nlen, 0);
+            store64(out_name_ptr, name);
+            store64(out_gid_ptr, parsed_gid);
+            return 1;
+        }
+        pos = line_end + 1;
+    }
+    return 0;
+}
+
+# ── Public: look up a passwd entry by name ──
+# On success, writes uid into *out_uid_ptr and primary GID into
+# *out_gid_ptr; returns 1. Returns 0 on not-found, negative
+# SHK_ERR_* on I/O error.
+fn identity_lookup_user(name, out_uid_ptr, out_gid_ptr) {
+    if (name == 0) { return 0; }
+    var nlen = strlen(name);
+    if (nlen == 0) { return 0; }
+
+    var buf = alloc(IDENTITY_BUF_MAX);
+    var n = file_read_all("/etc/passwd", buf, IDENTITY_BUF_MAX);
+    if (n < 0) { return 0 - SHK_ERR_IO; }
+    if (n == 0) { return 0; }
+
+    var pos = 0;
+    while (pos < n) {
+        var line_end = _identity_find_byte(buf, pos, n, 10);
+        var c1 = _identity_find_byte(buf, pos, line_end, 58);
+        if (c1 - pos == nlen) {
+            if (memeq(buf + pos, name, nlen) == 1) {
+                var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
+                if (c2 == line_end) { return 0; }
+                var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
+                if (c3 == line_end) { return 0; }
+                var parsed_uid = _identity_parse_uint(buf, c2 + 1, c3);
+                if (parsed_uid < 0) { return 0; }
+                var c4 = _identity_find_byte(buf, c3 + 1, line_end, 58);
+                var parsed_gid = _identity_parse_uint(buf, c3 + 1, c4);
+                if (parsed_gid < 0) { return 0; }
+                store64(out_uid_ptr, parsed_uid);
+                store64(out_gid_ptr, parsed_gid);
+                return 1;
+            }
+        }
+        pos = line_end + 1;
+    }
+    return 0;
+}
+
+# ── Public: collect group NAMES the user belongs to ──
+# Returns vec<cstr>. Used by policy evaluation to match per-group rules.
+fn identity_lookup_groups(username) {
+    var groups = vec_new();
+    if (username == 0) { return groups; }
+    var ulen = strlen(username);
+    if (ulen == 0) { return groups; }
+
+    var buf = alloc(IDENTITY_BUF_MAX);
+    var n = file_read_all("/etc/group", buf, IDENTITY_BUF_MAX);
+    if (n <= 0) { return groups; }
+
+    var pos = 0;
+    while (pos < n) {
+        var line_end = _identity_find_byte(buf, pos, n, 10);
+        var c1 = _identity_find_byte(buf, pos, line_end, 58);
+        if (c1 == line_end) { pos = line_end + 1; continue; }
+        var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
+        if (c2 == line_end) { pos = line_end + 1; continue; }
+        var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
+        if (c3 == line_end) { pos = line_end + 1; continue; }
+
+        if (_identity_member_match(buf, c3 + 1, line_end, username, ulen) == 1) {
+            var nlen = c1 - pos;
+            var gname = alloc(nlen + 1);
+            memcpy(gname, buf + pos, nlen);
+            store8(gname + nlen, 0);
+            vec_push(groups, gname);
+        }
+        pos = line_end + 1;
+    }
+    return groups;
+}
+
+# ── Public: collect supplementary GIDs for setgroups(2) ──
+# Mirrors initgroups(3) semantics: the resulting list always begins
+# with primary_gid, followed by each /etc/group entry where `username`
+# appears as a member, with duplicates removed.
+#
+# Writes u32 GIDs into out_buf (caller-allocated, max_count * 4 bytes).
+# Returns the number of GIDs written. Always returns at least 1
+# (primary_gid) when max_count >= 1, even if /etc/group is unreadable
+# — clearing supplementary groups silently is never the intended fallback.
+fn identity_lookup_gids(username, primary_gid, out_buf, max_count) {
+    if (max_count <= 0) { return 0; }
+
+    store32(out_buf, primary_gid);
+    var count = 1;
+
+    if (username == 0) { return count; }
+    var ulen = strlen(username);
+    if (ulen == 0) { return count; }
+
+    var buf = alloc(IDENTITY_BUF_MAX);
+    var n = file_read_all("/etc/group", buf, IDENTITY_BUF_MAX);
+    if (n <= 0) { return count; }
+
+    var pos = 0;
+    while (pos < n) {
+        var line_end = _identity_find_byte(buf, pos, n, 10);
+        var c1 = _identity_find_byte(buf, pos, line_end, 58);
+        if (c1 == line_end) { pos = line_end + 1; continue; }
+        var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
+        if (c2 == line_end) { pos = line_end + 1; continue; }
+        var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
+        if (c3 == line_end) { pos = line_end + 1; continue; }
+
+        var gid_val = _identity_parse_uint(buf, c2 + 1, c3);
+        if (gid_val < 0) { pos = line_end + 1; continue; }
+
+        if (_identity_member_match(buf, c3 + 1, line_end, username, ulen) == 1) {
+            var dup = 0;
+            var i = 0;
+            while (i < count) {
+                if (load32(out_buf + i * 4) == gid_val) { dup = 1; i = count; }
+                else { i = i + 1; }
+            }
+            if (dup == 0) {
+                if (count >= max_count) { return count; }
+                store32(out_buf + count * 4, gid_val);
+                count = count + 1;
+            }
+        }
+        pos = line_end + 1;
+    }
+    return count;
+}

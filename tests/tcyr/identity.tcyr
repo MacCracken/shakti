@@ -1,0 +1,147 @@
+# identity.tcyr — tests for src/identity.cyr
+#
+# Tests run against the live system's /etc/passwd and /etc/group.
+# Anchored on POSIX-mandated entries (uid/gid 0 = "root") so they
+# pass on any reasonable Linux host.
+
+include "src/lib.cyr"
+
+# ── identity_lookup_uid ────────────────────
+
+fn t_lookup_uid_root() {
+    var name_ptr = alloc(8);
+    store64(name_ptr, 0);
+    var gid_ptr = alloc(8);
+    store64(gid_ptr, 0);
+    var r = identity_lookup_uid(0, name_ptr, gid_ptr);
+    assert_eq(r, 1, "uid 0 found");
+    assert_eq(streq(load64(name_ptr), "root"), 1, "uid 0 name is root");
+    assert_eq(load64(gid_ptr), 0, "uid 0 primary gid is 0");
+}
+
+fn t_lookup_uid_missing() {
+    var name_ptr = alloc(8);
+    store64(name_ptr, 0);
+    var gid_ptr = alloc(8);
+    store64(gid_ptr, 0);
+    # uid 999999 is unlikely to exist on a real host
+    var r = identity_lookup_uid(999999, name_ptr, gid_ptr);
+    assert_eq(r, 0, "missing uid returns 0");
+}
+
+# ── identity_lookup_user ────────────────────
+
+fn t_lookup_user_root() {
+    var uid_ptr = alloc(8);
+    store64(uid_ptr, 12345);  # poison
+    var gid_ptr = alloc(8);
+    store64(gid_ptr, 12345);
+    var r = identity_lookup_user("root", uid_ptr, gid_ptr);
+    assert_eq(r, 1, "user 'root' found");
+    assert_eq(load64(uid_ptr), 0, "root uid is 0");
+    assert_eq(load64(gid_ptr), 0, "root primary gid is 0");
+}
+
+fn t_lookup_user_empty() {
+    var uid_ptr = alloc(8);
+    var gid_ptr = alloc(8);
+    var r = identity_lookup_user("", uid_ptr, gid_ptr);
+    assert_eq(r, 0, "empty name returns 0");
+}
+
+fn t_lookup_user_missing() {
+    var uid_ptr = alloc(8);
+    var gid_ptr = alloc(8);
+    var r = identity_lookup_user("__definitely_not_a_user__", uid_ptr, gid_ptr);
+    assert_eq(r, 0, "missing user returns 0");
+}
+
+fn t_lookup_user_substring_safety() {
+    # If a real user "root" exists, a name that is a strict prefix
+    # ("roo") must NOT match the "root" line. This guards against
+    # the colon-anchored prefix-match logic regressing.
+    var uid_ptr = alloc(8);
+    var gid_ptr = alloc(8);
+    var r = identity_lookup_user("roo", uid_ptr, gid_ptr);
+    assert_eq(r, 0, "'roo' must not match 'root:' line");
+}
+
+# ── identity_lookup_groups ────────────────────
+
+fn t_lookup_groups_root_includes_root() {
+    # On every Linux host with /etc/group, root is listed as a member
+    # of group "root" (and typically a few admin groups).
+    var groups = identity_lookup_groups("root");
+    var found_root = 0;
+    var i = 0;
+    while (i < vec_len(groups)) {
+        if (streq(vec_get(groups, i), "root") == 1) { found_root = 1; }
+        i = i + 1;
+    }
+    assert_eq(found_root, 1, "root user is a member of group root");
+}
+
+fn t_lookup_groups_empty_user() {
+    var groups = identity_lookup_groups("");
+    assert_eq(vec_len(groups), 0, "empty username yields empty group vec");
+}
+
+# ── identity_lookup_gids ────────────────────
+
+fn t_lookup_gids_root_primary_first() {
+    var buf = alloc(1024);
+    var n = identity_lookup_gids("root", 0, buf, 256);
+    # Always at least primary
+    assert_eq(n >= 1, 1, "at least primary gid");
+    assert_eq(load32(buf), 0, "primary gid (0) is first entry");
+}
+
+fn t_lookup_gids_dedup_primary() {
+    # root is in group root (gid 0). Pass primary_gid = 0 — gid 0
+    # must NOT be appended a second time.
+    var buf = alloc(1024);
+    var n = identity_lookup_gids("root", 0, buf, 256);
+    var zero_count = 0;
+    var i = 0;
+    while (i < n) {
+        if (load32(buf + i * 4) == 0) { zero_count = zero_count + 1; }
+        i = i + 1;
+    }
+    assert_eq(zero_count, 1, "primary gid is not duplicated by /etc/group entry");
+}
+
+fn t_lookup_gids_zero_max() {
+    var buf = alloc(8);
+    var n = identity_lookup_gids("root", 0, buf, 0);
+    assert_eq(n, 0, "max_count==0 writes nothing");
+}
+
+fn t_lookup_gids_missing_user_just_primary() {
+    var buf = alloc(1024);
+    var n = identity_lookup_gids("__definitely_not_a_user__", 99, buf, 256);
+    assert_eq(n, 1, "missing user yields primary only");
+    assert_eq(load32(buf), 99, "primary gid stored correctly");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("identity lookups");
+    t_lookup_uid_root();
+    t_lookup_uid_missing();
+    t_lookup_user_root();
+    t_lookup_user_empty();
+    t_lookup_user_missing();
+    t_lookup_user_substring_safety();
+    t_lookup_groups_root_includes_root();
+    t_lookup_groups_empty_user();
+    t_lookup_gids_root_primary_first();
+    t_lookup_gids_dedup_primary();
+    t_lookup_gids_zero_max();
+    t_lookup_gids_missing_user_just_primary();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

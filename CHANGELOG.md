@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `src/identity.cyr` — local-files identity backend extracted from
+  `main.cyr`. Public API: `identity_lookup_uid`,
+  `identity_lookup_user`, `identity_lookup_groups`,
+  `identity_lookup_gids`. The previous inline parsers in `main.cyr`
+  (uid lookup, group lookup, target uid lookup) are removed in
+  favour of this module.
+- `tests/tcyr/identity.tcyr` — 12 cases covering uid/name lookup,
+  missing-user fallthrough, substring-safety on colon-anchored
+  matches, primary-gid-first ordering, and primary-vs-supp dedup.
+
+### Security
+
+- **Supplementary groups regression closed**: `_exec_target` no
+  longer calls `setgroups(0, NULL)` before dropping privileges.
+  It now populates the target user's supplementary group list via
+  `identity_lookup_gids` (initgroups(3) parity using `/etc/group`),
+  matching the rust-old build with the `pam` feature disabled.
+  LDAP/sssd resolution is still a known gap and remains tracked
+  for the NSS-via-libc bite.
+
 ## [0.2.0] - 2026-04-17
 
 ### Changed
