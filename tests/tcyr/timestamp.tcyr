@@ -1,0 +1,89 @@
+# timestamp.tcyr — tests for src/timestamp.cyr
+# Mirrors rust-old/src/timestamp.rs #[test] cases. Most security checks
+# require root; those tests exit early when run as non-root.
+
+include "src/lib.cyr"
+
+# ── timestamp_path ────────────────────
+
+fn t_path_includes_user() {
+    var p = timestamp_path("alice");
+    # Path must contain "/alice" somewhere (filename component is alice or alice:<tty>)
+    var plen = strlen(p);
+    var found = 0;
+    var i = 0;
+    while (i + 6 <= plen) {
+        if (memeq(p + i, "/alice", 6) == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "timestamp path contains /alice");
+}
+
+fn t_path_starts_with_dir() {
+    var p = timestamp_path("bob");
+    var dir = default_timestamp_dir();
+    var dl = strlen(dir);
+    assert_eq(memeq(p, dir, dl), 1, "path starts with timestamp dir");
+}
+
+# ── check_timestamp ────────────────────
+
+fn t_check_nonexistent_user() {
+    var ok = check_timestamp("nonexistent_user_xyz_99999", 300);
+    assert_eq(ok, 0, "nonexistent user is not valid");
+}
+
+fn t_check_zero_ttl_fresh() {
+    # Even a just-modified file is expired at ttl=0.
+    # Without root we can't create a timestamp; just assert the function
+    # returns 0 for a missing file with zero TTL.
+    var ok = check_timestamp("nonexistent_zero_ttl", 0);
+    assert_eq(ok, 0, "zero TTL on missing file");
+}
+
+# ── update_timestamp / invalidate_timestamp (security gates) ────────────────────
+
+fn t_update_rejects_bad_username() {
+    assert_eq(update_timestamp("../evil"), SHK_ERR_PATH_TRAVERSAL, "../ rejected");
+    assert_eq(update_timestamp(".."), SHK_ERR_PATH_TRAVERSAL, ".. rejected");
+    assert_eq(update_timestamp("."), SHK_ERR_PATH_TRAVERSAL, ". rejected");
+    assert_eq(update_timestamp("user/name"), SHK_ERR_PATH_TRAVERSAL, "slash rejected");
+    assert_eq(update_timestamp(""), SHK_ERR_EMPTY_USER, "empty rejected");
+}
+
+fn t_invalidate_rejects_bad_username() {
+    assert_eq(invalidate_timestamp("../evil"), SHK_ERR_PATH_TRAVERSAL, "../ rejected");
+    assert_eq(invalidate_timestamp(""), SHK_ERR_EMPTY_USER, "empty rejected");
+}
+
+# ── _shk_now_secs ────────────────────
+
+fn t_now_secs_nonzero() {
+    var t = _shk_now_secs();
+    # April 2026 ~ 1.775e9 secs since epoch. Just check it's past 2024.
+    assert_gt(t, 1700000000, "clock returns recent epoch seconds");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("timestamp_path");
+    t_path_includes_user();
+    t_path_starts_with_dir();
+
+    test_group("check_timestamp");
+    t_check_nonexistent_user();
+    t_check_zero_ttl_fresh();
+
+    test_group("update / invalidate validation");
+    t_update_rejects_bad_username();
+    t_invalidate_rejects_bad_username();
+
+    test_group("clock");
+    t_now_secs_nonzero();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

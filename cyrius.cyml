@@ -1,0 +1,34 @@
+[package]
+name = "shakti"
+version = "0.2.0"
+description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "5.2.1"
+repository = "https://github.com/MacCracken/shakti"
+
+[build]
+entry = "src/main.cyr"
+output = "shakti"
+
+[deps]
+stdlib = [
+    "syscalls",
+    "string",
+    "alloc",
+    "freelist",
+    "fmt",
+    "str",
+    "vec",
+    "io",
+    "fs",
+    "args",
+    "hashmap",
+    "toml",
+    "regex",
+    "tagged",
+    "process",
+    "assert",
+    "bench",
+    "fnptr",
+]

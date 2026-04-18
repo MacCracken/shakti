@@ -20,3 +20,13 @@ timestamp,git_sha,benchmark,time_ns
 2026-04-04T08:01:58Z,06bb55b,sanitize_environment,6986.7000
 2026-04-04T08:01:58Z,06bb55b,validate_username,6.5041
 2026-04-04T08:01:58Z,06bb55b,evaluate_with_policy,22448.000
+2026-04-17T07:45:45Z,ae974ba,command_matches/exact,1000,489,40000,1000000
+2026-04-17T07:45:45Z,ae974ba,command_matches/arg_wildcard,1000,838,47000,1000000
+2026-04-17T07:45:45Z,ae974ba,command_matches/dir_glob,1000,489,34000,1000000
+2026-04-17T07:45:45Z,ae974ba,command_matches/basename,1000,489,43000,1000000
+2026-04-17T07:45:45Z,ae974ba,validate_command,1000,838,31000,500000
+2026-04-17T07:45:45Z,ae974ba,parse_policy,13000,11000,223000,10000
+2026-04-17T07:45:45Z,ae974ba,check_authorization/allowed_admin,1000,838,211000,500000
+2026-04-17T07:45:45Z,ae974ba,check_authorization/allowed_deploy,2000,1000,209000,500000
+2026-04-17T07:45:45Z,ae974ba,check_authorization/denied,2000,908,213000,500000
+2026-04-17T07:45:45Z,ae974ba,sanitize_environment,125000,115000,209000,10000

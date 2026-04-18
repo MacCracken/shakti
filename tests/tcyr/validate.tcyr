@@ -1,0 +1,232 @@
+# validate.tcyr — tests for src/validate.cyr
+# Mirrors the Rust #[test] cases in rust-old/src/validate.rs.
+
+include "src/lib.cyr"
+
+# ── validate_username ────────────────────
+
+fn t_username_ok() {
+    assert_eq(validate_username("alice"), SHK_OK, "alice");
+    assert_eq(validate_username("bob_123"), SHK_OK, "bob_123");
+    assert_eq(validate_username("user-name"), SHK_OK, "user-name with dash");
+}
+
+fn t_username_empty() {
+    assert_eq(validate_username(""), SHK_ERR_EMPTY_USER, "empty");
+}
+
+fn t_username_path_traversal() {
+    assert_eq(validate_username("../etc/passwd"), SHK_ERR_PATH_TRAVERSAL, "../etc/passwd");
+    assert_eq(validate_username(".."), SHK_ERR_PATH_TRAVERSAL, "..");
+    assert_eq(validate_username("."), SHK_ERR_PATH_TRAVERSAL, ".");
+    assert_eq(validate_username("user/name"), SHK_ERR_PATH_TRAVERSAL, "user/name");
+}
+
+fn t_username_long_ok() {
+    var buf = alloc(1001);
+    var i = 0;
+    while (i < 1000) { store8(buf + i, 97); i = i + 1; }
+    store8(buf + 1000, 0);
+    assert_eq(validate_username(buf), SHK_OK, "long username accepted");
+}
+
+# ── validate_command ────────────────────
+
+fn _mk_argv1(a) {
+    var v = vec_new();
+    vec_push(v, a);
+    return v;
+}
+
+fn _mk_argv2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
+fn t_command_ok() {
+    var v = _mk_argv2("ls", "-la");
+    assert_eq(validate_command(v, 4096), SHK_OK, "ls -la");
+}
+
+fn t_command_empty() {
+    var v = vec_new();
+    assert_eq(validate_command(v, 4096), SHK_ERR_EMPTY_CMD, "empty argv");
+}
+
+fn t_command_too_long() {
+    var big = alloc(5001);
+    var i = 0;
+    while (i < 5000) { store8(big + i, 97); i = i + 1; }
+    store8(big + 5000, 0);
+    var v = _mk_argv1(big);
+    assert_eq(validate_command(v, 4096), SHK_ERR_CMD_TOO_LONG, "command too long");
+}
+
+fn t_command_empty_name() {
+    var v = _mk_argv1("");
+    assert_eq(validate_command(v, 4096), SHK_ERR_EMPTY_CMD, "empty command name");
+}
+
+fn t_command_metachar_semicolon() {
+    var v = _mk_argv1("/usr/bin/ls;rm");
+    assert_eq(validate_command(v, 4096), SHK_ERR_METACHAR, "semicolon");
+}
+
+fn t_command_metachar_pipe() {
+    var v = _mk_argv1("/usr/bin/cat|nc");
+    assert_eq(validate_command(v, 4096), SHK_ERR_METACHAR, "pipe");
+}
+
+fn t_command_metachar_backtick() {
+    var v = _mk_argv1("/usr/bin/`whoami`");
+    assert_eq(validate_command(v, 4096), SHK_ERR_METACHAR, "backtick");
+}
+
+fn t_command_metachar_dollar() {
+    var v = _mk_argv1("$(id)");
+    assert_eq(validate_command(v, 4096), SHK_ERR_METACHAR, "dollar-paren");
+}
+
+fn t_command_args_may_have_metachar() {
+    var v = _mk_argv2("grep", "foo|bar");
+    assert_eq(validate_command(v, 4096), SHK_OK, "pipe OK in arg");
+}
+
+# ── command_matches ────────────────────
+
+fn t_matches_exact() {
+    assert_eq(command_matches("/usr/bin/ls", "/usr/bin/ls"), 1, "exact");
+    assert_eq(command_matches("/usr/bin/rm", "/usr/bin/ls"), 0, "exact-mismatch");
+}
+
+fn t_matches_all() {
+    assert_eq(command_matches("/usr/bin/anything", "ALL"), 1, "ALL keyword");
+    assert_eq(command_matches("/usr/bin/anything", "*"), 1, "* keyword");
+    assert_eq(command_matches("", "ALL"), 1, "ALL matches empty");
+}
+
+fn t_matches_dir_glob() {
+    assert_eq(command_matches("/usr/bin/ls", "/usr/bin/*"), 1, "/usr/bin/* OK");
+    assert_eq(command_matches("/usr/sbin/reboot", "/usr/bin/*"), 0, "different dir");
+    assert_eq(command_matches("/usr/bin/ls -la", "/usr/bin/*"), 1, "glob w/ args");
+}
+
+fn t_matches_root_glob() {
+    assert_eq(command_matches("/ls", "/*"), 1, "/* matches /ls");
+}
+
+fn t_matches_basename() {
+    assert_eq(command_matches("/usr/bin/systemctl", "systemctl"), 1, "basename /usr/bin");
+    assert_eq(command_matches("/usr/local/bin/systemctl", "systemctl"), 1, "basename /usr/local/bin");
+    assert_eq(command_matches("/usr/bin/systemd", "systemctl"), 0, "basename mismatch");
+    assert_eq(command_matches("/usr/bin/systemctl restart nginx", "systemctl"), 1, "basename w/ args");
+}
+
+fn t_matches_arg_wildcard() {
+    assert_eq(command_matches("/usr/bin/systemctl restart nginx",
+        "/usr/bin/systemctl restart *"), 1, "restart *");
+    assert_eq(command_matches("/usr/bin/systemctl restart sshd",
+        "/usr/bin/systemctl restart *"), 1, "restart * different arg");
+    assert_eq(command_matches("/usr/bin/systemctl",
+        "/usr/bin/systemctl restart *"), 0, "no args, pattern needs restart");
+    assert_eq(command_matches("/usr/bin/systemctl stop nginx",
+        "/usr/bin/systemctl restart *"), 0, "wrong subcommand");
+    assert_eq(command_matches("/usr/bin/systemctl restart",
+        "/usr/bin/systemctl restart *"), 1, "exact prefix match");
+}
+
+fn t_matches_exact_with_args() {
+    assert_eq(command_matches("/usr/bin/systemctl stop firewall",
+        "/usr/bin/systemctl stop firewall"), 1, "exact w/ args");
+    assert_eq(command_matches("/usr/bin/systemctl stop nginx",
+        "/usr/bin/systemctl stop firewall"), 0, "exact w/ args mismatch");
+}
+
+fn t_matches_empty_pattern() {
+    assert_eq(command_matches("/usr/bin/ls", ""), 0, "empty pattern");
+}
+
+fn t_matches_basename_no_parent() {
+    assert_eq(command_matches("ls", "/bin/*"), 0, "bare cmd not in dir glob");
+}
+
+# ── resolve_command ────────────────────
+# These rely on /usr/bin/env existing on the build host.
+
+fn t_resolve_absolute() {
+    var out = alloc(512);
+    var n = resolve_command("/usr/bin/env", out, 512);
+    assert_gt(n, 0, "absolute resolves");
+    assert_eq(streq(out, "/usr/bin/env"), 1, "absolute path unchanged");
+}
+
+fn t_resolve_basename() {
+    var out = alloc(512);
+    var n = resolve_command("env", out, 512);
+    assert_gt(n, 0, "basename resolves via PATH");
+    assert_eq(load8(out), 47, "resolved path is absolute");
+}
+
+fn t_resolve_not_found() {
+    var out = alloc(512);
+    var n = resolve_command("nonexistent_binary_xyz_12345", out, 512);
+    assert_eq(n, 0 - SHK_ERR_NOT_FOUND, "not found");
+}
+
+fn t_resolve_relative_rejected() {
+    var out = alloc(512);
+    var n = resolve_command("../bin/bash", out, 512);
+    assert_eq(n, 0 - SHK_ERR_RELATIVE_PATH, "relative rejected");
+}
+
+fn t_resolve_directory_rejected() {
+    var out = alloc(512);
+    var n = resolve_command("/usr/bin", out, 512);
+    assert_eq(n, 0 - SHK_ERR_NOT_EXECUTABLE, "directory rejected");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("validate_username");
+    t_username_ok();
+    t_username_empty();
+    t_username_path_traversal();
+    t_username_long_ok();
+
+    test_group("validate_command");
+    t_command_ok();
+    t_command_empty();
+    t_command_too_long();
+    t_command_empty_name();
+    t_command_metachar_semicolon();
+    t_command_metachar_pipe();
+    t_command_metachar_backtick();
+    t_command_metachar_dollar();
+    t_command_args_may_have_metachar();
+
+    test_group("command_matches");
+    t_matches_exact();
+    t_matches_all();
+    t_matches_dir_glob();
+    t_matches_root_glob();
+    t_matches_basename();
+    t_matches_arg_wildcard();
+    t_matches_exact_with_args();
+    t_matches_empty_pattern();
+    t_matches_basename_no_parent();
+
+    test_group("resolve_command");
+    t_resolve_absolute();
+    t_resolve_basename();
+    t_resolve_not_found();
+    t_resolve_relative_rejected();
+    t_resolve_directory_rejected();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

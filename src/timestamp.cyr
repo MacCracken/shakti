@@ -1,0 +1,194 @@
+# timestamp.cyr — credential cache with TTY isolation + tamper detection
+#
+# Port of rust-old/src/timestamp.rs. Security properties preserved:
+#   - Timestamp files MUST be owned by root; non-root ownership is treated
+#     as tampering and ignored.
+#   - Symlinks are ALWAYS rejected (lstat, never stat).
+#   - update_timestamp() uses O_NOFOLLOW to atomically reject symlinks
+#     during open, closing the TOCTOU window that an unlink/symlink race
+#     could otherwise exploit.
+#   - The directory is created with mode 0o700 (root-only).
+#   - Per-TTY filenames isolate credentials by session.
+
+# ── Linux-specific constants ────────────────────
+# Not in stdlib's OpenFlag enum; Linux x86_64 value.
+var O_NOFOLLOW = 131072;  # 0o400000
+
+# Linux x86_64 syscall numbers not exposed by stdlib
+var SYS_LSTAT = 6;
+var SYS_READLINK = 89;
+var SYS_CLOCK_GETTIME = 228;
+var CLOCK_REALTIME = 0;
+
+# Stat buffer field offsets (x86_64)
+var STAT_MODE_OFF = 24;
+var STAT_UID_OFF = 28;
+var STAT_MTIME_OFF = 88;
+var STAT_BUF_SIZE = 144;
+
+# File mode bits
+var S_IFMT = 61440;    # 0o170000
+var S_IFLNK = 40960;   # 0o120000
+var S_IFREG = 32768;   # 0o100000
+var S_IFDIR = 16384;   # 0o040000
+
+# ── Clock ────────────────────
+
+# Seconds since epoch (CLOCK_REALTIME). Returns 0 on error.
+fn _shk_now_secs() {
+    var ts = alloc(16);
+    store64(ts, 0);
+    store64(ts + 8, 0);
+    var r = syscall(SYS_CLOCK_GETTIME, CLOCK_REALTIME, ts);
+    if (r < 0) { return 0; }
+    return load64(ts);
+}
+
+# ── TTY session id ────────────────────
+
+# Read /proc/self/fd/0 via readlink to obtain the TTY name of stdin.
+# Returns the sanitized suffix (e.g., "pts-3") or an empty cstr if no TTY.
+fn _shk_tty_session() {
+    var buf = alloc(256);
+    var n = syscall(SYS_READLINK, "/proc/self/fd/0", buf, 255);
+    if (n <= 0) { return ""; }
+    if (n > 255) { n = 255; }
+    store8(buf + n, 0);
+
+    # Not a tty path if it doesn't start with "/dev/"
+    var is_dev = 1;
+    if (n < 5) { is_dev = 0; }
+    if (is_dev == 1) {
+        if (load8(buf) != 47) { is_dev = 0; }
+        if (load8(buf + 1) != 100) { is_dev = 0; }
+        if (load8(buf + 2) != 101) { is_dev = 0; }
+        if (load8(buf + 3) != 118) { is_dev = 0; }
+        if (load8(buf + 4) != 47) { is_dev = 0; }
+    }
+    if (is_dev == 0) { return ""; }
+
+    # Skip past "/dev/"; sanitize remaining '/' to '-'
+    var body = buf + 5;
+    var i = 0;
+    while (load8(body + i) != 0) {
+        if (load8(body + i) == 47) { store8(body + i, 45); }
+        i = i + 1;
+    }
+    return body;
+}
+
+# ── Path construction ────────────────────
+
+# Build the timestamp file path for a user: <dir>/<user>[:<tty>]
+fn timestamp_path(user) {
+    var dir = default_timestamp_dir();
+    var dl = strlen(dir);
+    var ul = strlen(user);
+    var tty = _shk_tty_session();
+    var tl = strlen(tty);
+
+    var extra = 0;
+    if (tl > 0) { extra = 1 + tl; }  # ':' + tty bytes
+    var out = alloc(dl + 1 + ul + extra + 1);
+    memcpy(out, dir, dl);
+    store8(out + dl, 47);
+    memcpy(out + dl + 1, user, ul);
+    if (tl > 0) {
+        store8(out + dl + 1 + ul, 58);
+        memcpy(out + dl + 1 + ul + 1, tty, tl);
+    }
+    store8(out + dl + 1 + ul + extra, 0);
+    return out;
+}
+
+# ── Directory bootstrap ────────────────────
+
+# Ensure the timestamp directory exists with 0700 root-only perms.
+# Returns SHK_OK on success, SHK_ERR_* otherwise. If the directory already
+# exists, verify it is root-owned and not world-writable.
+fn _shk_ensure_ts_dir() {
+    var dir = default_timestamp_dir();
+    var stbuf = alloc(STAT_BUF_SIZE);
+    var r = syscall(SYS_STAT, dir, stbuf);
+    if (r < 0) {
+        # mkdir -p (parent assumed to exist; for /var/run it will)
+        var mr = sys_mkdir(dir, 448);  # 0o700
+        if (mr < 0) { return SHK_ERR_IO; }
+        return SHK_OK;
+    }
+
+    # Exists — verify safety
+    var mode = load32(stbuf + STAT_MODE_OFF);
+    if ((mode & S_IFMT) != S_IFDIR) { return SHK_ERR_IO; }
+    var uid = load32(stbuf + STAT_UID_OFF);
+    if (uid != 0) { return SHK_ERR_OWNER; }
+    if ((mode & 2) != 0) { return SHK_ERR_WORLD_WRITABLE; }
+    return SHK_OK;
+}
+
+# ── check_timestamp ────────────────────
+
+# Returns 1 if the user's cached credentials are still valid, 0 otherwise.
+# A timestamp is valid iff: the file exists, is not a symlink, is owned
+# by root, and its mtime+ttl is in the future.
+fn check_timestamp(user, ttl_secs) {
+    var path = timestamp_path(user);
+    var stbuf = alloc(STAT_BUF_SIZE);
+    var r = syscall(SYS_LSTAT, path, stbuf);
+    if (r < 0) { return 0; }
+
+    var mode = load32(stbuf + STAT_MODE_OFF);
+    # Reject symlinks
+    if ((mode & S_IFMT) == S_IFLNK) { return 0; }
+    # Must be regular file
+    if ((mode & S_IFMT) != S_IFREG) { return 0; }
+    # Must be root-owned
+    var uid = load32(stbuf + STAT_UID_OFF);
+    if (uid != 0) { return 0; }
+
+    var mtime = load64(stbuf + STAT_MTIME_OFF);
+    var now = _shk_now_secs();
+    if (now == 0) { return 0; }
+    if (mtime + ttl_secs > now) { return 1; }
+    return 0;
+}
+
+# ── update_timestamp ────────────────────
+
+# Touch the user's timestamp file, rejecting symlinks atomically via
+# O_NOFOLLOW. The file is created with 0o600 (owner rw only).
+fn update_timestamp(user) {
+    var vuser = validate_username(user);
+    if (vuser != SHK_OK) { return vuser; }
+
+    var dir_ok = _shk_ensure_ts_dir();
+    if (dir_ok != SHK_OK) { return dir_ok; }
+
+    var path = timestamp_path(user);
+    var flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW;
+    var fd = syscall(SYS_OPEN, path, flags, 384);  # 0o600
+    if (fd < 0) { return SHK_ERR_SYMLINK; }
+    sys_close(fd);
+    return SHK_OK;
+}
+
+# ── invalidate_timestamp ────────────────────
+
+# Remove the user's timestamp file. Rejects symlinks (via lstat check
+# before unlink). Returns SHK_OK if the file did not exist either.
+fn invalidate_timestamp(user) {
+    var vuser = validate_username(user);
+    if (vuser != SHK_OK) { return vuser; }
+
+    var path = timestamp_path(user);
+    var stbuf = alloc(STAT_BUF_SIZE);
+    var r = syscall(SYS_LSTAT, path, stbuf);
+    if (r < 0) { return SHK_OK; }  # already absent
+
+    var mode = load32(stbuf + STAT_MODE_OFF);
+    if ((mode & S_IFMT) == S_IFLNK) { return SHK_ERR_SYMLINK; }
+
+    var ur = sys_unlink(path);
+    if (ur < 0) { return SHK_ERR_IO; }
+    return SHK_OK;
+}

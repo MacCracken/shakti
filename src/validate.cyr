@@ -1,0 +1,287 @@
+# validate.cyr — command and username validation
+#
+# Port of rust-old/src/validate.rs. All functions treat inputs as
+# null-terminated C strings (cstrs) unless otherwise noted.
+#
+# Security-critical: these checks run before exec with elevated privileges.
+# Rejection criteria mirror the Rust version bit for bit.
+
+# ── Username validation ────────────────────
+
+# Return SHK_OK if the username is safe for filesystem paths.
+# Rejects: empty, "/", "." or "..", embedded null byte.
+fn validate_username(user) {
+    if (user == 0) { return SHK_ERR_EMPTY_USER; }
+    var len = strlen(user);
+    if (len == 0) { return SHK_ERR_EMPTY_USER; }
+
+    # Exact "." or ".."
+    if (len == 1) {
+        if (load8(user) == 46) { return SHK_ERR_PATH_TRAVERSAL; }
+    }
+    if (len == 2) {
+        if (load8(user) == 46) {
+            if (load8(user + 1) == 46) { return SHK_ERR_PATH_TRAVERSAL; }
+        }
+    }
+
+    # Slash or null anywhere
+    var i = 0;
+    while (i < len) {
+        var b = load8(user + i);
+        if (b == 47) { return SHK_ERR_PATH_TRAVERSAL; }
+        if (b == 0) { return SHK_ERR_NULL_BYTE; }
+        i = i + 1;
+    }
+    return SHK_OK;
+}
+
+# ── Command validation ────────────────────
+
+# Shell metacharacter check on a cstr. Returns 1 if any byte matches,
+# 0 otherwise. Matches the SHELL_META set from validate.rs:
+#   ; | & ` $ ( ) { } < > !
+fn _has_shell_meta(s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var b = load8(s + i);
+        if (b == 59)  { return 1; }  # ;
+        if (b == 124) { return 1; }  # |
+        if (b == 38)  { return 1; }  # &
+        if (b == 96)  { return 1; }  # `
+        if (b == 36)  { return 1; }  # $
+        if (b == 40)  { return 1; }  # (
+        if (b == 41)  { return 1; }  # )
+        if (b == 123) { return 1; }  # {
+        if (b == 125) { return 1; }  # }
+        if (b == 60)  { return 1; }  # <
+        if (b == 62)  { return 1; }  # >
+        if (b == 33)  { return 1; }  # !
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Validate an argv array (argv is a vec of cstr pointers).
+# Rejects: empty argv, total length > max_len, null byte in any arg,
+# empty command name, shell metachar in command name (argv[0]).
+fn validate_command(argv, max_len) {
+    if (argv == 0) { return SHK_ERR_EMPTY_CMD; }
+    var n = vec_len(argv);
+    if (n == 0) { return SHK_ERR_EMPTY_CMD; }
+
+    # Total length = sum of arg lengths + n separators (matches Rust)
+    var total = n;
+    var i = 0;
+    while (i < n) {
+        var a = vec_get(argv, i);
+        if (a == 0) { return SHK_ERR_NULL_BYTE; }
+        total = total + strlen(a);
+        i = i + 1;
+    }
+    if (total > max_len) { return SHK_ERR_CMD_TOO_LONG; }
+
+    # Null-byte check is implicit for cstrs. The Rust version checks inside
+    # arbitrary UTF-8 strings; cstrs cannot contain embedded nulls by
+    # construction, so argv from args_init() is already safe here.
+
+    var cmd = vec_get(argv, 0);
+    if (strlen(cmd) == 0) { return SHK_ERR_EMPTY_CMD; }
+
+    if (_has_shell_meta(cmd) == 1) { return SHK_ERR_METACHAR; }
+    return SHK_OK;
+}
+
+# ── Command matching ────────────────────
+
+# Compare cstr a vs a pattern slice (a_ptr,a_len vs b_ptr,b_len).
+fn _mem_eq_cstr(a, b_ptr, b_len) {
+    if (strlen(a) != b_len) { return 0; }
+    return memeq(a, b_ptr, b_len);
+}
+
+# True if command matches pattern. `command` may include arguments:
+# e.g., "/usr/bin/systemctl restart nginx". Patterns:
+#   ALL or *                      → match anything
+#   /usr/bin/ls                    → exact
+#   /usr/bin/systemctl restart *   → prefix with arg wildcard
+#   /usr/bin/*                     → directory glob (binary portion only)
+#   systemctl                      → basename match (binary portion only)
+fn command_matches(command, pattern) {
+    if (streq(pattern, "ALL") == 1) { return 1; }
+    if (streq(pattern, "*") == 1) { return 1; }
+
+    var cmd_len = strlen(command);
+    var pat_len = strlen(pattern);
+
+    # Exact match (including arguments)
+    if (cmd_len == pat_len) {
+        if (memeq(command, pattern, cmd_len) == 1) { return 1; }
+    }
+
+    # Prefix wildcard: pattern ends with " *"
+    if (pat_len >= 2) {
+        if (load8(pattern + pat_len - 2) == 32) {
+            if (load8(pattern + pat_len - 1) == 42) {
+                var prefix_len = pat_len - 2;
+                # command == prefix exactly
+                if (cmd_len == prefix_len) {
+                    if (memeq(command, pattern, prefix_len) == 1) { return 1; }
+                }
+                # command starts with "prefix " (space boundary)
+                if (cmd_len > prefix_len) {
+                    if (load8(command + prefix_len) == 32) {
+                        if (memeq(command, pattern, prefix_len) == 1) { return 1; }
+                    }
+                }
+                # Do NOT fall through to other pattern types when " *" was set
+                return 0;
+            }
+        }
+    }
+
+    # Extract command binary portion (up to first space)
+    var bin_end = cmd_len;
+    var k = 0;
+    while (k < cmd_len) {
+        if (load8(command + k) == 32) { bin_end = k; k = cmd_len; }
+        else { k = k + 1; }
+    }
+
+    # Directory glob: pattern ends with "/*"
+    if (pat_len >= 2) {
+        if (load8(pattern + pat_len - 2) == 47) {
+            if (load8(pattern + pat_len - 1) == 42) {
+                var dir_len = pat_len - 2;
+                # Find last '/' in command binary portion
+                var last_slash = 0 - 1;
+                var j = 0;
+                while (j < bin_end) {
+                    if (load8(command + j) == 47) { last_slash = j; }
+                    j = j + 1;
+                }
+                if (last_slash < 0) { return 0; }
+
+                # Expected parent = dir_len bytes of pattern, OR "/" if dir_len==0
+                if (dir_len == 0) {
+                    # Pattern "/*" matches binaries directly in /
+                    if (last_slash == 0) { return 1; }
+                    return 0;
+                }
+                if (last_slash != dir_len) { return 0; }
+                return memeq(command, pattern, dir_len);
+            }
+        }
+    }
+
+    # Basename match: pattern has no '/'
+    var has_slash = 0;
+    var p = 0;
+    while (p < pat_len) {
+        if (load8(pattern + p) == 47) { has_slash = 1; p = pat_len; }
+        else { p = p + 1; }
+    }
+    if (has_slash == 0) {
+        # Find last '/' in binary portion; compare basename
+        var last = 0 - 1;
+        var q = 0;
+        while (q < bin_end) {
+            if (load8(command + q) == 47) { last = q; }
+            q = q + 1;
+        }
+        var base_start = last + 1;
+        var base_len = bin_end - base_start;
+        if (base_len != pat_len) { return 0; }
+        return memeq(command + base_start, pattern, pat_len);
+    }
+
+    return 0;
+}
+
+# ── Command resolution ────────────────────
+
+# PATH used to resolve bare command names. Matches the Rust version.
+fn _shk_path() {
+    return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+}
+
+# stat(path) → mode (i64), or -1 on error. stat buffer is 144 bytes;
+# st_mode is a 4-byte field at offset 24.
+fn _shk_stat_mode(path) {
+    var buf = alloc(144);
+    var r = syscall(SYS_STAT, path, buf);
+    if (r < 0) { return 0 - 1; }
+    # mode is 32-bit; zero-extend via load32
+    return load32(buf + 24);
+}
+
+# Regular executable file: S_IFREG and any-user exec bit set.
+fn _is_executable(path) {
+    var mode = _shk_stat_mode(path);
+    if (mode < 0) { return 0; }
+    # S_IFMT = 0o170000, S_IFREG = 0o100000
+    var ifmt = 61440;   # 0o170000
+    var ifreg = 32768;  # 0o100000
+    if ((mode & ifmt) != ifreg) { return 0; }
+    # any of S_IXUSR/S_IXGRP/S_IXOTH (0o111)
+    if ((mode & 73) == 0) { return 0; }
+    return 1;
+}
+
+# Resolve a command name to an absolute path, writing the result into
+# `out` (buffer, caller-owned). Returns length on success, negative
+# SHK_ERR_* on failure.
+#   - Absolute path (starts with '/'): verify executable, copy.
+#   - Relative path with '/': reject (SHK_ERR_RELATIVE_PATH).
+#   - Bare name: search PATH, copy first executable match.
+fn resolve_command(cmd, out, out_cap) {
+    var len = strlen(cmd);
+    if (len == 0) { return 0 - SHK_ERR_EMPTY_CMD; }
+
+    if (load8(cmd) == 47) {
+        if (_is_executable(cmd) == 0) { return 0 - SHK_ERR_NOT_EXECUTABLE; }
+        if (len + 1 > out_cap) { return 0 - SHK_ERR_CMD_TOO_LONG; }
+        memcpy(out, cmd, len);
+        store8(out + len, 0);
+        return len;
+    }
+
+    # Relative paths with '/' are rejected
+    var i = 0;
+    while (i < len) {
+        if (load8(cmd + i) == 47) { return 0 - SHK_ERR_RELATIVE_PATH; }
+        i = i + 1;
+    }
+
+    # Search PATH
+    var path = _shk_path();
+    var plen = strlen(path);
+    var seg_start = 0;
+    var j = 0;
+    while (j <= plen) {
+        var ch = 0;
+        if (j < plen) { ch = load8(path + j); }
+        if (ch == 58 || j == plen) {
+            var seg_len = j - seg_start;
+            if (seg_len > 0) {
+                # candidate = path[seg_start..j] + '/' + cmd
+                var need = seg_len + 1 + len + 1;
+                if (need > out_cap) { return 0 - SHK_ERR_CMD_TOO_LONG; }
+                memcpy(out, path + seg_start, seg_len);
+                store8(out + seg_len, 47);
+                memcpy(out + seg_len + 1, cmd, len);
+                store8(out + seg_len + 1 + len, 0);
+                if (_is_executable(out) == 1) {
+                    return seg_len + 1 + len;
+                }
+            }
+            seg_start = j + 1;
+        }
+        j = j + 1;
+    }
+
+    # Clear out buffer on not-found so callers don't mistake stale data
+    store8(out, 0);
+    return 0 - SHK_ERR_NOT_FOUND;
+}

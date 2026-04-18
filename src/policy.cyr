@@ -1,0 +1,749 @@
+# policy.cyr — TOML policy loading, authorization, linting
+#
+# Port of rust-old/src/policy.rs. Uses a local mini-TOML parser because
+# the stdlib parser recognises `[[array]]` but not `[table]` sections,
+# which the sudoers schema relies on for `[defaults]`.
+#
+# Data model (heap-allocated with manual offsets, patra-style):
+#   Policy      { defaults: *Defaults; rules: *vec<*Rule> }
+#   Defaults    { timestamp_ttl; require_auth; audit_log;
+#                 env_keep: *vec<cstr>; max_command_len;
+#                 include_dir: cstr or 0 }
+#   Rule        { user; group; run_as; commands; deny_commands;
+#                 require_auth; description }
+#   AuthzResult { status; aux }   # status: 0=denied(aux=cstr), 1=allowed(aux=require_auth)
+
+# ── Struct offsets ────────────────────
+
+enum PolicyOff { PL_DEFAULTS = 0; PL_RULES = 8; PL_SZ = 16; }
+
+enum DefOff {
+    DEF_TTL = 0;
+    DEF_REQUIRE_AUTH = 8;
+    DEF_AUDIT_LOG = 16;
+    DEF_ENV_KEEP = 24;
+    DEF_MAX_CMD_LEN = 32;
+    DEF_INCLUDE_DIR = 40;
+    DEF_SZ = 48;
+}
+
+enum RuleOff {
+    RU_USER = 0;
+    RU_GROUP = 8;
+    RU_RUN_AS = 16;
+    RU_COMMANDS = 24;
+    RU_DENY = 32;
+    RU_REQUIRE_AUTH = 40;
+    RU_DESCRIPTION = 48;
+    RU_SZ = 56;
+}
+
+enum AuthzOff {
+    AZ_STATUS = 0;
+    AZ_AUX = 8;
+    AZ_SZ = 16;
+}
+
+enum AuthzStatus { AZ_DENIED = 0; AZ_ALLOWED = 1; }
+
+# ── Constructors / accessors ────────────────────
+
+fn policy_new() {
+    var p = alloc(PL_SZ);
+    store64(p + PL_DEFAULTS, defaults_new());
+    store64(p + PL_RULES, vec_new());
+    return p;
+}
+
+fn policy_defaults(p) { return load64(p + PL_DEFAULTS); }
+fn policy_rules(p) { return load64(p + PL_RULES); }
+
+fn defaults_new() {
+    var d = alloc(DEF_SZ);
+    store64(d + DEF_TTL, DEFAULT_TIMESTAMP_TTL_SECS);
+    store64(d + DEF_REQUIRE_AUTH, 1);
+    store64(d + DEF_AUDIT_LOG, 1);
+    store64(d + DEF_ENV_KEEP, vec_new());
+    store64(d + DEF_MAX_CMD_LEN, MAX_COMMAND_LEN_DEFAULT);
+    store64(d + DEF_INCLUDE_DIR, 0);
+    return d;
+}
+
+fn def_ttl(d) { return load64(d + DEF_TTL); }
+fn def_require_auth(d) { return load64(d + DEF_REQUIRE_AUTH); }
+fn def_audit_log(d) { return load64(d + DEF_AUDIT_LOG); }
+fn def_env_keep(d) { return load64(d + DEF_ENV_KEEP); }
+fn def_max_cmd_len(d) { return load64(d + DEF_MAX_CMD_LEN); }
+fn def_include_dir(d) { return load64(d + DEF_INCLUDE_DIR); }
+
+fn rule_new() {
+    var r = alloc(RU_SZ);
+    store64(r + RU_USER, 0);
+    store64(r + RU_GROUP, 0);
+    store64(r + RU_RUN_AS, "root");
+    store64(r + RU_COMMANDS, vec_new());
+    store64(r + RU_DENY, vec_new());
+    store64(r + RU_REQUIRE_AUTH, 1);
+    store64(r + RU_DESCRIPTION, "");
+    return r;
+}
+
+fn rule_user(r) { return load64(r + RU_USER); }
+fn rule_group(r) { return load64(r + RU_GROUP); }
+fn rule_run_as(r) { return load64(r + RU_RUN_AS); }
+fn rule_commands(r) { return load64(r + RU_COMMANDS); }
+fn rule_deny_commands(r) { return load64(r + RU_DENY); }
+fn rule_require_auth(r) { return load64(r + RU_REQUIRE_AUTH); }
+fn rule_description(r) { return load64(r + RU_DESCRIPTION); }
+
+fn authz_new(status, aux) {
+    var a = alloc(AZ_SZ);
+    store64(a + AZ_STATUS, status);
+    store64(a + AZ_AUX, aux);
+    return a;
+}
+
+fn authz_status(a) { return load64(a + AZ_STATUS); }
+fn authz_aux(a) { return load64(a + AZ_AUX); }
+
+# ── Mini TOML loader ────────────────────
+
+# Copy (start, len) from buf into a new cstr, trimming ASCII whitespace.
+fn _shk_copy_trim(buf, start, len) {
+    var s = start;
+    var e = start + len;
+    while (s < e) {
+        var c = load8(buf + s);
+        if (c == 32 || c == 9 || c == 13 || c == 10) { s = s + 1; }
+        else { s = e + 1; e = e; s = s - 1; break; }
+    }
+    # Restart cleanly (the idiom above is to exit the trim-left loop)
+    s = start;
+    while (s < e) {
+        var c = load8(buf + s);
+        if (c != 32) {
+            if (c != 9) { if (c != 13) { if (c != 10) { break; } } }
+        }
+        s = s + 1;
+    }
+    while (e > s) {
+        var c = load8(buf + e - 1);
+        if (c != 32) {
+            if (c != 9) { if (c != 13) { if (c != 10) { break; } } }
+        }
+        e = e - 1;
+    }
+    var n = e - s;
+    var out = alloc(n + 1);
+    memcpy(out, buf + s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Strip surrounding quotes from a cstr (returns a new cstr).
+fn _shk_unquote(s) {
+    var n = strlen(s);
+    if (n < 2) { return s; }
+    var first = load8(s);
+    var last = load8(s + n - 1);
+    if (first == 34 && last == 34) {
+        var out = alloc(n - 1);
+        memcpy(out, s + 1, n - 2);
+        store8(out + n - 2, 0);
+        return out;
+    }
+    if (first == 39 && last == 39) {
+        var out = alloc(n - 1);
+        memcpy(out, s + 1, n - 2);
+        store8(out + n - 2, 0);
+        return out;
+    }
+    return s;
+}
+
+# Parse an integer from a cstr. Accepts digits only (positive).
+# Returns -1 on parse error.
+fn _shk_parse_int(s) {
+    var n = strlen(s);
+    if (n == 0) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _shk_parse_bool(s) {
+    if (streq(s, "true") == 1) { return 1; }
+    if (streq(s, "True") == 1) { return 1; }
+    if (streq(s, "false") == 1) { return 0; }
+    if (streq(s, "False") == 1) { return 0; }
+    return 0 - 1;
+}
+
+# Parse a TOML array of strings value: `["a", "b", "c"]` or `[]`.
+# Returns vec of cstrs.
+fn _shk_parse_str_array(s) {
+    var v = vec_new();
+    var n = strlen(s);
+    if (n < 2) { return v; }
+    if (load8(s) != 91) { return v; }
+    # body = s[1..end) where end is position of matching ']'
+    var start = 1;
+    var end = n;
+    # find the last ']' — content between [ and ] is the item list
+    while (end > start) {
+        if (load8(s + end - 1) == 93) { end = end - 1; break; }
+        end = end - 1;
+    }
+
+    var pos = start;
+    while (pos < end) {
+        # Skip leading whitespace
+        while (pos < end) {
+            var c = load8(s + pos);
+            if (c != 32) { if (c != 9) { if (c != 10) { if (c != 13) { break; } } } }
+            pos = pos + 1;
+        }
+        if (pos >= end) { break; }
+        var qchar = load8(s + pos);
+        if (qchar == 34 || qchar == 39) {
+            pos = pos + 1;
+            var istart = pos;
+            while (pos < end) {
+                if (load8(s + pos) == qchar) { break; }
+                pos = pos + 1;
+            }
+            var ilen = pos - istart;
+            var item = alloc(ilen + 1);
+            memcpy(item, s + istart, ilen);
+            store8(item + ilen, 0);
+            vec_push(v, item);
+            if (pos < end) { pos = pos + 1; }  # skip closing quote
+        }
+        # Skip comma + whitespace
+        while (pos < end) {
+            var c = load8(s + pos);
+            if (c == 44) { pos = pos + 1; break; }
+            if (c == 32) { pos = pos + 1; }
+            elif (c == 9) { pos = pos + 1; }
+            elif (c == 10) { pos = pos + 1; }
+            elif (c == 13) { pos = pos + 1; }
+            else { break; }
+        }
+    }
+    return v;
+}
+
+# Apply a `key = value` pair to a defaults struct.
+fn _shk_def_set(d, key, raw_val) {
+    if (streq(key, "timestamp_ttl") == 1) {
+        var v = _shk_parse_int(raw_val);
+        if (v >= 0) { store64(d + DEF_TTL, v); }
+        return 0;
+    }
+    if (streq(key, "require_auth") == 1) {
+        var b = _shk_parse_bool(raw_val);
+        if (b >= 0) { store64(d + DEF_REQUIRE_AUTH, b); }
+        return 0;
+    }
+    if (streq(key, "audit_log") == 1) {
+        var b = _shk_parse_bool(raw_val);
+        if (b >= 0) { store64(d + DEF_AUDIT_LOG, b); }
+        return 0;
+    }
+    if (streq(key, "env_keep") == 1) {
+        store64(d + DEF_ENV_KEEP, _shk_parse_str_array(raw_val));
+        return 0;
+    }
+    if (streq(key, "max_command_len") == 1) {
+        var v = _shk_parse_int(raw_val);
+        if (v >= 0) { store64(d + DEF_MAX_CMD_LEN, v); }
+        return 0;
+    }
+    if (streq(key, "include_dir") == 1) {
+        store64(d + DEF_INCLUDE_DIR, _shk_unquote(raw_val));
+        return 0;
+    }
+    return 0;
+}
+
+# Apply a `key = value` pair to a rule struct.
+fn _shk_rule_set(r, key, raw_val) {
+    if (streq(key, "user") == 1) {
+        store64(r + RU_USER, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "group") == 1) {
+        store64(r + RU_GROUP, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "run_as") == 1) {
+        store64(r + RU_RUN_AS, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "commands") == 1) {
+        store64(r + RU_COMMANDS, _shk_parse_str_array(raw_val));
+        return 0;
+    }
+    if (streq(key, "deny_commands") == 1) {
+        store64(r + RU_DENY, _shk_parse_str_array(raw_val));
+        return 0;
+    }
+    if (streq(key, "require_auth") == 1) {
+        var b = _shk_parse_bool(raw_val);
+        if (b >= 0) { store64(r + RU_REQUIRE_AUTH, b); }
+        return 0;
+    }
+    if (streq(key, "description") == 1) {
+        store64(r + RU_DESCRIPTION, _shk_unquote(raw_val));
+        return 0;
+    }
+    return 0;
+}
+
+# Section identity during parsing
+var _SEC_NONE = 0;
+var _SEC_DEFAULTS = 1;
+var _SEC_RULE = 2;
+
+# parse_policy: tokenise buf (cstr + len) into a Policy.
+# Section headers recognised: [defaults] and [[rules]].
+# Array values (`[...]`) may span multiple lines if written without newlines
+# inside the brackets; if the raw policy wraps arrays across lines, the
+# caller must flatten first. Sudoers policy in practice is single-line.
+fn parse_policy(buf, buflen) {
+    var pol = policy_new();
+    var def = policy_defaults(pol);
+    var rules = policy_rules(pol);
+    var section = _SEC_NONE;
+    var cur_rule = 0;
+
+    var pos = 0;
+    while (pos < buflen) {
+        # Line start: skip leading whitespace
+        while (pos < buflen) {
+            var c = load8(buf + pos);
+            if (c != 32) { if (c != 9) { break; } }
+            pos = pos + 1;
+        }
+        if (pos >= buflen) { break; }
+
+        var first = load8(buf + pos);
+
+        # Comment or blank line — skip to EOL
+        if (first == 35 || first == 10 || first == 13) {
+            while (pos < buflen) {
+                if (load8(buf + pos) == 10) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+        }
+        # Section header
+        elif (first == 91) {
+            # Find end of line
+            var lend = pos;
+            while (lend < buflen) {
+                if (load8(buf + lend) == 10) { break; }
+                lend = lend + 1;
+            }
+            # Double-bracket array?
+            var is_array = 0;
+            if (pos + 1 < buflen) {
+                if (load8(buf + pos + 1) == 91) { is_array = 1; }
+            }
+            var name_start = pos + 1;
+            if (is_array == 1) { name_start = pos + 2; }
+            # Find closing bracket
+            var name_end = name_start;
+            while (name_end < lend) {
+                if (load8(buf + name_end) == 93) { break; }
+                name_end = name_end + 1;
+            }
+            var name = _shk_copy_trim(buf, name_start, name_end - name_start);
+
+            if (streq(name, "defaults") == 1) {
+                section = _SEC_DEFAULTS;
+                cur_rule = 0;
+            } elif (streq(name, "rules") == 1) {
+                section = _SEC_RULE;
+                cur_rule = rule_new();
+                vec_push(rules, cur_rule);
+            } else {
+                section = _SEC_NONE;
+                cur_rule = 0;
+            }
+            pos = lend;
+            if (pos < buflen) { pos = pos + 1; }
+        }
+        # Key = value
+        else {
+            var lend2 = pos;
+            while (lend2 < buflen) {
+                if (load8(buf + lend2) == 10) { break; }
+                lend2 = lend2 + 1;
+            }
+            var eq = pos;
+            while (eq < lend2) {
+                if (load8(buf + eq) == 61) { break; }
+                eq = eq + 1;
+            }
+            if (eq < lend2) {
+                var key = _shk_copy_trim(buf, pos, eq - pos);
+                # Strip trailing inline comment (# not inside quotes)
+                var vend = lend2;
+                var scan = eq + 1;
+                var in_str = 0;
+                while (scan < lend2) {
+                    var c2 = load8(buf + scan);
+                    if (c2 == 34) {
+                        if (in_str == 0) { in_str = 1; }
+                        else { in_str = 0; }
+                    }
+                    elif (c2 == 35) {
+                        if (in_str == 0) { vend = scan; scan = lend2; }
+                    }
+                    scan = scan + 1;
+                }
+                var value = _shk_copy_trim(buf, eq + 1, vend - (eq + 1));
+
+                if (section == _SEC_DEFAULTS) { _shk_def_set(def, key, value); }
+                elif (section == _SEC_RULE) {
+                    if (cur_rule != 0) { _shk_rule_set(cur_rule, key, value); }
+                }
+            }
+            pos = lend2;
+            if (pos < buflen) { pos = pos + 1; }
+        }
+    }
+    return pol;
+}
+
+# Load policy TOML from a path. Performs security checks (root-owned,
+# not world-writable) before reading.
+fn load_policy(path) {
+    var stbuf = alloc(STAT_BUF_SIZE);
+    var r = syscall(SYS_STAT, path, stbuf);
+    if (r < 0) { return 0; }
+
+    var mode = load32(stbuf + STAT_MODE_OFF);
+    if ((mode & S_IFMT) != S_IFREG) { return 0; }
+    var uid = load32(stbuf + STAT_UID_OFF);
+    if (uid != 0) { return 0; }
+    if ((mode & 2) != 0) { return 0; }
+
+    var cap = 262144;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap);
+    if (n <= 0) { return 0; }
+
+    var pol = parse_policy(buf, n);
+
+    # Load fragments from include_dir, if any and not world-writable.
+    var inc = def_include_dir(policy_defaults(pol));
+    if (inc != 0) { _shk_load_fragments(pol, inc); }
+    return pol;
+}
+
+# Append rules from every *.toml in include_dir (lexicographic order).
+fn _shk_load_fragments(policy, dir_cstr) {
+    var dstat = alloc(STAT_BUF_SIZE);
+    var r = syscall(SYS_STAT, dir_cstr, dstat);
+    if (r < 0) { return 0; }
+    var dmode = load32(dstat + STAT_MODE_OFF);
+    if ((dmode & S_IFMT) != S_IFDIR) { return 0; }
+    var duid = load32(dstat + STAT_UID_OFF);
+    if (duid != 0) { return 0; }
+    if ((dmode & 2) != 0) { return 0; }
+
+    # dir_list returns vec of Str (basenames). Sort lexicographically.
+    var names = dir_list(str_from(dir_cstr));
+    _shk_sort_str_vec(names);
+
+    var out_rules = policy_rules(policy);
+    var ni = 0;
+    var nc = vec_len(names);
+    while (ni < nc) {
+        var nm = vec_get(names, ni);  # Str
+        if (str_ends_with(nm, str_from(".toml")) == 1) {
+            var full = path_join(str_from(dir_cstr), nm);
+            var fpath = str_data(full);
+            # Verify fragment file is root-owned, not world-writable
+            var fstat = alloc(STAT_BUF_SIZE);
+            if (syscall(SYS_STAT, fpath, fstat) >= 0) {
+                var fmode = load32(fstat + STAT_MODE_OFF);
+                var fuid = load32(fstat + STAT_UID_OFF);
+                if (fuid == 0) {
+                    if ((fmode & 2) == 0) {
+                        var cap2 = 262144;
+                        var buf2 = alloc(cap2);
+                        var n2 = file_read_all(fpath, buf2, cap2);
+                        if (n2 > 0) {
+                            var frag = parse_policy(buf2, n2);
+                            var frules = policy_rules(frag);
+                            var fi = 0;
+                            while (fi < vec_len(frules)) {
+                                vec_push(out_rules, vec_get(frules, fi));
+                                fi = fi + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ni = ni + 1;
+    }
+    return 0;
+}
+
+# Insertion sort of a vec<Str> in place.
+fn _shk_sort_str_vec(v) {
+    var n = vec_len(v);
+    var i = 1;
+    while (i < n) {
+        var j = i;
+        while (j > 0) {
+            var a = vec_get(v, j - 1);
+            var b = vec_get(v, j);
+            if (str_compare_lex(a, b) <= 0) { break; }
+            vec_set(v, j - 1, b);
+            vec_set(v, j, a);
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Lexicographic compare of two Str (returns <0, 0, >0).
+fn str_compare_lex(a, b) {
+    var al = str_len(a);
+    var bl = str_len(b);
+    var min = al;
+    if (bl < min) { min = bl; }
+    var ad = str_data(a);
+    var bd = str_data(b);
+    var i = 0;
+    while (i < min) {
+        var ca = load8(ad + i);
+        var cb = load8(bd + i);
+        if (ca != cb) { return ca - cb; }
+        i = i + 1;
+    }
+    return al - bl;
+}
+
+# ── Authorization ────────────────────
+
+# Core authz evaluator. Returns an AuthzResult struct.
+#   Denied  → status=AZ_DENIED, aux = cstr reason
+#   Allowed → status=AZ_ALLOWED, aux = require_auth (0 or 1)
+fn check_authorization(policy, caller, groups, target, command) {
+    var rules = policy_rules(policy);
+    var n = vec_len(rules);
+    var i = 0;
+    var defaults = policy_defaults(policy);
+    var def_req = def_require_auth(defaults);
+
+    while (i < n) {
+        var r = vec_get(rules, i);
+        var user_matches = 0;
+        var group_matches = 0;
+
+        var ru = rule_user(r);
+        if (ru != 0) {
+            if (streq(ru, "*") == 1) { user_matches = 1; }
+            elif (streq(ru, caller) == 1) { user_matches = 1; }
+        }
+        var rg = rule_group(r);
+        if (rg != 0) {
+            if (groups != 0) {
+                var gi = 0;
+                var gn = vec_len(groups);
+                while (gi < gn) {
+                    if (streq(rg, vec_get(groups, gi)) == 1) { group_matches = 1; gi = gn; }
+                    else { gi = gi + 1; }
+                }
+            }
+        }
+
+        if (user_matches == 0) {
+            if (group_matches == 0) { i = i + 1; }
+            else { i = i; }  # noop
+        }
+
+        if (user_matches == 1 || group_matches == 1) {
+            var ra = rule_run_as(r);
+            var target_ok = 0;
+            if (streq(ra, "*") == 1) { target_ok = 1; }
+            elif (streq(ra, target) == 1) { target_ok = 1; }
+            if (target_ok == 1) {
+                # Deny check first
+                var dcmds = rule_deny_commands(r);
+                var di = 0;
+                var dn = vec_len(dcmds);
+                while (di < dn) {
+                    if (command_matches(command, vec_get(dcmds, di)) == 1) {
+                        return authz_new(AZ_DENIED, "command explicitly denied by rule");
+                    }
+                    di = di + 1;
+                }
+
+                var cmds = rule_commands(r);
+                var cn = vec_len(cmds);
+                # Empty commands list = all commands allowed
+                if (cn == 0) {
+                    var ra_flag = rule_require_auth(r) & def_req;
+                    return authz_new(AZ_ALLOWED, ra_flag);
+                }
+                var ci = 0;
+                while (ci < cn) {
+                    if (command_matches(command, vec_get(cmds, ci)) == 1) {
+                        var ra_flag2 = rule_require_auth(r) & def_req;
+                        return authz_new(AZ_ALLOWED, ra_flag2);
+                    }
+                    ci = ci + 1;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return authz_new(AZ_DENIED, "no matching rule");
+}
+
+# ── Policy linting ────────────────────
+
+# Severity codes for lint warnings
+enum LintSev { LINT_WARN = 0; LINT_ERROR = 1; }
+
+# Warning struct: { severity; rule_index; message }
+enum WarnOff { WN_SEV = 0; WN_IDX = 8; WN_MSG = 16; WN_SZ = 24; }
+
+fn _warn_new(sev, idx, msg) {
+    var w = alloc(WN_SZ);
+    store64(w + WN_SEV, sev);
+    store64(w + WN_IDX, idx);
+    store64(w + WN_MSG, msg);
+    return w;
+}
+
+fn warn_severity(w) { return load64(w + WN_SEV); }
+fn warn_rule_index(w) { return load64(w + WN_IDX); }
+fn warn_message(w) { return load64(w + WN_MSG); }
+
+fn lint_policy(policy) {
+    var out = vec_new();
+    var defaults = policy_defaults(policy);
+    var rules = policy_rules(policy);
+    var n = vec_len(rules);
+
+    if (n == 0) {
+        vec_push(out, _warn_new(LINT_WARN, 0 - 1,
+            "policy has no rules — all commands will be denied"));
+    }
+    if (def_ttl(defaults) == 0) {
+        if (def_require_auth(defaults) == 1) {
+            vec_push(out, _warn_new(LINT_WARN, 0 - 1,
+                "timestamp_ttl is 0 with require_auth=true — password required every invocation"));
+        }
+    }
+    if (def_require_auth(defaults) == 0) {
+        vec_push(out, _warn_new(LINT_WARN, 0 - 1,
+            "Global require_auth is false — all rules default to NOPASSWD"));
+    }
+
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(rules, i);
+        var ru = rule_user(r);
+        var rg = rule_group(r);
+
+        if (ru == 0) {
+            if (rg == 0) {
+                vec_push(out, _warn_new(LINT_ERROR, i,
+                    "rule has neither 'user' nor 'group' — it will never match"));
+            }
+        }
+
+        if (ru != 0) {
+            if (streq(ru, "*") == 1) {
+                if (rule_require_auth(r) == 0) {
+                    if (vec_len(rule_commands(r)) == 0) {
+                        vec_push(out, _warn_new(LINT_ERROR, i,
+                            "rule grants ALL commands to ALL users with NOPASSWD"));
+                    } else {
+                        vec_push(out, _warn_new(LINT_WARN, i,
+                            "rule grants all users (*) NOPASSWD access — verify intended"));
+                    }
+                }
+            }
+        }
+
+        if (streq(rule_run_as(r), "*") == 1) {
+            if (vec_len(rule_commands(r)) == 0) {
+                vec_push(out, _warn_new(LINT_WARN, i,
+                    "rule allows running as any user with all commands"));
+            }
+        }
+
+        # Duplicate rule detection (same user/group/run_as)
+        var j = i + 1;
+        while (j < n) {
+            var o = vec_get(rules, j);
+            var uu = 0;
+            var vu = rule_user(o);
+            if (ru == 0 && vu == 0) { uu = 1; }
+            elif (ru != 0 && vu != 0) {
+                if (streq(ru, vu) == 1) { uu = 1; }
+            }
+            var gg = 0;
+            var vg = rule_group(o);
+            if (rg == 0 && vg == 0) { gg = 1; }
+            elif (rg != 0 && vg != 0) {
+                if (streq(rg, vg) == 1) { gg = 1; }
+            }
+            var aa = 0;
+            if (streq(rule_run_as(r), rule_run_as(o)) == 1) { aa = 1; }
+            if (uu == 1 && gg == 1 && aa == 1) {
+                vec_push(out, _warn_new(LINT_WARN, i,
+                    "duplicate user/group/run_as as a later rule — only the first matches"));
+                j = n;
+            }
+            else { j = j + 1; }
+        }
+
+        # Unreachable deny: a deny pattern that can't match any allow pattern.
+        var dcmds = rule_deny_commands(r);
+        var cmds = rule_commands(r);
+        if (vec_len(cmds) > 0) {
+            var di = 0;
+            var dn = vec_len(dcmds);
+            while (di < dn) {
+                var deny = vec_get(dcmds, di);
+                var overlap = 0;
+                var ck = 0;
+                var cn = vec_len(cmds);
+                while (ck < cn) {
+                    var allow = vec_get(cmds, ck);
+                    if (streq(allow, "ALL") == 1) { overlap = 1; ck = cn; }
+                    elif (streq(allow, "*") == 1) { overlap = 1; ck = cn; }
+                    elif (command_matches(deny, allow) == 1) { overlap = 1; ck = cn; }
+                    else { ck = ck + 1; }
+                }
+                if (overlap == 0) {
+                    vec_push(out, _warn_new(LINT_WARN, i,
+                        "deny_commands pattern doesn't overlap any commands entry — may be unreachable"));
+                }
+                di = di + 1;
+            }
+        }
+
+        i = i + 1;
+    }
+
+    return out;
+}

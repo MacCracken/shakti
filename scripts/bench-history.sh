@@ -1,63 +1,56 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run criterion benchmarks and append a summary line to benchmarks/history.csv
-# Usage: ./scripts/bench-history.sh [-- extra cargo bench args]
+# Run cyrius benchmarks and append a summary line to benchmarks/history.csv
+# Usage: ./scripts/bench-history.sh [bench.bcyr]
 
 HISTORY_DIR="benchmarks"
 HISTORY_FILE="$HISTORY_DIR/history.csv"
+BENCH_FILE="${1:-tests/bcyr/core.bcyr}"
 
 mkdir -p "$HISTORY_DIR"
 
-# Create CSV header if it doesn't exist
 if [ ! -f "$HISTORY_FILE" ]; then
-    echo "timestamp,git_sha,benchmark,time_ns" > "$HISTORY_FILE"
+    echo "timestamp,git_sha,benchmark,avg_ns,min_ns,max_ns,iters" > "$HISTORY_FILE"
 fi
 
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-echo "Running benchmarks..."
-BENCH_OUTPUT=$(cargo bench "$@" 2>&1)
+echo "Running benchmarks: $BENCH_FILE"
+BENCH_OUTPUT=$(cyrius bench "$BENCH_FILE" 2>&1)
 echo "$BENCH_OUTPUT"
 
-# Parse criterion output lines like:
-#   parse_policy            time:   [14.051 µs 14.134 µs 14.226 µs]
-# Extract benchmark name (first field) and median value (middle of bracket triple).
-echo "$BENCH_OUTPUT" | grep -E '^\S.*time:' | while IFS= read -r line; do
-    # Name is everything before "time:"
-    name=$(echo "$line" | sed 's/\s*time:.*//' | xargs)
-
-    # Extract [low unit median unit high unit] — we want the median (3rd number)
-    bracket=$(echo "$line" | grep -oP '\[.*?\]')
-    if [ -z "$bracket" ]; then
-        continue
-    fi
-
-    # Parse: [14.051 µs 14.134 µs 14.226 µs]
-    median=$(echo "$bracket" | awk '{print $3}')
-    unit=$(echo "$bracket" | awk '{print $4}')
-
-    if [ -z "$median" ] || [ -z "$unit" ]; then
-        continue
-    fi
-
-    # Convert to ns
-    case "$unit" in
-        ps)   time_ns=$(echo "$median * 0.001" | bc -l 2>/dev/null || echo "$median") ;;
-        ns)   time_ns="$median" ;;
-        µs|us) time_ns=$(echo "$median * 1000" | bc -l 2>/dev/null || echo "$median") ;;
-        ms)   time_ns=$(echo "$median * 1000000" | bc -l 2>/dev/null || echo "$median") ;;
-        s)    time_ns=$(echo "$median * 1000000000" | bc -l 2>/dev/null || echo "$median") ;;
-        *)    time_ns="$median" ;;
+# Parse lines like:
+#   command_matches/exact: 1us avg (min=488ns max=498us) [1000000 iters]
+convert_to_ns() {
+    local val="$1"
+    local num="${val//[^0-9.]/}"
+    case "$val" in
+        *ns)  echo "$num" ;;
+        *us)  awk -v n="$num" 'BEGIN{printf "%.0f", n*1000}' ;;
+        *ms)  awk -v n="$num" 'BEGIN{printf "%.0f", n*1000000}' ;;
+        *s)   awk -v n="$num" 'BEGIN{printf "%.0f", n*1000000000}' ;;
+        *)    echo "$num" ;;
     esac
+}
 
-    if [ -n "$name" ] && [ -n "$time_ns" ]; then
-        echo "$TIMESTAMP,$GIT_SHA,$name,$time_ns" >> "$HISTORY_FILE"
-    fi
+echo "$BENCH_OUTPUT" | grep -E '^\s+\S.*: .* avg \(min=.* max=.*\) \[.* iters\]' \
+| while IFS= read -r line; do
+    name=$(echo "$line" | sed -E 's/^\s+([^:]+):.*/\1/')
+    avg=$(echo "$line" | sed -E 's/.*: ([0-9.]+[a-z]+) avg.*/\1/')
+    min=$(echo "$line" | sed -E 's/.*min=([0-9.]+[a-z]+).*/\1/')
+    max=$(echo "$line" | sed -E 's/.*max=([0-9.]+[a-z]+).*/\1/')
+    iters=$(echo "$line" | sed -E 's/.*\[([0-9]+) iters\].*/\1/')
+
+    avg_ns=$(convert_to_ns "$avg")
+    min_ns=$(convert_to_ns "$min")
+    max_ns=$(convert_to_ns "$max")
+
+    echo "$TIMESTAMP,$GIT_SHA,$name,$avg_ns,$min_ns,$max_ns,$iters" >> "$HISTORY_FILE"
 done
 
-echo ""
+echo
 echo "Benchmark history saved to $HISTORY_FILE"
 echo "Latest entries:"
 tail -20 "$HISTORY_FILE"

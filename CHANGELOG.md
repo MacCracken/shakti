@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-17
+
+### Changed
+
+- **Language port**: reimplemented in [Cyrius](https://github.com/MacCracken/cyrius)
+  (pinned to 5.2.1). The original Rust implementation is preserved in
+  `rust-old/` for reference. Binary size dropped from ~1.8 MB (Rust release,
+  dynamic libc + PAM) to 410 KB (static, no runtime).
+- Project layout adopts patra flatten style: vendored stdlib in `lib/`,
+  module-per-file in `src/`, tests in `tests/tcyr/`, benches in `tests/bcyr/`.
+- `cyrius.cyml` replaces `Cargo.toml` as the build manifest.
+- Error handling: anyhow::Result → integer `SHK_ERR_*` codes with
+  `shk_err_msg()` for human-readable messages.
+- Structs: serde-derive → manual offset enums + `store64`/`load64`
+  accessors (`PolicyOff`, `DefOff`, `RuleOff`, `CfgOff`, `EvalOff`,
+  `AuthzOff`, etc.).
+- `AuthzResult` + `Evaluation` expose error codes and boolean fields
+  rather than Rust enums / `#[non_exhaustive]` wrappers.
+- Test suite grew from 130 to 219 cases across 8 `.tcyr` files.
+
+### Added
+
+- Benchmarks (`tests/bcyr/core.bcyr`) for the hot paths: command_matches
+  (4 variants), validate_command, parse_policy, check_authorization
+  (3 variants), sanitize_environment.
+- `scripts/bench-history.sh` rewritten for cyrius bench output format.
+- Local mini-TOML parser in `src/policy.cyr` — the stdlib parser only
+  recognises `[[array]]` sections, but shakti's schema uses `[defaults]`.
+- README expanded with architecture map and consumer-integration guidance.
+
+### Removed
+
+- `Cargo.toml`, `Cargo.lock`, `deny.toml`, `rust-toolchain.toml` (Rust
+  tooling; see `rust-old/` if needed).
+- `src/*.rs` (moved into `rust-old/` by `cyrius port`).
+- Rust-only dependencies: anyhow, serde, toml, tracing, tracing-journald,
+  nix, zeroize, pam, criterion.
+
+### Security
+
+- Preserved: O_NOFOLLOW timestamp open, per-TTY isolation, root-ownership
+  checks on policy files / timestamps / include fragments, LD_*
+  prefix catch-all, BASH_FUNC_* prefix catch-all, shell-metacharacter
+  rejection in command names, path-traversal rejection in usernames,
+  argument-level wildcard matching.
+- **PAM**: the Rust `pam` crate integration is stubbed in `src/auth.cyr`
+  pending a libpam binding via `dynlib.cyr`. All authentication currently
+  falls through to the `/usr/bin/su` shim — same security posture as the
+  Rust build with the `pam` feature disabled.
+- **NSS group resolution**: the Rust `getgrouplist(3)` call is replaced
+  with direct parsing of `/etc/group`. This regresses LDAP/sssd support
+  that was added in 0.1.x; restoring it will require a libnss binding.
+  File this as a known gap for consumers using remote identity stores.
+- **initgroups**: the target process's supplementary groups are cleared
+  via `setgroups(0, NULL)` rather than populated. `setgid`/`setuid` still
+  set the primary GID/UID correctly, but callers who rely on supplementary
+  group membership of the target user will see different behaviour than
+  the Rust build.
+
+---
+
+The remainder of 0.2.0's scope was landed in Rust before the port and
+is preserved verbatim from the pre-port changelog:
+
 ### Added
 
 - Argument-level wildcard matching in policy patterns (e.g., `/usr/bin/systemctl restart *`)

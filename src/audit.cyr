@@ -1,0 +1,94 @@
+# audit.cyr — audit logging for privilege escalation events
+#
+# Port of rust-old/src/audit.rs. The Rust version logged through
+# `tracing` + `tracing-journald` + a file fallback. Cyrius has no
+# journald binding in 5.2.1, so we emit:
+#   1. a structured syslog-style line to /var/log/agnos/sudo.log
+#   2. the same line to stderr for live monitoring
+#
+# Callers pass an AuditAction code; audit_log_line() formats and dispatches.
+
+# ── AuditAction codes ────────────────────
+enum AuditAction {
+    AUDIT_COMMAND = 0;
+    AUDIT_AUTH_FAILURE = 1;
+    AUDIT_TIMESTAMP_INVALIDATED = 2;
+}
+
+fn audit_action_str(action) {
+    if (action == AUDIT_COMMAND) { return "COMMAND"; }
+    if (action == AUDIT_AUTH_FAILURE) { return "AUTH_FAILURE"; }
+    if (action == AUDIT_TIMESTAMP_INVALIDATED) { return "TIMESTAMP_INVALIDATED"; }
+    return "UNKNOWN";
+}
+
+# Default audit log location. Matches the Rust version.
+fn default_audit_log_path() { return "/var/log/agnos/sudo.log"; }
+
+# ── Line builder ────────────────────
+# Output format (matches rust-old/src/audit.rs write_audit_file):
+#   <ts> <caller> : TTY=<tty> ; PWD=<pwd> ; USER=<target> ; COMMAND=<cmd>
+# plus for stderr/tracing:
+#   shakti: <ACTION> : <caller> ; USER=<target> ; COMMAND=<cmd> ; STATUS=<s> ; REASON=<r>
+
+fn _sb_add_cstr(sb, s) {
+    if (s == 0) { str_builder_add_cstr(sb, ""); }
+    else { str_builder_add_cstr(sb, s); }
+    return 0;
+}
+
+fn _build_file_line(caller, target, command) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, _shk_now_secs());
+    str_builder_add_cstr(sb, " ");
+    _sb_add_cstr(sb, caller);
+    str_builder_add_cstr(sb, " : TTY=");
+    var tty = _shk_tty_session();
+    if (strlen(tty) > 0) { str_builder_add_cstr(sb, tty); }
+    else { str_builder_add_cstr(sb, "unknown"); }
+    str_builder_add_cstr(sb, " ; PWD=unknown ; USER=");
+    _sb_add_cstr(sb, target);
+    str_builder_add_cstr(sb, " ; COMMAND=");
+    _sb_add_cstr(sb, command);
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+fn _build_stderr_line(action, caller, target, command, success, reason) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "shakti: ");
+    str_builder_add_cstr(sb, audit_action_str(action));
+    str_builder_add_cstr(sb, " : ");
+    _sb_add_cstr(sb, caller);
+    str_builder_add_cstr(sb, " ; USER=");
+    _sb_add_cstr(sb, target);
+    str_builder_add_cstr(sb, " ; COMMAND=");
+    _sb_add_cstr(sb, command);
+    str_builder_add_cstr(sb, " ; STATUS=");
+    if (success == 1) { str_builder_add_cstr(sb, "ALLOWED"); }
+    else { str_builder_add_cstr(sb, "DENIED"); }
+    str_builder_add_cstr(sb, " ; REASON=");
+    _sb_add_cstr(sb, reason);
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+# ── audit_log ────────────────────
+
+# Log an audit event. Writes to both the file audit trail and stderr.
+# Best-effort: file write errors fall through to stderr only.
+fn audit_log(action, caller, target, command, success, reason) {
+    var file_line = _build_file_line(caller, target, command);
+    var fpath = default_audit_log_path();
+    # file_append_locked creates if needed; returns -1 on permission error.
+    file_append_locked(fpath, str_data(file_line), str_len(file_line));
+
+    var stderr_line = _build_stderr_line(action, caller, target, command, success, reason);
+    file_write(2, str_data(stderr_line), str_len(stderr_line));
+    return 0;
+}
+
+# No-op placeholder. In Rust this initialized tracing subscribers; in
+# Cyrius there's no equivalent. Kept for API symmetry so main.cyr can
+# call it at startup.
+fn init_tracing() { return 0; }

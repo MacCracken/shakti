@@ -1,0 +1,98 @@
+# auth.cyr — authentication backends
+#
+# Port of rust-old/src/auth.rs. The Rust version used the `pam` crate
+# (feature-gated) with an `/usr/bin/su` fallback. Cyrius 5.2.1 has no
+# PAM binding in stdlib, so this port uses the su fallback
+# unconditionally and leaves pam_authenticate() as a seam that
+# future work can fill in via dynlib.cyr (dlopen libpam).
+
+fn pam_service_name() { return "shakti"; }
+
+# ── pam_authenticate (stub) ────────────────────
+# Future: open libpam.so via dynlib, resolve pam_start / pam_authenticate
+# / pam_end, wire a conversation callback that returns the supplied
+# password. For now always reports unavailable so authenticate() falls
+# through to su_authenticate().
+fn pam_authenticate(username, password) {
+    return 0 - SHK_ERR_PAM_UNAVAILABLE;
+}
+
+# ── su_authenticate ────────────────────
+# Fork /usr/bin/su, pipe password to its stdin, check exit status.
+# Returns:
+#   1 on successful authentication
+#   0 on failed authentication (wrong password)
+#   negative SHK_ERR_* on spawn/IO error
+fn su_authenticate(username, password) {
+    # pipe for password → su stdin
+    var pfd = alloc(16);
+    var pr = syscall(SYS_PIPE, pfd);
+    if (pr < 0) { return 0 - SHK_ERR_IO; }
+    var rfd = load32(pfd);
+    var wfd = load32(pfd + 4);
+
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(rfd);
+        sys_close(wfd);
+        return 0 - SHK_ERR_IO;
+    }
+
+    if (pid == 0) {
+        # Child: redirect stdin from pipe, run `su -c true <user>`.
+        sys_close(wfd);
+        syscall(SYS_DUP2, rfd, 0);
+        sys_close(rfd);
+
+        # Send stdout/stderr to /dev/null — we only care about exit status
+        var devnull = syscall(SYS_OPEN, "/dev/null", O_WRONLY, 0);
+        if (devnull >= 0) {
+            syscall(SYS_DUP2, devnull, 1);
+            syscall(SYS_DUP2, devnull, 2);
+            sys_close(devnull);
+        }
+
+        var argv = alloc(8 * 5);
+        store64(argv + 0,  "/usr/bin/su");
+        store64(argv + 8,  "-c");
+        store64(argv + 16, "true");
+        store64(argv + 24, username);
+        store64(argv + 32, 0);
+
+        var envp = alloc(8);
+        store64(envp, 0);
+
+        sys_execve("/usr/bin/su", argv, envp);
+        sys_exit(127);
+    }
+
+    # Parent: close read end, send password + newline, close write end
+    sys_close(rfd);
+    var plen = strlen(password);
+    if (plen > 0) { file_write(wfd, password, plen); }
+    file_write(wfd, "\n", 1);
+    sys_close(wfd);
+
+    # Reap child, check exit status
+    var stbuf = alloc(8);
+    store64(stbuf, 0);
+    var wr = sys_waitpid(pid, stbuf, 0);
+    if (wr < 0) { return 0 - SHK_ERR_IO; }
+    var status = load32(stbuf);
+    if (WIFEXITED(status) == 1) {
+        if (WEXITSTATUS(status) == 0) { return 1; }
+    }
+    return 0;
+}
+
+# ── authenticate (primary entry) ────────────────────
+# Try PAM, fall back to su. Returns:
+#   1 on success
+#   0 on authentication failure
+#   negative SHK_ERR_* on backend error
+fn authenticate(username, password) {
+    var pam_result = pam_authenticate(username, password);
+    if (pam_result >= 0) { return pam_result; }
+    # PAM unavailable — fall through to su
+    return su_authenticate(username, password);
+}

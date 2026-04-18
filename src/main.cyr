@@ -1,0 +1,671 @@
+# shakti — AGNOS privilege escalation tool (Cyrius port)
+#
+# Binary entry point. Parses CLI, loads policy, evaluates via the api
+# module, authenticates if required, sanitizes the environment, and
+# execve()s the target command.
+#
+# Security-critical flow (matches rust-old/src/main.rs run()):
+#   1. Parse CLI args
+#   2. Resolve caller identity from real UID (not effective)
+#   3. Resolve caller's groups
+#   4. Handle admin modes: --invalidate / --check / --list / --version
+#   5. Evaluate (validates, authorizes, builds env)
+#   6. Mask signals (SIGINT/SIGQUIT/SIGTSTP) during auth
+#   7. Prompt for password with echo disabled (RAII guard)
+#   8. authenticate() → PAM or su fallback
+#   9. Update timestamp on success
+#  10. Audit log
+#  11. setgid/setuid to target
+#  12. Close inherited fds > stderr
+#  13. execve() — never returns on success
+
+include "src/lib.cyr"
+
+# ── Additional syscalls used only by the CLI ────────────────────
+var TCGETS = 21505;       # 0x5401
+var TCSETS = 21506;       # 0x5402
+var SYS_CLOSE_RANGE = 436;
+
+# termios struct layout (asm-generic/termbits.h — Linux x86_64):
+#   c_iflag  at 0  (4)
+#   c_oflag  at 4  (4)
+#   c_cflag  at 8  (4)
+#   c_lflag  at 12 (4)
+#   c_line   at 16 (1)
+#   c_cc[19] at 17 — 19 bytes
+# Total: 36 bytes (aligned). We use a 64-byte buffer to be safe.
+var TERMIOS_SIZE = 64;
+var ECHO_FLAG = 8;        # 0o10
+
+# ── Caller identity ────────────────────
+
+# Look up a user's UID / primary GID / username from /etc/passwd.
+# Writes results through the provided output pointers.
+# Returns 1 on success, 0 on not found.
+fn _lookup_uid(uid, out_name_ptr, out_gid_ptr) {
+    var buf = alloc(65536);
+    var n = file_read_all("/etc/passwd", buf, 65536);
+    if (n <= 0) { return 0; }
+    var pos = 0;
+    while (pos < n) {
+        var line_start = pos;
+        while (pos < n) {
+            if (load8(buf + pos) == 10) { break; }
+            pos = pos + 1;
+        }
+        # Parse: name:x:uid:gid:gecos:home:shell
+        var nend = line_start;
+        while (nend < pos) {
+            if (load8(buf + nend) == 58) { break; }
+            nend = nend + 1;
+        }
+        # Skip x field
+        var p = nend + 1;
+        while (p < pos) {
+            if (load8(buf + p) == 58) { p = p + 1; break; }
+            p = p + 1;
+        }
+        # uid field
+        var uid_start = p;
+        while (p < pos) {
+            if (load8(buf + p) == 58) { break; }
+            p = p + 1;
+        }
+        # Parse uid
+        var parsed_uid = 0;
+        var q = uid_start;
+        while (q < p) {
+            var c = load8(buf + q);
+            if (c < 48 || c > 57) { parsed_uid = 0 - 1; q = p; }
+            else { parsed_uid = parsed_uid * 10 + (c - 48); }
+            q = q + 1;
+        }
+        if (parsed_uid == uid) {
+            # Extract name
+            var name = alloc(nend - line_start + 1);
+            memcpy(name, buf + line_start, nend - line_start);
+            store8(name + nend - line_start, 0);
+            store64(out_name_ptr, name);
+            # Parse gid field
+            p = p + 1;
+            var gid_start = p;
+            while (p < pos) {
+                if (load8(buf + p) == 58) { break; }
+                p = p + 1;
+            }
+            var parsed_gid = 0;
+            var g = gid_start;
+            while (g < p) {
+                var c2 = load8(buf + g);
+                parsed_gid = parsed_gid * 10 + (c2 - 48);
+                g = g + 1;
+            }
+            store64(out_gid_ptr, parsed_gid);
+            return 1;
+        }
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+# Resolve all groups the given username belongs to (by scanning /etc/group).
+# Returns vec<cstr>.
+fn _lookup_groups(username) {
+    var groups = vec_new();
+    var buf = alloc(65536);
+    var n = file_read_all("/etc/group", buf, 65536);
+    if (n <= 0) { return groups; }
+    var ulen = strlen(username);
+    var pos = 0;
+    while (pos < n) {
+        var line_start = pos;
+        while (pos < n) {
+            if (load8(buf + pos) == 10) { break; }
+            pos = pos + 1;
+        }
+        # Line: group:x:gid:members
+        var nend = line_start;
+        while (nend < pos) {
+            if (load8(buf + nend) == 58) { break; }
+            nend = nend + 1;
+        }
+        # Skip to 4th field (members)
+        var colons = 0;
+        var p = line_start;
+        while (p < pos) {
+            if (load8(buf + p) == 58) {
+                colons = colons + 1;
+                if (colons == 3) { p = p + 1; break; }
+            }
+            p = p + 1;
+        }
+        # Scan members, comma-separated
+        var mstart = p;
+        while (p <= pos) {
+            var at_sep = 0;
+            if (p == pos) { at_sep = 1; }
+            elif (load8(buf + p) == 44) { at_sep = 1; }
+            if (at_sep == 1) {
+                var mlen = p - mstart;
+                if (mlen == ulen) {
+                    if (memeq(buf + mstart, username, ulen) == 1) {
+                        # Capture group name
+                        var gname = alloc(nend - line_start + 1);
+                        memcpy(gname, buf + line_start, nend - line_start);
+                        store8(gname + nend - line_start, 0);
+                        vec_push(groups, gname);
+                    }
+                }
+                mstart = p + 1;
+            }
+            p = p + 1;
+        }
+        pos = pos + 1;
+    }
+    return groups;
+}
+
+# ── Signal masking ────────────────────
+
+# Build a sigset_t (Linux: 8 bytes = 64-bit mask) with SIGINT/SIGQUIT/SIGTSTP set.
+fn _build_auth_sigmask() {
+    var set = alloc(8);
+    var mask = 0;
+    # bit (sig - 1) for signals 1..32
+    mask = mask | (1 << (SIGINT - 1));
+    mask = mask | (1 << (SIGQUIT - 1));
+    # SIGTSTP = 20 (not in stdlib enum; inline)
+    mask = mask | (1 << 19);
+    store64(set, mask);
+    return set;
+}
+
+# Block auth-phase signals; store previous mask in out_old (must be 8 bytes).
+fn _mask_auth_signals(out_old) {
+    var set = _build_auth_sigmask();
+    sys_sigprocmask(SIG_BLOCK, set, out_old);
+    return 0;
+}
+
+fn _restore_signals(old) {
+    sys_sigprocmask(SIG_SETMASK, old, 0);
+    return 0;
+}
+
+# ── Password read (echo disabled) ────────────────────
+
+# Read a line from stdin with terminal echo disabled. Returns a heap-
+# allocated cstr. Restores the original termios on exit regardless of
+# whether tcsetattr succeeds.
+fn _read_password() {
+    var orig = alloc(TERMIOS_SIZE);
+    memset(orig, 0, TERMIOS_SIZE);
+    var have_tty = 0;
+    if (syscall(SYS_IOCTL, 0, TCGETS, orig) >= 0) { have_tty = 1; }
+
+    if (have_tty == 1) {
+        # Copy orig → modified with ECHO cleared (c_lflag at offset 12)
+        var modified = alloc(TERMIOS_SIZE);
+        memcpy(modified, orig, TERMIOS_SIZE);
+        var lflag = load32(modified + 12);
+        lflag = lflag & (0 - 1 - ECHO_FLAG);   # clear ECHO bit
+        store32(modified + 12, lflag);
+        syscall(SYS_IOCTL, 0, TCSETS, modified);
+    }
+
+    var buf = alloc(1024);
+    var pos = 0;
+    while (pos < 1023) {
+        var got = file_read(0, buf + pos, 1);
+        if (got <= 0) { pos = 1023; }
+        else {
+            if (load8(buf + pos) == 10) { pos = 1023; }
+            else { pos = pos + 1; }
+        }
+    }
+    # Actual length is up to first newline or 1023
+    var real = 0;
+    while (real < 1023) {
+        if (load8(buf + real) == 10) { break; }
+        if (load8(buf + real) == 0) { break; }
+        real = real + 1;
+    }
+    store8(buf + real, 0);
+
+    # Restore termios
+    if (have_tty == 1) {
+        syscall(SYS_IOCTL, 0, TCSETS, orig);
+    }
+    file_write(2, "\n", 1);
+    return buf;
+}
+
+# Overwrite password buffer with zeros (zeroize crate equivalent).
+fn _zeroize_cstr(s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { store8(s + i, 0); i = i + 1; }
+    return 0;
+}
+
+# ── Interactive auth loop ────────────────────
+
+# Returns 1 on success, 0 on final failure.
+fn _prompt_and_authenticate(username) {
+    var attempt = 1;
+    while (attempt <= MAX_AUTH_ATTEMPTS) {
+        file_write(2, "[shakti] password for ", 22);
+        file_write(2, username, strlen(username));
+        file_write(2, ": ", 2);
+
+        var password = _read_password();
+        if (strlen(password) == 0) {
+            _zeroize_cstr(password);
+            if (attempt < MAX_AUTH_ATTEMPTS) {
+                file_write(2, "Sorry, try again.\n", 18);
+                attempt = attempt + 1;
+            } else { return 0; }
+        } else {
+            var r = authenticate(username, password);
+            _zeroize_cstr(password);
+            if (r == 1) { return 1; }
+            if (attempt < MAX_AUTH_ATTEMPTS) {
+                file_write(2, "Sorry, try again.\n", 18);
+            }
+            attempt = attempt + 1;
+        }
+    }
+    return 0;
+}
+
+# ── CLI parse ────────────────────
+# CliArgs struct: target_user, policy_path, invalidate, list, check,
+#                 help, version, argc, argv (vec of cstr)
+enum CliOff {
+    CLI_TARGET = 0;
+    CLI_POLICY = 8;
+    CLI_INVALIDATE = 16;
+    CLI_LIST = 24;
+    CLI_CHECK = 32;
+    CLI_HELP = 40;
+    CLI_VERSION = 48;
+    CLI_ARGV = 56;
+    CLI_SZ = 64;
+}
+
+fn _cli_new() {
+    var c = alloc(CLI_SZ);
+    store64(c + CLI_TARGET, "root");
+    store64(c + CLI_POLICY, default_policy_path());
+    store64(c + CLI_INVALIDATE, 0);
+    store64(c + CLI_LIST, 0);
+    store64(c + CLI_CHECK, 0);
+    store64(c + CLI_HELP, 0);
+    store64(c + CLI_VERSION, 0);
+    store64(c + CLI_ARGV, vec_new());
+    return c;
+}
+
+fn _print_usage() {
+    file_write(2, "Usage: shakti [OPTIONS] [--] COMMAND [ARGS...]\n\n", 48);
+    file_write(2, "AGNOS privilege escalation tool.\n\nOptions:\n", 43);
+    file_write(2, "  -u, --user USER      Run command as USER (default: root)\n", 60);
+    file_write(2, "  -p, --policy FILE    Use alternate policy file\n", 50);
+    file_write(2, "  -k, --invalidate     Invalidate cached credentials\n", 54);
+    file_write(2, "  -l, --list           List allowed commands for current user\n", 63);
+    file_write(2, "  -c, --check          Lint the policy file\n", 45);
+    file_write(2, "  -h, --help           Show this help message\n", 47);
+    file_write(2, "  -V, --version        Show version\n", 37);
+    return 0;
+}
+
+fn _parse_cli() {
+    var cli = _cli_new();
+    var n = argc();
+    # argv(0) is program name; skip it
+    var i = 1;
+    var saw_dd = 0;
+    while (i < n) {
+        var a = argv(i);
+        if (saw_dd == 1) {
+            vec_push(load64(cli + CLI_ARGV), a);
+            i = i + 1;
+        } elif (streq(a, "-u") == 1 || streq(a, "--user") == 1) {
+            i = i + 1;
+            if (i >= n) { return 0; }
+            store64(cli + CLI_TARGET, argv(i));
+            i = i + 1;
+        } elif (streq(a, "-p") == 1 || streq(a, "--policy") == 1) {
+            i = i + 1;
+            if (i >= n) { return 0; }
+            store64(cli + CLI_POLICY, argv(i));
+            i = i + 1;
+        } elif (streq(a, "-k") == 1 || streq(a, "--invalidate") == 1) {
+            store64(cli + CLI_INVALIDATE, 1);
+            i = i + 1;
+        } elif (streq(a, "-l") == 1 || streq(a, "--list") == 1) {
+            store64(cli + CLI_LIST, 1);
+            i = i + 1;
+        } elif (streq(a, "-c") == 1 || streq(a, "--check") == 1) {
+            store64(cli + CLI_CHECK, 1);
+            i = i + 1;
+        } elif (streq(a, "-h") == 1 || streq(a, "--help") == 1) {
+            store64(cli + CLI_HELP, 1);
+            i = i + 1;
+        } elif (streq(a, "-V") == 1 || streq(a, "--version") == 1) {
+            store64(cli + CLI_VERSION, 1);
+            i = i + 1;
+        } elif (streq(a, "--") == 1) {
+            saw_dd = 1;
+            i = i + 1;
+        } elif (load8(a) == 45) {
+            # Unknown option
+            file_write(2, "shakti: unknown option: ", 24);
+            file_write(2, a, strlen(a));
+            file_write(2, "\n", 1);
+            return 0;
+        } else {
+            # First positional — the rest of argv is command + args
+            while (i < n) {
+                vec_push(load64(cli + CLI_ARGV), argv(i));
+                i = i + 1;
+            }
+        }
+    }
+    return cli;
+}
+
+# ── Permission listing (`-l` mode) ────────────────────
+
+fn _list_permissions(policy, username, groups) {
+    file_write(1, "User ", 5);
+    file_write(1, username, strlen(username));
+    file_write(1, " may run:\n\n", 11);
+
+    var rules = policy_rules(policy);
+    var n = vec_len(rules);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        var r = vec_get(rules, i);
+        var ru = rule_user(r);
+        var um = 0;
+        if (ru != 0) {
+            if (streq(ru, "*") == 1) { um = 1; }
+            elif (streq(ru, username) == 1) { um = 1; }
+        }
+        var rg = rule_group(r);
+        var gm = 0;
+        if (rg != 0) {
+            if (groups != 0) {
+                var gi = 0;
+                var gn = vec_len(groups);
+                while (gi < gn) {
+                    if (streq(rg, vec_get(groups, gi)) == 1) { gm = 1; gi = gn; }
+                    else { gi = gi + 1; }
+                }
+            }
+        }
+        if (um == 1 || gm == 1) {
+            found = 1;
+            file_write(1, "    (", 5);
+            file_write(1, rule_run_as(r), strlen(rule_run_as(r)));
+            file_write(1, ") ", 2);
+            if (rule_require_auth(r) == 0) { file_write(1, "NOPASSWD: ", 10); }
+            var cmds = rule_commands(r);
+            if (vec_len(cmds) == 0) { file_write(1, "ALL\n", 4); }
+            else {
+                var ci = 0;
+                var cn = vec_len(cmds);
+                while (ci < cn) {
+                    if (ci > 0) {
+                        file_write(1, "    (", 5);
+                        file_write(1, rule_run_as(r), strlen(rule_run_as(r)));
+                        file_write(1, ") ", 2);
+                        if (rule_require_auth(r) == 0) { file_write(1, "NOPASSWD: ", 10); }
+                    }
+                    file_write(1, vec_get(cmds, ci), strlen(vec_get(cmds, ci)));
+                    file_write(1, "\n", 1);
+                    ci = ci + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (found == 0) { file_write(1, "    (none)\n", 11); }
+    return 0;
+}
+
+# ── Policy check mode (`-c`) ────────────────────
+
+fn _check_policy(policy) {
+    var warns = lint_policy(policy);
+    var n = vec_len(warns);
+    var errors = 0;
+    var warnings = 0;
+    var i = 0;
+    while (i < n) {
+        var w = vec_get(warns, i);
+        var sev = warn_severity(w);
+        var idx = warn_rule_index(w);
+        var msg = warn_message(w);
+        if (sev == LINT_ERROR) {
+            file_write(1, "  [ERROR] ", 10);
+            errors = errors + 1;
+        } else {
+            file_write(1, "  [WARN]  ", 10);
+            warnings = warnings + 1;
+        }
+        if (idx >= 0) {
+            file_write(1, "rule[", 5);
+            var nbuf = alloc(16);
+            var nl = fmt_int_buf(idx, nbuf);
+            file_write(1, nbuf, nl);
+            file_write(1, "]: ", 3);
+        }
+        file_write(1, msg, strlen(msg));
+        file_write(1, "\n", 1);
+        i = i + 1;
+    }
+    if (n == 0) { file_write(1, "No issues found.\n", 17); }
+    if (errors > 0) { return 1; }
+    return 0;
+}
+
+# ── exec target command ────────────────────
+
+fn _exec_target(resolved, argv_vec, env_vec, target_uid, target_gid) {
+    # Close fds > stderr to prevent leaking inherited fds to child
+    syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # close_range is available on modern kernels; ignore error
+
+    # setgroups → setgid → setuid (must be in this order)
+    sys_setgroups(0, 0);
+    sys_setgid(target_gid);
+    sys_setuid(target_uid);
+
+    # Build null-terminated argv array
+    var ac = vec_len(argv_vec);
+    var argv_arr = alloc((ac + 1) * 8);
+    var i = 0;
+    while (i < ac) {
+        store64(argv_arr + i * 8, vec_get(argv_vec, i));
+        i = i + 1;
+    }
+    store64(argv_arr + ac * 8, 0);
+
+    # Build null-terminated envp array
+    var ec = vec_len(env_vec);
+    var envp_arr = alloc((ec + 1) * 8);
+    i = 0;
+    while (i < ec) {
+        store64(envp_arr + i * 8, vec_get(env_vec, i));
+        i = i + 1;
+    }
+    store64(envp_arr + ec * 8, 0);
+
+    sys_execve(resolved, argv_arr, envp_arr);
+    file_write(2, "shakti: exec failed\n", 20);
+    sys_exit(127);
+    return 0;
+}
+
+# ── run ────────────────────
+
+fn run() {
+    init_tracing();
+    var cli = _parse_cli();
+    if (cli == 0) { _print_usage(); return 1; }
+
+    if (load64(cli + CLI_HELP) == 1) { _print_usage(); return 0; }
+    if (load64(cli + CLI_VERSION) == 1) {
+        file_write(1, "shakti 0.2.0 (cyrius port)\n", 27);
+        return 0;
+    }
+
+    # Caller identity (real UID — we may be setuid)
+    var caller_uid = sys_getuid();
+    var caller_gid = sys_getgid();
+    var name_ptr = alloc(8);
+    store64(name_ptr, 0);
+    var gid_ptr = alloc(8);
+    store64(gid_ptr, 0);
+    if (_lookup_uid(caller_uid, name_ptr, gid_ptr) == 0) {
+        file_write(2, "shakti: cannot resolve caller username\n", 39);
+        return 1;
+    }
+    var caller = load64(name_ptr);
+    var groups = _lookup_groups(caller);
+
+    # Invalidate mode
+    if (load64(cli + CLI_INVALIDATE) == 1) {
+        var ir = invalidate_timestamp(caller);
+        if (ir == SHK_OK) {
+            audit_log(AUDIT_TIMESTAMP_INVALIDATED, caller,
+                load64(cli + CLI_TARGET), "", 1, "user-requested");
+            return 0;
+        }
+        file_write(2, "shakti: ", 8);
+        file_write(2, shk_err_msg(ir), strlen(shk_err_msg(ir)));
+        file_write(2, "\n", 1);
+        return 1;
+    }
+
+    # Load policy
+    var policy = load_policy(load64(cli + CLI_POLICY));
+    if (policy == 0) {
+        file_write(2, "shakti: failed to load policy\n", 30);
+        return 1;
+    }
+
+    # Check mode
+    if (load64(cli + CLI_CHECK) == 1) { return _check_policy(policy); }
+    # List mode
+    if (load64(cli + CLI_LIST) == 1) {
+        _list_permissions(policy, caller, groups);
+        return 0;
+    }
+
+    # Command required
+    if (vec_len(load64(cli + CLI_ARGV)) == 0) {
+        _print_usage();
+        return 1;
+    }
+
+    # Build config for evaluate
+    var config = shakti_config_new();
+    cfg_set_policy_path(config, load64(cli + CLI_POLICY));
+    cfg_set_target_user(config, load64(cli + CLI_TARGET));
+    cfg_set_auth_mode(config, AUTH_INTERACTIVE);
+
+    var eval = evaluate_with_policy(config, policy, caller,
+        caller_uid, caller_gid, groups, load64(cli + CLI_ARGV));
+
+    var target = load64(cli + CLI_TARGET);
+
+    if (eval_authorized(eval) == 0) {
+        var msg = eval_error_msg(eval);
+        audit_log(AUDIT_COMMAND, caller, target,
+            eval_resolved_command(eval), 0, msg);
+        file_write(2, "shakti: ", 8);
+        file_write(2, msg, strlen(msg));
+        file_write(2, "\n", 1);
+        return 1;
+    }
+
+    # Authentication
+    if (eval_require_auth(eval) == 1) {
+        if (eval_timestamp_valid(eval) == 0) {
+            var saved = alloc(8);
+            store64(saved, 0);
+            _mask_auth_signals(saved);
+            var ok = _prompt_and_authenticate(caller);
+            _restore_signals(saved);
+            if (ok == 0) {
+                audit_log(AUDIT_AUTH_FAILURE, caller, target,
+                    eval_resolved_command(eval), 0, "auth failed");
+                file_write(2, "shakti: authentication failure\n", 31);
+                return 1;
+            }
+            # Update timestamp on success (best-effort)
+            update_timestamp(caller);
+        }
+    }
+
+    audit_log(AUDIT_COMMAND, caller, target,
+        eval_resolved_command(eval), 1, "authorized");
+
+    # Resolve target uid / gid
+    var tbuf = alloc(65536);
+    var tbn = file_read_all("/etc/passwd", tbuf, 65536);
+    var target_uid = 0;
+    var target_gid = 0;
+    var tlen = strlen(target);
+    var pos = 0;
+    while (pos < tbn) {
+        if (pos + tlen < tbn) {
+            if (memeq(tbuf + pos, target, tlen) == 1) {
+                if (load8(tbuf + pos + tlen) == 58) {
+                    # Skip name:x:
+                    var p = pos + tlen + 1;
+                    while (p < tbn) {
+                        if (load8(tbuf + p) == 58) { p = p + 1; break; }
+                        p = p + 1;
+                    }
+                    # UID
+                    while (p < tbn) {
+                        var c = load8(tbuf + p);
+                        if (c == 58) { break; }
+                        target_uid = target_uid * 10 + (c - 48);
+                        p = p + 1;
+                    }
+                    p = p + 1;
+                    while (p < tbn) {
+                        var c2 = load8(tbuf + p);
+                        if (c2 == 58) { break; }
+                        target_gid = target_gid * 10 + (c2 - 48);
+                        p = p + 1;
+                    }
+                    pos = tbn;
+                }
+            }
+        }
+        while (pos < tbn) {
+            if (load8(tbuf + pos) == 10) { pos = pos + 1; break; }
+            pos = pos + 1;
+        }
+    }
+
+    _exec_target(eval_resolved_command(eval),
+        load64(cli + CLI_ARGV), eval_environment(eval),
+        target_uid, target_gid);
+    return 127;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+    return run();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

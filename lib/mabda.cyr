@@ -1,0 +1,4025 @@
+# @public — stable API surface (survives the v3.0 backend swap)
+# error.cyr — GPU error codes and Result type
+# Ported from mabda/src/error.rs
+#
+# Uses tagged.cyr Result pattern: Ok(value) / Err(error_code)
+# Error codes are integer constants. For errors that carry context
+# (like a message pointer), use gpu_err_new(code, msg_ptr).
+#
+# GpuErr struct layout (16 bytes):
+#   +0: code    — error code constant
+#   +8: detail  — pointer to detail string (or 0)
+
+# ================================================================
+# Error code constants
+# ================================================================
+
+enum GpuErrCode {
+    GPU_ERR_NONE                    = 0;
+    GPU_ERR_ADAPTER_NOT_FOUND       = 1;
+    GPU_ERR_DEVICE_REQUEST          = 2;
+    GPU_ERR_SURFACE_CONFIG          = 3;
+    GPU_ERR_SURFACE_TIMEOUT         = 4;
+    GPU_ERR_SURFACE_OUTDATED        = 5;
+    GPU_ERR_SURFACE_LOST            = 6;
+    GPU_ERR_SHADER                  = 7;
+    GPU_ERR_PIPELINE                = 8;
+    GPU_ERR_TEXTURE                 = 9;
+    GPU_ERR_IMAGE_DECODE            = 10;
+    GPU_ERR_BUFFER                  = 11;
+    GPU_ERR_READBACK_MAP            = 12;
+    GPU_ERR_READBACK_CHANNEL        = 13;
+    GPU_ERR_WORKGROUP_LIMIT         = 14;
+    GPU_ERR_TEXTURE_DIMENSION       = 15;
+    GPU_ERR_FFI_LOAD                = 16;
+    GPU_ERR_FFI_SYMBOL              = 17;
+    GPU_ERR_OTHER                   = 99;
+}
+
+# ================================================================
+# GpuErr struct
+# ================================================================
+
+# Create a GpuErr with code and optional detail string
+fn gpu_err_new(code, detail) {
+    var e = alloc(16);
+    store64(e, code);
+    store64(e + 8, detail);
+    return e;
+}
+
+# Create a GpuErr with code only (no detail)
+fn gpu_err(code) {
+    return gpu_err_new(code, 0);
+}
+
+# Get error code
+fn gpu_err_code(e) {
+    return load64(e);
+}
+
+# Get detail string pointer (or 0)
+fn gpu_err_detail(e) {
+    return load64(e + 8);
+}
+
+# ================================================================
+# GpuResult helpers — wraps tagged.cyr
+# ================================================================
+# GpuResult is Ok(value) or Err(gpu_err_ptr)
+
+fn gpu_ok(value) {
+    return Ok(value);
+}
+
+fn gpu_err_result(code) {
+    return Err(gpu_err(code));
+}
+
+fn gpu_err_result_msg(code, msg) {
+    return Err(gpu_err_new(code, msg));
+}
+
+fn gpu_result_unwrap(res) {
+    if (is_ok(res) == 1) { return payload(res); }
+    var e = payload(res);
+    var code = gpu_err_code(e);
+    syscall(1, 2, "gpu error: ", 11);
+    gpu_err_print_name(code);
+    var detail = gpu_err_detail(e);
+    if (detail != 0) {
+        syscall(1, 2, ": ", 2);
+        syscall(1, 2, detail, strlen(detail));
+    }
+    syscall(1, 2, "\n", 1);
+    syscall(60, 1);
+    return 0;
+}
+
+# ================================================================
+# Recoverability check
+# ================================================================
+
+fn gpu_err_is_recoverable(code) {
+    if (code == GPU_ERR_SURFACE_TIMEOUT)  { return 1; }
+    if (code == GPU_ERR_SURFACE_OUTDATED) { return 1; }
+    if (code == GPU_ERR_SURFACE_CONFIG)   { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Error name lookup
+# ================================================================
+
+fn gpu_err_name(code) {
+    if (code == GPU_ERR_NONE)               { return "none"; }
+    if (code == GPU_ERR_ADAPTER_NOT_FOUND)  { return "adapter not found"; }
+    if (code == GPU_ERR_DEVICE_REQUEST)     { return "device request failed"; }
+    if (code == GPU_ERR_SURFACE_CONFIG)     { return "surface config failed"; }
+    if (code == GPU_ERR_SURFACE_TIMEOUT)    { return "surface timeout"; }
+    if (code == GPU_ERR_SURFACE_OUTDATED)   { return "surface outdated"; }
+    if (code == GPU_ERR_SURFACE_LOST)       { return "surface lost"; }
+    if (code == GPU_ERR_SHADER)             { return "shader error"; }
+    if (code == GPU_ERR_PIPELINE)           { return "pipeline error"; }
+    if (code == GPU_ERR_TEXTURE)            { return "texture error"; }
+    if (code == GPU_ERR_IMAGE_DECODE)       { return "image decode error"; }
+    if (code == GPU_ERR_BUFFER)             { return "buffer error"; }
+    if (code == GPU_ERR_READBACK_MAP)       { return "readback map failed"; }
+    if (code == GPU_ERR_READBACK_CHANNEL)   { return "readback channel closed"; }
+    if (code == GPU_ERR_WORKGROUP_LIMIT)    { return "workgroup limit exceeded"; }
+    if (code == GPU_ERR_TEXTURE_DIMENSION)  { return "texture dimension exceeded"; }
+    if (code == GPU_ERR_FFI_LOAD)           { return "FFI library load failed"; }
+    if (code == GPU_ERR_FFI_SYMBOL)         { return "FFI symbol not found"; }
+    if (code == GPU_ERR_OTHER)              { return "other error"; }
+    return "unknown error";
+}
+
+fn gpu_err_print_name(code) {
+    var name = gpu_err_name(code);
+    syscall(1, 2, name, strlen(name));
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# color.cyr — RGBA color type and utilities
+# Ported from mabda/src/color.rs
+#
+# Color is the shared RGBA type for the AGNOS GPU ecosystem.
+# All components stored as f64 (0.0–1.0). Converted to f32 at GPU boundary.
+#
+# Color struct layout (32 bytes):
+#   +0:  r (f64 bit pattern)
+#   +8:  g (f64 bit pattern)
+#   +16: b (f64 bit pattern)
+#   +24: a (f64 bit pattern)
+
+# ================================================================
+# f64 constants (bit patterns)
+# ================================================================
+
+# f64 constants — initialized at runtime via color_init()
+var F64_0    = 0;
+var F64_1    = 0;
+var F64_255  = 0;
+var F64_HALF = 0;
+var F64_TWO  = 0;
+
+# Rec. 709 luminance coefficients
+var F64_LUM_R = 0;  # 0.2126
+var F64_LUM_G = 0;  # 0.7152
+var F64_LUM_B = 0;  # 0.0722
+
+# Cornflower blue components
+var F64_CB_R = 0;   # 0.392
+var F64_CB_G = 0;   # 0.584
+var F64_CB_B = 0;   # 0.929
+
+var _color_initialized = 0;
+
+fn color_init() {
+    if (_color_initialized == 1) { return 0; }
+    _color_initialized = 1;
+
+    F64_0    = f64_from(0);
+    F64_1    = f64_from(1);
+    F64_255  = f64_from(255);
+    F64_HALF = f64_div(f64_from(1), f64_from(2));
+    F64_TWO  = f64_from(2);
+
+    # 0.2126 = 2126 / 10000
+    F64_LUM_R = f64_div(f64_from(2126), f64_from(10000));
+    # 0.7152 = 7152 / 10000
+    F64_LUM_G = f64_div(f64_from(7152), f64_from(10000));
+    # 0.0722 = 722 / 10000
+    F64_LUM_B = f64_div(f64_from(722), f64_from(10000));
+
+    # 0.392 = 392 / 1000
+    F64_CB_R = f64_div(f64_from(392), f64_from(1000));
+    # 0.584 = 584 / 1000
+    F64_CB_G = f64_div(f64_from(584), f64_from(1000));
+    # 0.929 = 929 / 1000
+    F64_CB_B = f64_div(f64_from(929), f64_from(1000));
+
+    return 0;
+}
+
+# ================================================================
+# Color constructors
+# ================================================================
+
+# Create a Color from f64 RGBA components (0.0–1.0)
+fn color_new(r, g, b, a) {
+    var c = alloc(32);
+    store64(c, r);
+    store64(c + 8, g);
+    store64(c + 16, b);
+    store64(c + 24, a);
+    return c;
+}
+
+# Create a Color from RGB with full opacity
+fn color_rgb(r, g, b) {
+    return color_new(r, g, b, F64_1);
+}
+
+# Create a Color from 8-bit RGBA (0–255 integer values)
+fn color_from_rgba8(r, g, b, a) {
+    var fr = f64_div(f64_from(r), F64_255);
+    var fg = f64_div(f64_from(g), F64_255);
+    var fb = f64_div(f64_from(b), F64_255);
+    var fa = f64_div(f64_from(a), F64_255);
+    return color_new(fr, fg, fb, fa);
+}
+
+# Create a Color from hex (e.g., 0xFF0000FF for opaque red)
+fn color_from_hex(hex) {
+    var r = (hex >> 24) & 0xFF;
+    var g = (hex >> 16) & 0xFF;
+    var b = (hex >> 8) & 0xFF;
+    var a = hex & 0xFF;
+    return color_from_rgba8(r, g, b, a);
+}
+
+# ================================================================
+# Color accessors
+# ================================================================
+
+fn color_r(c) { return load64(c); }
+fn color_g(c) { return load64(c + 8); }
+fn color_b(c) { return load64(c + 16); }
+fn color_a(c) { return load64(c + 24); }
+
+fn color_set_r(c, v) { store64(c, v); return 0; }
+fn color_set_g(c, v) { store64(c + 8, v); return 0; }
+fn color_set_b(c, v) { store64(c + 16, v); return 0; }
+fn color_set_a(c, v) { store64(c + 24, v); return 0; }
+
+# ================================================================
+# Color math
+# ================================================================
+
+# Luminance (perceived brightness, Rec. 709)
+fn color_luminance(c) {
+    var r = f64_mul(F64_LUM_R, color_r(c));
+    var g = f64_mul(F64_LUM_G, color_g(c));
+    var b = f64_mul(F64_LUM_B, color_b(c));
+    return f64_add(f64_add(r, g), b);
+}
+
+# Linear interpolation between two colors
+# t is clamped to [0.0, 1.0]
+fn color_lerp(a, b, t) {
+    # Clamp t
+    if (f64_lt(t, F64_0) == 1) { t = F64_0; }
+    if (f64_gt(t, F64_1) == 1) { t = F64_1; }
+
+    var r = f64_add(color_r(a), f64_mul(f64_sub(color_r(b), color_r(a)), t));
+    var g = f64_add(color_g(a), f64_mul(f64_sub(color_g(b), color_g(a)), t));
+    var bl = f64_add(color_b(a), f64_mul(f64_sub(color_b(b), color_b(a)), t));
+    var al = f64_add(color_a(a), f64_mul(f64_sub(color_a(b), color_a(a)), t));
+    return color_new(r, g, bl, al);
+}
+
+# Check if two colors are equal (exact f64 comparison)
+fn color_eq(a, b) {
+    if (color_r(a) != color_r(b)) { return 0; }
+    if (color_g(a) != color_g(b)) { return 0; }
+    if (color_b(a) != color_b(b)) { return 0; }
+    if (color_a(a) != color_a(b)) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# GPU conversion — write color as 4x f32 to a buffer
+# ================================================================
+# wgpu expects f64 for wgpu::Color (clear colors) and f32 for vertex data.
+# f64→f32 via inline asm: cvtsd2ss (SSE2)
+
+# Convert f64 bit pattern to f32 bit pattern (in low 32 bits of i64)
+fn f64_to_f32(val) {
+    var result = 0;
+    # movq xmm0, val; cvtsd2ss xmm0, xmm0; movd eax, xmm0; mov result, rax
+    asm {
+        # movq xmm0, [rbp-8] (val)
+        0x66; 0x48; 0x0F; 0x6E; 0x45; 0xF8;
+        # cvtsd2ss xmm0, xmm0
+        0xF2; 0x0F; 0x5A; 0xC0;
+        # movd eax, xmm0
+        0x66; 0x0F; 0x7E; 0xC0;
+        # mov [rbp-16], rax (result)
+        0x48; 0x89; 0x45; 0xF0;
+    }
+    return result;
+}
+
+# Convert f32 bit pattern (low 32 bits) to f64 bit pattern
+fn f32_to_f64(val) {
+    var result = 0;
+    # movd xmm0, eax(val); cvtss2sd xmm0, xmm0; movq result, xmm0
+    asm {
+        # mov eax, [rbp-8] (val — only low 32 bits matter)
+        0x8B; 0x45; 0xF8;
+        # movd xmm0, eax
+        0x66; 0x0F; 0x6E; 0xC0;
+        # cvtss2sd xmm0, xmm0
+        0xF3; 0x0F; 0x5A; 0xC0;
+        # movq [rbp-16], xmm0 (result)
+        0x66; 0x48; 0x0F; 0x7E; 0x45; 0xF0;
+    }
+    return result;
+}
+
+# Write color as 4x f32 (16 bytes) to destination pointer
+# Used for vertex color data, uniform buffers, etc.
+fn color_write_f32(c, dst) {
+    store32(dst, f64_to_f32(color_r(c)));
+    store32(dst + 4, f64_to_f32(color_g(c)));
+    store32(dst + 8, f64_to_f32(color_b(c)));
+    store32(dst + 12, f64_to_f32(color_a(c)));
+    return 0;
+}
+
+# Write color as 4x f64 (32 bytes) to destination pointer
+# Used for wgpu::Color (clear colors in render passes)
+fn color_write_f64(c, dst) {
+    store64(dst, color_r(c));
+    store64(dst + 8, color_g(c));
+    store64(dst + 16, color_b(c));
+    store64(dst + 24, color_a(c));
+    return 0;
+}
+
+# ================================================================
+# Preset colors (allocated on first use via alloc)
+# ================================================================
+
+var _COLOR_WHITE = 0;
+var _COLOR_BLACK = 0;
+var _COLOR_RED = 0;
+var _COLOR_GREEN = 0;
+var _COLOR_BLUE = 0;
+var _COLOR_TRANSPARENT = 0;
+var _COLOR_CORNFLOWER_BLUE = 0;
+
+fn COLOR_WHITE() {
+    if (_COLOR_WHITE == 0) { _COLOR_WHITE = color_new(F64_1, F64_1, F64_1, F64_1); }
+    return _COLOR_WHITE;
+}
+fn COLOR_BLACK() {
+    if (_COLOR_BLACK == 0) { _COLOR_BLACK = color_new(F64_0, F64_0, F64_0, F64_1); }
+    return _COLOR_BLACK;
+}
+fn COLOR_RED() {
+    if (_COLOR_RED == 0) { _COLOR_RED = color_new(F64_1, F64_0, F64_0, F64_1); }
+    return _COLOR_RED;
+}
+fn COLOR_GREEN() {
+    if (_COLOR_GREEN == 0) { _COLOR_GREEN = color_new(F64_0, F64_1, F64_0, F64_1); }
+    return _COLOR_GREEN;
+}
+fn COLOR_BLUE() {
+    if (_COLOR_BLUE == 0) { _COLOR_BLUE = color_new(F64_0, F64_0, F64_1, F64_1); }
+    return _COLOR_BLUE;
+}
+fn COLOR_TRANSPARENT() {
+    if (_COLOR_TRANSPARENT == 0) { _COLOR_TRANSPARENT = color_new(F64_0, F64_0, F64_0, F64_0); }
+    return _COLOR_TRANSPARENT;
+}
+fn COLOR_CORNFLOWER_BLUE() {
+    if (_COLOR_CORNFLOWER_BLUE == 0) {
+        _COLOR_CORNFLOWER_BLUE = color_new(F64_CB_R, F64_CB_G, F64_CB_B, F64_1);
+    }
+    return _COLOR_CORNFLOWER_BLUE;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# capabilities.cyr — GPU capability reporting
+# Ported from mabda/src/capabilities.rs
+#
+# GpuCapabilities struct layout (128 bytes):
+#   +0:  adapter_name     (str ptr)
+#   +8:  backend          (str ptr)
+#   +16: timestamp_query  (i64 bool)
+#   +24: compute_shaders  (i64 bool)
+#   +32: max_texture_dimension_2d  (i64)
+#   +40: max_uniform_buffer_size   (i64)
+#   +48: max_storage_buffer_size   (i64)
+#   +56: max_buffer_size           (i64)
+#   +64: max_bind_groups           (i64)
+#   +72: max_vertex_buffers        (i64)
+#   +80: max_compute_wg_x          (i64)
+#   +88: max_compute_wg_y          (i64)
+#   +96: max_compute_wg_z          (i64)
+#   +104: max_compute_wgs_per_dim  (i64)
+#   +112: multi_draw_indirect      (i64 bool)
+
+fn gpu_caps_new() {
+    var c = alloc(120);
+    memset(c, 0, 120);
+    store64(c + 24, 1);   # compute_shaders = true (always for wgpu)
+    return c;
+}
+
+# Accessors
+fn gpu_caps_adapter_name(c)           { return load64(c); }
+fn gpu_caps_backend(c)                { return load64(c + 8); }
+fn gpu_caps_timestamp_query(c)        { return load64(c + 16); }
+fn gpu_caps_compute_shaders(c)        { return load64(c + 24); }
+fn gpu_caps_max_texture_2d(c)         { return load64(c + 32); }
+fn gpu_caps_max_uniform_buffer(c)     { return load64(c + 40); }
+fn gpu_caps_max_storage_buffer(c)     { return load64(c + 48); }
+fn gpu_caps_max_buffer_size(c)        { return load64(c + 56); }
+fn gpu_caps_max_bind_groups(c)        { return load64(c + 64); }
+fn gpu_caps_max_vertex_buffers(c)     { return load64(c + 72); }
+fn gpu_caps_max_compute_wg_x(c)      { return load64(c + 80); }
+fn gpu_caps_max_compute_wg_y(c)      { return load64(c + 88); }
+fn gpu_caps_max_compute_wg_z(c)      { return load64(c + 96); }
+fn gpu_caps_max_compute_wgs_dim(c)   { return load64(c + 104); }
+fn gpu_caps_multi_draw_indirect(c)   { return load64(c + 112); }
+
+# Setters (used by from_context to populate)
+fn gpu_caps_set_adapter_name(c, v)    { store64(c, v); return 0; }
+fn gpu_caps_set_backend(c, v)         { store64(c + 8, v); return 0; }
+fn gpu_caps_set_timestamp_query(c, v) { store64(c + 16, v); return 0; }
+fn gpu_caps_set_max_texture_2d(c, v)  { store64(c + 32, v); return 0; }
+fn gpu_caps_set_max_uniform(c, v)     { store64(c + 40, v); return 0; }
+fn gpu_caps_set_max_storage(c, v)     { store64(c + 48, v); return 0; }
+fn gpu_caps_set_max_buffer(c, v)      { store64(c + 56, v); return 0; }
+fn gpu_caps_set_max_bind_groups(c, v) { store64(c + 64, v); return 0; }
+fn gpu_caps_set_max_vertex_buf(c, v)  { store64(c + 72, v); return 0; }
+fn gpu_caps_set_compute_wg(c, x, y, z) {
+    store64(c + 80, x);
+    store64(c + 88, y);
+    store64(c + 96, z);
+    return 0;
+}
+fn gpu_caps_set_compute_wgs_dim(c, v) { store64(c + 104, v); return 0; }
+fn gpu_caps_set_multi_draw(c, v)      { store64(c + 112, v); return 0; }
+
+# Validation helpers
+fn gpu_caps_uniform_fits(c, size) {
+    if (size <= gpu_caps_max_uniform_buffer(c)) { return 1; }
+    return 0;
+}
+
+fn gpu_caps_storage_fits(c, size) {
+    if (size <= gpu_caps_max_storage_buffer(c)) { return 1; }
+    return 0;
+}
+
+# WebGPU compatibility constants
+var WEBGPU_MAX_UNIFORM_BUFFER = 65536;
+var WEBGPU_MAX_STORAGE_BUFFER = 134217728;
+var WEBGPU_MAX_BIND_GROUPS = 4;
+var WEBGPU_MAX_TEXTURE_2D = 8192;
+
+fn webgpu_uniform_fits(size) {
+    if (size <= WEBGPU_MAX_UNIFORM_BUFFER) { return 1; }
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# profiler.cyr — CPU frame profiling
+# Ported from mabda/src/profiler.rs
+#
+# FrameProfiler: EMA smoothing, frame timing, history ring buffer, pass timing
+# No RAII ProfileScope — use explicit profile_begin/profile_end instead
+#
+# FrameProfiler struct layout (72 bytes):
+#   +0:  frame_start_sec  (i64 — seconds from clock_gettime)
+#   +8:  frame_start_nsec (i64 — nanoseconds)
+#   +16: cpu_frame_ms     (f64)
+#   +24: avg_frame_ms     (f64)
+#   +32: fps              (f64)
+#   +40: frame_count      (i64)
+#   +48: alpha            (f64)
+#   +56: history          (vec ptr — vec of f64 frame times)
+#   +64: history_cap      (i64)
+#
+# PassTiming (24 bytes):
+#   +0:  label       (str ptr)
+#   +8:  label_len   (i64)
+#   +16: duration_ms (f64)
+
+# ================================================================
+# Time helpers — clock_gettime(CLOCK_MONOTONIC)
+# ================================================================
+
+# SYS_clock_gettime = 228, CLOCK_MONOTONIC = 1
+fn _time_now_ns() {
+    var ts[16];  # timespec: tv_sec(8) + tv_nsec(8)
+    syscall(228, 1, &ts);
+    var sec = load64(&ts);
+    var nsec = load64(&ts + 8);
+    # Return total nanoseconds as i64 (good for ~292 years)
+    return sec * 1000000000 + nsec;
+}
+
+# Convert nanosecond delta to f64 milliseconds
+fn _ns_to_ms(ns) {
+    # ms = ns / 1_000_000
+    var f_ns = f64_from(ns);
+    var f_million = f64_from(1000000);
+    return f64_div(f_ns, f_million);
+}
+
+# ================================================================
+# FrameProfiler
+# ================================================================
+
+fn profiler_new() {
+    return profiler_with_alpha_and_history(
+    f64_div(f64_from(5), f64_from(100)),   # 0.05
+    300
+    );
+}
+
+fn profiler_with_alpha(alpha) {
+    return profiler_with_alpha_and_history(alpha, 300);
+}
+
+fn profiler_with_alpha_and_history(alpha, history_cap) {
+    var p = alloc(72);
+    store64(p, 0);           # frame_start_sec
+    store64(p + 8, 0);       # frame_start_nsec
+    store64(p + 16, F64_0);  # cpu_frame_ms
+    # avg_frame_ms = 16.67
+    store64(p + 24, f64_div(f64_from(1667), f64_from(100)));
+    # fps = 60.0
+    store64(p + 32, f64_from(60));
+    store64(p + 40, 0);      # frame_count
+    # Clamp alpha to [0.001, 1.0]
+    var f_min = f64_div(f64_from(1), f64_from(1000));
+    if (f64_lt(alpha, f_min) == 1) { alpha = f_min; }
+    if (f64_gt(alpha, F64_1) == 1) { alpha = F64_1; }
+    store64(p + 48, alpha);
+    store64(p + 56, vec_new());  # history vec
+    store64(p + 64, history_cap);
+    return p;
+}
+
+# Accessors
+fn profiler_cpu_frame_ms(p)  { return load64(p + 16); }
+fn profiler_avg_frame_ms(p)  { return load64(p + 24); }
+fn profiler_fps(p)           { return load64(p + 32); }
+fn profiler_frame_count(p)   { return load64(p + 40); }
+
+fn profiler_begin_frame(p) {
+    var now = _time_now_ns();
+    store64(p, now);
+    return 0;
+}
+
+fn profiler_end_frame(p) {
+    var start = load64(p);
+    var now = _time_now_ns();
+    var elapsed_ns = now - start;
+    var elapsed_ms = _ns_to_ms(elapsed_ns);
+
+    # cpu_frame_ms = elapsed
+    store64(p + 16, elapsed_ms);
+
+    # EMA: avg = avg * (1 - alpha) + elapsed * alpha
+    var avg = load64(p + 24);
+    var alpha = load64(p + 48);
+    var one_minus_alpha = f64_sub(F64_1, alpha);
+    var new_avg = f64_add(f64_mul(avg, one_minus_alpha), f64_mul(elapsed_ms, alpha));
+    store64(p + 24, new_avg);
+
+    # fps = 1000.0 / avg_frame_ms
+    var f_1000 = f64_from(1000);
+    if (f64_gt(new_avg, F64_0) == 1) {
+        store64(p + 32, f64_div(f_1000, new_avg));
+    } else {
+        store64(p + 32, F64_0);
+    }
+
+    # frame_count++
+    store64(p + 40, load64(p + 40) + 1);
+
+    # Record in history ring buffer
+    var history = load64(p + 56);
+    var cap = load64(p + 64);
+    if (vec_len(history) >= cap) {
+        # Remove oldest (shift left — simple but O(n))
+        _vec_shift_left(history);
+    }
+    vec_push(history, elapsed_ms);
+
+    return elapsed_ms;
+}
+
+# Shift all elements left by 1, drop index 0
+fn _vec_shift_left(v) {
+    var len = vec_len(v);
+    if (len <= 1) {
+        if (len == 1) { vec_pop(v); }
+        return 0;
+    }
+    for (var i = 0; i < len - 1; i = i + 1) {
+        vec_set(v, i, vec_get(v, i + 1));
+    }
+    vec_pop(v);
+    return 0;
+}
+
+fn profiler_reset(p) {
+    store64(p + 16, F64_0);
+    store64(p + 24, f64_div(f64_from(1667), f64_from(100)));
+    store64(p + 32, f64_from(60));
+    store64(p + 40, 0);
+    var history = load64(p + 56);
+    # Clear history
+    while (vec_len(history) > 0) { vec_pop(history); }
+    return 0;
+}
+
+fn profiler_worst_frame_ms(p) {
+    var history = load64(p + 56);
+    var len = vec_len(history);
+    if (len == 0) { return F64_0; }
+    var worst = vec_get(history, 0);
+    for (var i = 1; i < len; i = i + 1) {
+        var v = vec_get(history, i);
+        if (f64_gt(v, worst) == 1) { worst = v; }
+    }
+    return worst;
+}
+
+fn profiler_best_frame_ms(p) {
+    var history = load64(p + 56);
+    var len = vec_len(history);
+    if (len == 0) { return F64_0; }
+    var best = vec_get(history, 0);
+    for (var i = 1; i < len; i = i + 1) {
+        var v = vec_get(history, i);
+        if (f64_lt(v, best) == 1) { best = v; }
+    }
+    return best;
+}
+
+# ================================================================
+# Explicit profiling (replaces RAII ProfileScope)
+# ================================================================
+
+# Begin timing a pass — returns timestamp (nanoseconds)
+fn profile_begin() {
+    return _time_now_ns();
+}
+
+# End timing a pass — returns duration in f64 milliseconds
+fn profile_end(start_ns) {
+    var now = _time_now_ns();
+    return _ns_to_ms(now - start_ns);
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# resource.cyr — frame resource tracking
+# Ported from mabda/src/resource.rs
+#
+# FrameResources tracks transient GPU resources (buffers, textures)
+# created during a frame, so they can be cleaned up at frame end.
+#
+# FrameResources struct layout (16 bytes):
+#   +0: buffers  (vec ptr — vec of WGPUBuffer handles)
+#   +8: textures (vec ptr — vec of WGPUTexture handles)
+
+fn frame_resources_new() {
+    var fr = alloc(16);
+    store64(fr, vec_new());
+    store64(fr + 8, vec_new());
+    return fr;
+}
+
+fn frame_resources_track_buffer(fr, buffer) {
+    vec_push(load64(fr), buffer);
+    return 0;
+}
+
+fn frame_resources_track_texture(fr, texture) {
+    vec_push(load64(fr + 8), texture);
+    return 0;
+}
+
+fn frame_resources_buffer_count(fr) {
+    return vec_len(load64(fr));
+}
+
+fn frame_resources_texture_count(fr) {
+    return vec_len(load64(fr + 8));
+}
+
+fn frame_resources_clear(fr) {
+    var bufs = load64(fr);
+    while (vec_len(bufs) > 0) { vec_pop(bufs); }
+    var texs = load64(fr + 8);
+    while (vec_len(texs) > 0) { vec_pop(texs); }
+    return 0;
+}
+# @internal — FFI / toolchain scaffolding, replaced in v3.0
+# wgpu_types.cyr — wgpu-native C API constants
+# Maps to webgpu.h v29.0.0.0 enums and flags
+#
+# In object mode, _cyrius_init() initializes all enum values.
+
+# ================================================================
+# WGPUBufferUsage (flags — combine with |)
+# ================================================================
+enum WGPUBufferUsage {
+    WGPU_BUFFER_USAGE_NONE          = 0x0000;
+    WGPU_BUFFER_USAGE_MAP_READ      = 0x0001;
+    WGPU_BUFFER_USAGE_MAP_WRITE     = 0x0002;
+    WGPU_BUFFER_USAGE_COPY_SRC      = 0x0004;
+    WGPU_BUFFER_USAGE_COPY_DST      = 0x0008;
+    WGPU_BUFFER_USAGE_INDEX         = 0x0010;
+    WGPU_BUFFER_USAGE_VERTEX        = 0x0020;
+    WGPU_BUFFER_USAGE_UNIFORM       = 0x0040;
+    WGPU_BUFFER_USAGE_STORAGE       = 0x0080;
+    WGPU_BUFFER_USAGE_INDIRECT      = 0x0100;
+    WGPU_BUFFER_USAGE_QUERY_RESOLVE = 0x0200;
+}
+
+# ================================================================
+# WGPUMapMode
+# ================================================================
+enum WGPUMapMode {
+    WGPU_MAP_MODE_NONE  = 0x0000;
+    WGPU_MAP_MODE_READ  = 0x0001;
+    WGPU_MAP_MODE_WRITE = 0x0002;
+}
+
+# ================================================================
+# WGPUPowerPreference
+# ================================================================
+enum WGPUPowerPreference {
+    WGPU_POWER_PREFERENCE_UNDEFINED        = 0;
+    WGPU_POWER_PREFERENCE_LOW_POWER        = 1;
+    WGPU_POWER_PREFERENCE_HIGH_PERFORMANCE = 2;
+}
+
+# ================================================================
+# WGPUCallbackMode
+# ================================================================
+enum WGPUCallbackMode {
+    WGPU_CALLBACK_MODE_WAIT_ANY_ONLY       = 1;
+    WGPU_CALLBACK_MODE_ALLOW_PROCESS_EVENTS = 2;
+    WGPU_CALLBACK_MODE_ALLOW_SPONTANEOUS   = 3;
+}
+
+# ================================================================
+# WGPURequestAdapterStatus / WGPURequestDeviceStatus
+# ================================================================
+enum WGPURequestStatus {
+    WGPU_REQUEST_ADAPTER_STATUS_SUCCESS = 1;
+    WGPU_REQUEST_DEVICE_STATUS_SUCCESS  = 1;
+}
+
+# ================================================================
+# WGPUBufferMapAsyncStatus
+# ================================================================
+enum WGPUBufferMapAsyncStatus {
+    WGPU_BUFFER_MAP_ASYNC_STATUS_SUCCESS = 1;
+}
+
+# ================================================================
+# WGPUBufferBindingType
+# ================================================================
+enum WGPUBufferBindingType {
+    WGPU_BUFFER_BINDING_TYPE_UNDEFINED         = 0;
+    WGPU_BUFFER_BINDING_TYPE_UNIFORM           = 1;
+    WGPU_BUFFER_BINDING_TYPE_STORAGE           = 2;
+    WGPU_BUFFER_BINDING_TYPE_READ_ONLY_STORAGE = 3;
+}
+
+# ================================================================
+# WGPUShaderStage (flags)
+# ================================================================
+enum WGPUShaderStage {
+    WGPU_SHADER_STAGE_NONE     = 0x00;
+    WGPU_SHADER_STAGE_VERTEX   = 0x01;
+    WGPU_SHADER_STAGE_FRAGMENT = 0x02;
+    WGPU_SHADER_STAGE_COMPUTE  = 0x04;
+}
+
+# ================================================================
+# WGPUTextureFormat (subset — values verified against wgpu-native v29)
+# ================================================================
+enum WGPUTextureFormat {
+    WGPU_TEXTURE_FORMAT_RGBA8_UNORM           = 0x16;  # 22
+    WGPU_TEXTURE_FORMAT_RGBA8_UNORM_SRGB      = 0x17;  # 23
+    WGPU_TEXTURE_FORMAT_BGRA8_UNORM           = 0x1B;  # 27
+    WGPU_TEXTURE_FORMAT_BGRA8_UNORM_SRGB      = 0x1C;  # 28
+    WGPU_TEXTURE_FORMAT_DEPTH24_PLUS          = 0x2E;  # 46
+    WGPU_TEXTURE_FORMAT_DEPTH24_PLUS_STENCIL8 = 0x2F;  # 47
+    WGPU_TEXTURE_FORMAT_DEPTH32_FLOAT         = 0x30;  # 48
+    WGPU_TEXTURE_FORMAT_DEPTH32_FLOAT_STENCIL8 = 0x31; # 49
+}
+
+# ================================================================
+# WGPULoadOp / WGPUStoreOp
+# ================================================================
+enum WGPULoadOp {
+    WGPU_LOAD_OP_UNDEFINED = 0;
+    WGPU_LOAD_OP_CLEAR     = 1;
+    WGPU_LOAD_OP_LOAD      = 2;
+}
+
+enum WGPUStoreOp {
+    WGPU_STORE_OP_UNDEFINED = 0;
+    WGPU_STORE_OP_STORE     = 1;
+    WGPU_STORE_OP_DISCARD   = 2;
+}
+
+# ================================================================
+# WGPUChainedStruct sType (wgpu-native v29 values)
+# ================================================================
+enum WGPUSType {
+    WGPU_STYPE_SHADER_SOURCE_WGSL = 0x00000002;
+}
+
+# ================================================================
+# WGPU_WHOLE_SIZE sentinel
+# ================================================================
+var WGPU_WHOLE_SIZE = 0 - 1;
+# @internal — FFI / toolchain scaffolding, replaced in v3.0
+# wgpu_descriptors.cyr — C struct builders for wgpu-native v29
+# All offsets verified against webgpu.h via offsetof() test program
+#
+# Pattern: each function allocates a zeroed struct, fills fields,
+# returns pointer. Caller passes pointer to wgpu C function.
+
+# ================================================================
+# WGPUStringView (16 bytes)
+#   +0:  data (char*)
+#   +8:  length (size_t)
+# ================================================================
+
+# Write a WGPUStringView at dst from a null-terminated string
+fn wgpu_string_view(dst, cstr) {
+    store64(dst, cstr);                # data pointer
+    store64(dst + 8, strlen(cstr));    # length
+    return 0;
+}
+
+# Write a WGPUStringView with explicit length
+fn wgpu_string_view_len(dst, data, len) {
+    store64(dst, data);
+    store64(dst + 8, len);
+    return 0;
+}
+
+# Null/empty string view
+fn wgpu_string_view_null(dst) {
+    store64(dst, 0);
+    store64(dst + 8, 0);
+    return 0;
+}
+
+# ================================================================
+# WGPUChainedStruct (16 bytes — base for sType chains)
+#   +0:  next (WGPUChainedStruct*)
+#   +8:  sType (WGPUSType, u32 at low bits)
+# ================================================================
+
+fn wgpu_chained_struct(dst, stype) {
+    store64(dst, 0);          # next = NULL
+    store32(dst + 8, stype);  # sType
+    return 0;
+}
+
+# ================================================================
+# WGPUInstanceDescriptor (32 bytes)
+#   +0:  nextInChain (8)
+# ================================================================
+
+fn wgpu_instance_descriptor() {
+    var desc = alloc(32);
+    memset(desc, 0, 32);
+    return desc;
+}
+
+# ================================================================
+# WGPURequestAdapterOptions (32 bytes)
+#   +0:  nextInChain (8)
+#   +12: powerPreference (u32)
+#   +16: forceFallbackAdapter (u32/bool)
+#   +20: backendType (u32)
+#   +24: compatibleSurface (8)
+# ================================================================
+
+fn wgpu_request_adapter_options(power_pref) {
+    var opts = alloc(32);
+    memset(opts, 0, 32);
+    store32(opts + 12, power_pref);
+    return opts;
+}
+
+# ================================================================
+# WGPUCallbackInfo — shared layout for all callback infos (40 bytes)
+#   +0:  nextInChain (8)
+#   +8:  mode (u32)
+#   +16: callback (fn ptr, 8)
+#   +24: userdata1 (8)
+#   +32: userdata2 (8)
+# ================================================================
+
+fn wgpu_callback_info(dst, mode, callback, userdata1, userdata2) {
+    memset(dst, 0, 40);
+    store32(dst + 8, mode);
+    store64(dst + 16, callback);
+    store64(dst + 24, userdata1);
+    store64(dst + 32, userdata2);
+    return 0;
+}
+
+# ================================================================
+# WGPUQueueDescriptor (24 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (WGPUStringView = 16)
+# ================================================================
+
+fn wgpu_queue_descriptor(dst) {
+    memset(dst, 0, 24);
+    return 0;
+}
+
+# ================================================================
+# WGPUDeviceDescriptor (144 bytes)
+#   +0:   nextInChain (8)
+#   +8:   label (StringView = 16)
+#   +24:  requiredFeatureCount (8)
+#   +32:  requiredFeatures (ptr, 8)
+#   +40:  requiredLimits (ptr, 8)
+#   +48:  defaultQueue (QueueDescriptor = 24)
+#   +72:  deviceLostCallbackInfo (40)
+#   +112: uncapturedErrorCallbackInfo (32)
+# ================================================================
+
+fn wgpu_device_descriptor(label) {
+    var desc = alloc(144);
+    memset(desc, 0, 144);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    return desc;
+}
+
+fn wgpu_device_descriptor_set_lost_callback(desc, callback, userdata) {
+    # deviceLostCallbackInfo at +72
+    store32(desc + 72 + 8, WGPU_CALLBACK_MODE_ALLOW_SPONTANEOUS);
+    store64(desc + 72 + 16, callback);
+    store64(desc + 72 + 24, userdata);
+    return 0;
+}
+
+# ================================================================
+# WGPUBufferDescriptor (48 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: usage (u64 flags)
+#   +32: size (u64)
+#   +40: mappedAtCreation (u32/bool)
+# ================================================================
+
+fn wgpu_buffer_descriptor(label, usage, size, mapped) {
+    var desc = alloc(48);
+    memset(desc, 0, 48);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, usage);
+    store64(desc + 32, size);
+    store32(desc + 40, mapped);
+    return desc;
+}
+
+# ================================================================
+# WGPUShaderSourceWGSL (32 bytes)
+#   +0:  chain (ChainedStruct = 16)
+#   +16: code (StringView = 16)
+# ================================================================
+
+fn wgpu_shader_source_wgsl(wgsl_code) {
+    var src = alloc(32);
+    memset(src, 0, 32);
+    wgpu_chained_struct(src, WGPU_STYPE_SHADER_SOURCE_WGSL);
+    wgpu_string_view(src + 16, wgsl_code);
+    return src;
+}
+
+# ================================================================
+# WGPUShaderModuleDescriptor (24 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+# ================================================================
+
+fn wgpu_shader_module_descriptor(label, wgsl_source_ptr) {
+    var desc = alloc(24);
+    memset(desc, 0, 24);
+    store64(desc, wgsl_source_ptr);    # nextInChain → WGPUShaderSourceWGSL
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    return desc;
+}
+
+# ================================================================
+# WGPUComputeState (48 bytes)
+#   +0:  nextInChain (8)
+#   +8:  module (8)
+#   +16: entryPoint (StringView = 16)
+#   +32: constantCount (8)
+#   +40: constants (ptr, 8)
+# ================================================================
+
+fn wgpu_compute_state(dst, shader_module, entry_point) {
+    memset(dst, 0, 48);
+    store64(dst + 8, shader_module);
+    wgpu_string_view(dst + 16, entry_point);
+    return 0;
+}
+
+# ================================================================
+# WGPUComputePipelineDescriptor (80 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: layout (PipelineLayout, 8)
+#   +32: compute (ComputeState = 48)
+# ================================================================
+
+fn wgpu_compute_pipeline_descriptor(label, layout, shader_module, entry_point) {
+    var desc = alloc(80);
+    memset(desc, 0, 80);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, layout);
+    wgpu_compute_state(desc + 32, shader_module, entry_point);
+    return desc;
+}
+
+# ================================================================
+# WGPUBindGroupLayoutEntry (120 bytes)
+#   +0:  nextInChain (8)
+#   +8:  binding (u32)
+#   +16: visibility (u64 flags)
+#   +32: buffer.type (u32 at +32), buffer.hasDynamicOffset (u32 at +36)
+#        buffer.minBindingSize (u64 at +40)
+#   +56: sampler (16 bytes)
+#   +72: texture (24 bytes)
+#   +96: storageTexture (24 bytes)
+# ================================================================
+
+fn wgpu_bgl_entry_buffer(dst, binding, visibility, buffer_type, has_dynamic_offset, min_size) {
+    memset(dst, 0, 120);
+    store32(dst + 8, binding);
+    store64(dst + 16, visibility);
+    store32(dst + 32, buffer_type);
+    store32(dst + 36, has_dynamic_offset);
+    store64(dst + 40, min_size);
+    return 0;
+}
+
+# ================================================================
+# WGPUBindGroupLayoutDescriptor (40 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: entryCount (8)
+#   +32: entries (ptr, 8)
+# ================================================================
+
+fn wgpu_bind_group_layout_descriptor(label, entries_ptr, entry_count) {
+    var desc = alloc(40);
+    memset(desc, 0, 40);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, entry_count);
+    store64(desc + 32, entries_ptr);
+    return desc;
+}
+
+# ================================================================
+# WGPUPipelineLayoutDescriptor (48 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: bindGroupLayoutCount (8)
+#   +32: bindGroupLayouts (ptr, 8)
+# ================================================================
+
+fn wgpu_pipeline_layout_descriptor(label, layouts_ptr, layout_count) {
+    var desc = alloc(48);
+    memset(desc, 0, 48);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, layout_count);
+    store64(desc + 32, layouts_ptr);
+    return desc;
+}
+
+# ================================================================
+# WGPUBindGroupEntry (56 bytes)
+#   +0:  nextInChain (8)
+#   +8:  binding (u32)
+#   +16: buffer (8)
+#   +24: offset (u64)
+#   +32: size (u64)
+#   +40: sampler (8)
+#   +48: textureView (8)
+# ================================================================
+
+fn wgpu_bind_group_entry_buffer(dst, binding, buffer, offset, size) {
+    memset(dst, 0, 56);
+    store32(dst + 8, binding);
+    store64(dst + 16, buffer);
+    store64(dst + 24, offset);
+    store64(dst + 32, size);
+    return 0;
+}
+
+# ================================================================
+# WGPUBindGroupDescriptor (48 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: layout (8)
+#   +32: entryCount (8)
+#   +40: entries (ptr, 8)
+# ================================================================
+
+fn wgpu_bind_group_descriptor(label, layout, entries_ptr, entry_count) {
+    var desc = alloc(48);
+    memset(desc, 0, 48);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, layout);
+    store64(desc + 32, entry_count);
+    store64(desc + 40, entries_ptr);
+    return desc;
+}
+
+# ================================================================
+# WGPUCommandEncoderDescriptor (24 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+# ================================================================
+
+fn wgpu_command_encoder_descriptor(label) {
+    var desc = alloc(24);
+    memset(desc, 0, 24);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    return desc;
+}
+
+# ================================================================
+# WGPUTextureDescriptor (80 bytes, verified via offsetof)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: usage (u64)
+#   +32: dimension (u32, WGPUTextureDimension)
+#   +36: size.width  (u32)
+#   +40: size.height (u32)
+#   +44: size.depthOrArrayLayers (u32)
+#   +48: format (u32, WGPUTextureFormat)
+#   +52: mipLevelCount (u32)
+#   +56: sampleCount (u32)
+#   +60: padding (4)
+#   +64: viewFormatCount (usize)
+#   +72: viewFormats (const WGPUTextureFormat*, 8)
+# ================================================================
+
+# WGPUTextureDimension constants
+var WGPU_TEXTURE_DIMENSION_1D = 1;
+var WGPU_TEXTURE_DIMENSION_2D = 2;
+var WGPU_TEXTURE_DIMENSION_3D = 3;
+
+# WGPUTextureUsage bits (v29)
+var WGPU_TEXTURE_USAGE_COPY_SRC          = 0x01;
+var WGPU_TEXTURE_USAGE_COPY_DST          = 0x02;
+var WGPU_TEXTURE_USAGE_TEXTURE_BINDING   = 0x04;
+var WGPU_TEXTURE_USAGE_STORAGE_BINDING   = 0x08;
+var WGPU_TEXTURE_USAGE_RENDER_ATTACHMENT = 0x10;
+
+fn wgpu_texture_descriptor(label, usage, dimension, width, height, format) {
+    var desc = alloc(80);
+    memset(desc, 0, 80);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store64(desc + 24, usage);
+    store32(desc + 32, dimension);
+    store32(desc + 36, width);
+    store32(desc + 40, height);
+    store32(desc + 44, 1);           # depthOrArrayLayers = 1
+    store32(desc + 48, format);
+    store32(desc + 52, 1);           # mipLevelCount = 1
+    store32(desc + 56, 1);           # sampleCount = 1
+    # viewFormatCount = 0, viewFormats = NULL — already zeroed
+    return desc;
+}
+
+# ================================================================
+# WGPUTextureViewDescriptor (64 bytes, verified via offsetof)
+#   +0:  nextInChain
+#   +8:  label (StringView)
+#   +24: format (u32)
+#   +28: dimension (u32 WGPUTextureViewDimension)
+#   +32: baseMipLevel (u32)
+#   +36: mipLevelCount (u32)
+#   +40: baseArrayLayer (u32)
+#   +44: arrayLayerCount (u32)
+#   +48: aspect (u32, WGPUTextureAspect — 0 = All)
+#   +52: padding
+#   +56: usage (u64) — zero means "inherit from parent texture"
+# ================================================================
+
+# WGPUTextureViewDimension
+var WGPU_TEXTURE_VIEW_DIMENSION_2D = 2;
+
+# WGPUTextureAspect::All = 0 (default)
+var WGPU_TEXTURE_ASPECT_ALL = 0;
+
+fn wgpu_texture_view_descriptor(label, format, dimension) {
+    var desc = alloc(64);
+    memset(desc, 0, 64);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store32(desc + 24, format);
+    store32(desc + 28, dimension);
+    store32(desc + 32, 0);              # baseMipLevel
+    store32(desc + 36, 1);              # mipLevelCount
+    store32(desc + 40, 0);              # baseArrayLayer
+    store32(desc + 44, 1);              # arrayLayerCount
+    store32(desc + 48, WGPU_TEXTURE_ASPECT_ALL);
+    store64(desc + 56, 0);              # usage = inherit
+    return desc;
+}
+
+# ================================================================
+# WGPUTexelCopyTextureInfo (32 bytes)
+#   +0:  texture (WGPUTexture, 8)
+#   +8:  mipLevel (u32)
+#   +12: origin.x (u32)
+#   +16: origin.y (u32)
+#   +20: origin.z (u32)
+#   +24: aspect (u32)
+# ================================================================
+fn wgpu_texel_copy_texture_info(texture, mip_level) {
+    var info = alloc(32);
+    memset(info, 0, 32);
+    store64(info + 0,  texture);
+    store32(info + 8,  mip_level);
+    # origin x/y/z = 0, aspect = All (0) — already zeroed
+    return info;
+}
+
+# ================================================================
+# WGPUTexelCopyBufferLayout (16 bytes)
+#   +0:  offset (u64)
+#   +8:  bytesPerRow (u32)
+#   +12: rowsPerImage (u32)
+# ================================================================
+fn wgpu_texel_copy_buffer_layout(offset, bytes_per_row, rows_per_image) {
+    var layout = alloc(16);
+    store64(layout + 0,  offset);
+    store32(layout + 8,  bytes_per_row);
+    store32(layout + 12, rows_per_image);
+    return layout;
+}
+
+# ================================================================
+# WGPUExtent3D (12 bytes)
+#   +0: width  (u32)
+#   +4: height (u32)
+#   +8: depthOrArrayLayers (u32)
+# ================================================================
+fn wgpu_extent_3d(width, height, depth) {
+    var e = alloc(12);
+    store32(e + 0, width);
+    store32(e + 4, height);
+    store32(e + 8, depth);
+    return e;
+}
+
+# ================================================================
+# WGPUSurfaceConfiguration (64 bytes, verified via offsetof)
+#   +0:  nextInChain (8)
+#   +8:  device (8)
+#   +16: format (u32)
+#   +20: padding
+#   +24: usage (u64)
+#   +32: width (u32)
+#   +36: height (u32)
+#   +40: viewFormatCount (usize)
+#   +48: viewFormats (ptr)
+#   +56: alphaMode (u32)
+#   +60: presentMode (u32)
+# ================================================================
+fn wgpu_surface_configuration(device, format, width, height, usage, present_mode) {
+    var cfg = alloc(64);
+    memset(cfg, 0, 64);
+    store64(cfg + 8,  device);
+    store32(cfg + 16, format);
+    store64(cfg + 24, usage);
+    store32(cfg + 32, width);
+    store32(cfg + 36, height);
+    # viewFormatCount = 0, viewFormats = NULL — already zeroed
+    store32(cfg + 56, 0);             # alphaMode = Auto
+    store32(cfg + 60, present_mode);
+    return cfg;
+}
+
+# ================================================================
+# WGPUQuerySetDescriptor (32 bytes, verified via offsetof() test)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: type (u32 WGPUQueryType)
+#   +28: count (u32)
+# ================================================================
+
+fn wgpu_query_set_descriptor(label, query_type, count) {
+    var desc = alloc(32);
+    memset(desc, 0, 32);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    store32(desc + 24, query_type);
+    store32(desc + 28, count);
+    return desc;
+}
+
+# ================================================================
+# WGPUComputePassDescriptor (32 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: timestampWrites (ptr, 8)
+# ================================================================
+
+fn wgpu_compute_pass_descriptor(label) {
+    var desc = alloc(32);
+    memset(desc, 0, 32);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    return desc;
+}
+
+# ================================================================
+# WGPUCommandBufferDescriptor (24 bytes)
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+# ================================================================
+
+fn wgpu_command_buffer_descriptor(label) {
+    var desc = alloc(24);
+    memset(desc, 0, 24);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    return desc;
+}
+
+# ================================================================
+# WGPUBufferMapCallbackInfo (40 bytes)
+#   +0:  nextInChain (8)
+#   +8:  mode (u32)
+#   +16: callback (fn ptr, 8)
+#   +24: userdata1 (8)
+#   +32: userdata2 (8)
+# ================================================================
+
+fn wgpu_buffer_map_callback_info(callback, userdata) {
+    var info = alloc(40);
+    memset(info, 0, 40);
+    store32(info + 8, WGPU_CALLBACK_MODE_WAIT_ANY_ONLY);
+    store64(info + 16, callback);
+    store64(info + 24, userdata);
+    return info;
+}
+
+# ================================================================
+# WGPURequestAdapterCallbackInfo (40 bytes)
+# ================================================================
+
+fn wgpu_request_adapter_callback_info(callback, userdata) {
+    var info = alloc(40);
+    memset(info, 0, 40);
+    store32(info + 8, WGPU_CALLBACK_MODE_ALLOW_SPONTANEOUS);
+    store64(info + 16, callback);
+    store64(info + 24, userdata);
+    return info;
+}
+
+# ================================================================
+# WGPURequestDeviceCallbackInfo (40 bytes)
+# ================================================================
+
+fn wgpu_request_device_callback_info(callback, userdata) {
+    var info = alloc(40);
+    memset(info, 0, 40);
+    store32(info + 8, WGPU_CALLBACK_MODE_WAIT_ANY_ONLY);
+    store64(info + 16, callback);
+    store64(info + 24, userdata);
+    return info;
+}
+# @internal — FFI / toolchain scaffolding, replaced in v3.0
+# wgpu_ffi.cyr — FFI bindings to wgpu-native v29
+#
+# Function pointers are received from C launcher via wgpu_ffi_init_table(ptr).
+# The C main() builds a function table and passes it to the Cyrius entry point.
+# All wgpu handles are opaque i64 pointers.
+#
+# Function table layout (matches deps/wgpu_main.c):
+#   [0]  wgpuCreateInstance
+#   [1]  wgpu_shim_instance_request_adapter (by-pointer callbackInfo)
+#   [2]  wgpu_shim_adapter_request_device (by-pointer callbackInfo)
+#   [3]  wgpuDeviceGetQueue
+#   [4]  wgpuInstanceProcessEvents
+#   [5]  wgpuInstanceRelease
+#   [6]  wgpuAdapterRelease
+#   [7]  wgpuDeviceRelease
+#   [8]  wgpuDeviceCreateBuffer
+#   [9]  wgpuQueueWriteBuffer
+#   [10] wgpu_shim_buffer_map_async (by-pointer callbackInfo)
+#   [11] wgpuBufferGetConstMappedRange
+#   [12] wgpuBufferUnmap
+#   [13] wgpuBufferGetSize
+#   [14] wgpuBufferDestroy
+#   [15] wgpuBufferRelease
+#   [16] wgpuDeviceCreateShaderModule
+#   [17] wgpuDeviceCreateComputePipeline
+#   [18] wgpuDeviceCreateBindGroupLayout
+#   [19] wgpuDeviceCreatePipelineLayout
+#   [20] wgpuDeviceCreateBindGroup
+#   [21] wgpuShaderModuleRelease
+#   [22] wgpuComputePipelineRelease
+#   [23] wgpuBindGroupRelease
+#   [24] wgpuBindGroupLayoutRelease
+#   [25] wgpuPipelineLayoutRelease
+#   [26] wgpuDeviceCreateCommandEncoder
+#   [27] wgpuCommandEncoderBeginComputePass
+#   [28] wgpuCommandEncoderCopyBufferToBuffer
+#   [29] wgpuCommandEncoderFinish
+#   [30] wgpuComputePassEncoderSetPipeline
+#   [31] wgpuComputePassEncoderSetBindGroup
+#   [32] wgpuComputePassEncoderDispatchWorkgroups
+#   [33] wgpuComputePassEncoderEnd
+#   [34] wgpuCommandEncoderRelease
+#   [35] wgpuQueueSubmit
+#   [36] wgpuAdapterGetInfo
+#   [37] wgpuAdapterGetLimits
+#   [38] wgpuAdapterHasFeature
+#   [39] wgpu_shim_device_poll
+#   [40] wgpuDeviceCreateQuerySet
+#   [41] wgpuQuerySetRelease
+#   [42] wgpu_shim_resolve_query_set (struct-packed args)
+#   [43] wgpu_shim_get_timestamp_period_bits (returns f32 as i64 bit-pattern)
+#   [44] wgpuDeviceHasFeature
+#   [45] wgpuDeviceCreateTexture
+#   [46] wgpuTextureCreateView
+#   [47] wgpuDeviceCreateSampler
+#   [48] wgpu_shim_queue_write_texture (struct-packed args)
+#   [49] wgpuTextureRelease
+#   [50] wgpuTextureViewRelease
+#   [51] wgpuSamplerRelease
+#   [52] wgpuDeviceCreateRenderPipeline
+#   [53] wgpuRenderPipelineRelease
+#   [54] wgpuSurfaceConfigure
+#   [55] wgpuSurfaceGetCurrentTexture
+#   [56] wgpuSurfacePresent
+#   [57] wgpuSurfaceRelease
+
+var _fn_table = 0;
+
+fn _fp(idx) { return load64(_fn_table + idx * 8); }
+
+fn wgpu_ffi_init_table(table_ptr) {
+    _fn_table = table_ptr;
+    return 0;
+}
+
+# ================================================================
+# Instance
+# ================================================================
+
+fn wgpu_create_instance(desc) { return fncall1(_fp(0), desc); }
+fn wgpu_instance_process_events(inst) { fncall1(_fp(4), inst); return 0; }
+fn wgpu_instance_release(inst) { fncall1(_fp(5), inst); return 0; }
+
+# ================================================================
+# Adapter request (sync)
+# ================================================================
+
+# Request adapter: simplified shim handles all callback setup in C
+# Args: (instance, power_preference, result_ptr)
+fn wgpu_request_adapter_sync(instance, power_pref) {
+    var result_ptr = alloc(8);
+    store64(result_ptr, 0);
+    fncall3(_fp(1), instance, power_pref, result_ptr);
+    return load64(result_ptr);
+}
+
+# ================================================================
+# Device request (sync)
+# ================================================================
+
+# Request device: simplified shim handles callback in C
+# Args: (adapter, result_ptr)
+fn wgpu_request_device_sync(adapter) {
+    var result_ptr = alloc(8);
+    store64(result_ptr, 0);
+    fncall2(_fp(2), adapter, result_ptr);
+    return load64(result_ptr);
+}
+
+# ================================================================
+# Queue
+# ================================================================
+fn wgpu_device_get_queue(device) { return fncall1(_fp(3), device); }
+# NOTE: slot 35 is a C shim that submits a single command buffer.
+# Args: (queue, cmd_buffer_handle). The count/array is handled in C.
+fn wgpu_queue_submit_one(queue, cmd_buf) { fncall2(_fp(35), queue, cmd_buf); return 0; }
+fn wgpu_queue_write_buffer(queue, buf, offset, data, size) {
+    fncall5(_fp(9), queue, buf, offset, data, size);
+    return 0;
+}
+
+# ================================================================
+# Buffer
+# ================================================================
+fn wgpu_device_create_buffer(device, desc) { return fncall2(_fp(8), device, desc); }
+fn wgpu_buffer_get_size(buf) { return fncall1(_fp(13), buf); }
+fn wgpu_buffer_destroy(buf) { fncall1(_fp(14), buf); return 0; }
+fn wgpu_buffer_unmap(buf) { fncall1(_fp(12), buf); return 0; }
+fn wgpu_buffer_release(buf) { fncall1(_fp(15), buf); return 0; }
+fn wgpu_buffer_get_const_mapped_range(buf, offset, size) {
+    return fncall3(_fp(11), buf, offset, size);
+}
+
+# Buffer map sync: simplified shim handles callback + poll in C. The args
+# are packed into a struct so Cyrius calls via fncall2 instead of fncall6.
+# WgpuMapArgs layout (32 bytes):
+#   +0:  buffer (8)
+#   +8:  mode (4) + padding (4)
+#   +16: offset (8)
+#   +24: size (8)
+#   +32: status_ptr (8) — total 40 bytes
+fn wgpu_buffer_map_sync(device, buffer, mode, offset, size) {
+    var status_ptr = alloc(8);
+    store64(status_ptr, 0);
+    var args = alloc(40);
+    store64(args + 0,  buffer);
+    store32(args + 8,  mode);
+    store64(args + 16, offset);
+    store64(args + 24, size);
+    store64(args + 32, status_ptr);
+    fncall2(_fp(10), device, args);
+    return load64(status_ptr);
+}
+
+# ================================================================
+# Shader / Pipeline
+# ================================================================
+fn wgpu_device_create_shader_module(device, desc) { return fncall2(_fp(16), device, desc); }
+fn wgpu_device_create_compute_pipeline(device, desc) { return fncall2(_fp(17), device, desc); }
+fn wgpu_device_create_bind_group_layout(device, desc) { return fncall2(_fp(18), device, desc); }
+fn wgpu_device_create_pipeline_layout(device, desc) { return fncall2(_fp(19), device, desc); }
+fn wgpu_device_create_bind_group(device, desc) { return fncall2(_fp(20), device, desc); }
+fn wgpu_shader_module_release(m) { fncall1(_fp(21), m); return 0; }
+fn wgpu_compute_pipeline_release(p) { fncall1(_fp(22), p); return 0; }
+fn wgpu_bind_group_release(bg) { fncall1(_fp(23), bg); return 0; }
+fn wgpu_bind_group_layout_release(bgl) { fncall1(_fp(24), bgl); return 0; }
+fn wgpu_pipeline_layout_release(pl) { fncall1(_fp(25), pl); return 0; }
+
+# ================================================================
+# Command Encoding
+# ================================================================
+# NOTE: slot 26 is a C shim that takes (device, label_cstr). The `desc` arg
+# is interpreted as a null-terminated label pointer. Pass 0 for no label.
+fn wgpu_device_create_command_encoder(device, label) { return fncall2(_fp(26), device, label); }
+fn wgpu_command_encoder_begin_compute_pass(enc, desc) { return fncall2(_fp(27), enc, desc); }
+fn wgpu_command_encoder_copy_buffer_to_buffer(enc, src, soff, dst, doff, sz) {
+    # Pack args into WgpuCopyArgs struct (40 bytes: src, soff, dst, doff, size)
+    var args = alloc(40);
+    store64(args + 0,  src);
+    store64(args + 8,  soff);
+    store64(args + 16, dst);
+    store64(args + 24, doff);
+    store64(args + 32, sz);
+    fncall2(_fp(28), enc, args);
+    return 0;
+}
+# NOTE: slot 29 is a C shim that takes (encoder, label_cstr). Pass 0 for no label.
+fn wgpu_command_encoder_finish(enc, label) { return fncall2(_fp(29), enc, label); }
+fn wgpu_command_encoder_release(enc) { fncall1(_fp(34), enc); return 0; }
+fn wgpu_compute_pass_set_pipeline(pass, pip) { fncall2(_fp(30), pass, pip); return 0; }
+fn wgpu_compute_pass_set_bind_group(pass, gi, bg, dc, do_ptr) {
+    fncall5(_fp(31), pass, gi, bg, dc, do_ptr);
+    return 0;
+}
+fn wgpu_compute_pass_dispatch(pass, x, y, z) { fncall4(_fp(32), pass, x, y, z); return 0; }
+fn wgpu_compute_pass_end(pass) { fncall1(_fp(33), pass); return 0; }
+
+# ================================================================
+# Adapter / Device
+# ================================================================
+fn wgpu_adapter_get_info(adapter, info) { fncall2(_fp(36), adapter, info); return 0; }
+fn wgpu_adapter_get_limits(adapter, lim) { return fncall2(_fp(37), adapter, lim); }
+fn wgpu_adapter_release(a) { fncall1(_fp(6), a); return 0; }
+fn wgpu_device_release(d) { fncall1(_fp(7), d); return 0; }
+fn wgpu_device_poll(device, wait) { return fncall2(_fp(39), device, wait); }
+
+# wgpuAdapterHasFeature(adapter, feature_name_u32) → WGPUBool (u32)
+fn wgpu_adapter_has_feature(adapter, feature) { return fncall2(_fp(38), adapter, feature); }
+# wgpuDeviceHasFeature(device,  feature_name_u32) → WGPUBool (u32)
+# Unlike AdapterHasFeature, this reflects the features actually ENABLED on the
+# device at creation — which is what the timestamps code must check.
+fn wgpu_device_has_feature(device, feature) { return fncall2(_fp(44), device, feature); }
+
+# ================================================================
+# Query sets — GPU timestamp profiling
+# ================================================================
+fn wgpu_device_create_query_set(device, desc) { return fncall2(_fp(40), device, desc); }
+fn wgpu_query_set_release(qs) { fncall1(_fp(41), qs); return 0; }
+
+# ResolveQuerySet takes 6 args. Keep encoder on the left and pack the rest
+# into a struct pointer — see feedback_fncall6_wgpu and the existing
+# copy_buffer_to_buffer wrapper for the rationale.
+#
+# WgpuResolveArgs layout (40 bytes):
+#   +0:  querySet     (8)
+#   +8:  firstQuery   (u32)
+#   +12: queryCount   (u32)
+#   +16: destBuffer   (8)
+#   +24: destOffset   (8)
+fn wgpu_encoder_resolve_query_set(encoder, qs, first, count, dest_buf, dest_off) {
+    var args = alloc(40);
+    store64(args + 0,  qs);
+    store32(args + 8,  first);
+    store32(args + 12, count);
+    store64(args + 16, dest_buf);
+    store64(args + 24, dest_off);
+    fncall2(_fp(42), encoder, args);
+    return 0;
+}
+
+# Queue timestamp period is an f32. The C shim returns the f32 bit-pattern
+# as an i64 so Cyrius can consume it via a normal integer return path.
+# Convert to f64 on the Cyrius side when needed.
+fn wgpu_queue_get_timestamp_period_bits(queue) { return fncall1(_fp(43), queue); }
+
+# ================================================================
+# Textures
+# ================================================================
+fn wgpu_device_create_texture(device, desc)     { return fncall2(_fp(45), device, desc); }
+fn wgpu_texture_create_view(texture, desc)      { return fncall2(_fp(46), texture, desc); }
+fn wgpu_device_create_sampler(device, desc)     { return fncall2(_fp(47), device, desc); }
+fn wgpu_texture_release(texture)                { fncall1(_fp(49), texture); return 0; }
+fn wgpu_texture_view_release(view)              { fncall1(_fp(50), view); return 0; }
+fn wgpu_sampler_release(sampler)                { fncall1(_fp(51), sampler); return 0; }
+
+# QueueWriteTexture takes 6 args; Cyrius uses struct-packing via fncall2.
+# WgpuWriteTextureArgs layout (40 bytes):
+#   +0:  destination (WGPUTexelCopyTextureInfo ptr)
+#   +8:  data (void*)
+#   +16: data_size (size_t)
+#   +24: data_layout (WGPUTexelCopyBufferLayout ptr)
+#   +32: write_size (WGPUExtent3D ptr)
+fn wgpu_queue_write_texture(queue, destination, data, data_size, data_layout, write_size) {
+    var args = alloc(40);
+    store64(args + 0,  destination);
+    store64(args + 8,  data);
+    store64(args + 16, data_size);
+    store64(args + 24, data_layout);
+    store64(args + 32, write_size);
+    fncall2(_fp(48), queue, args);
+    return 0;
+}
+
+# ================================================================
+# Render pipelines
+# ================================================================
+fn wgpu_device_create_render_pipeline(device, desc) { return fncall2(_fp(52), device, desc); }
+fn wgpu_render_pipeline_release(rp)                  { fncall1(_fp(53), rp); return 0; }
+
+# ================================================================
+# Surfaces — consumers supply the WGPUSurface handle from their
+# windowing library (winit, glfw, sdl, etc). mabda only wraps the
+# configure + acquire + present lifecycle once the handle exists.
+# ================================================================
+fn wgpu_surface_configure(surface, config) {
+    fncall2(_fp(54), surface, config);
+    return 0;
+}
+fn wgpu_surface_get_current_texture(surface, out_texture) {
+    fncall2(_fp(55), surface, out_texture);
+    return 0;
+}
+fn wgpu_surface_present(surface)            { return fncall1(_fp(56), surface); }
+fn wgpu_surface_release(surface)            { fncall1(_fp(57), surface); return 0; }
+# @public — stable API surface (survives the v3.0 backend swap)
+# context.cyr — GPU device lifecycle
+# Ported from mabda/src/context.rs
+
+# GpuContext struct layout (32 bytes):
+#   +0:  instance (WGPUInstance, 8)
+#   +8:  adapter  (WGPUAdapter, 8)
+#   +16: device   (WGPUDevice, 8)
+#   +24: queue    (WGPUQueue, 8)
+
+fn gpu_ctx_instance(ctx) { return load64(ctx); }
+fn gpu_ctx_adapter(ctx)  { return load64(ctx + 8); }
+fn gpu_ctx_device(ctx)   { return load64(ctx + 16); }
+fn gpu_ctx_queue(ctx)    { return load64(ctx + 24); }
+
+# Create from pre-initialized handles (C launcher fills these)
+fn gpu_context_from_preinit(preinit_ptr) {
+    if (preinit_ptr == 0) { return gpu_err_result(GPU_ERR_ADAPTER_NOT_FOUND); }
+    var instance = load64(preinit_ptr);
+    var adapter  = load64(preinit_ptr + 8);
+    var device   = load64(preinit_ptr + 16);
+    var queue    = load64(preinit_ptr + 24);
+    if (instance == 0) { return gpu_err_result(GPU_ERR_ADAPTER_NOT_FOUND); }
+    if (adapter == 0)  { return gpu_err_result(GPU_ERR_ADAPTER_NOT_FOUND); }
+    if (device == 0)   { return gpu_err_result(GPU_ERR_DEVICE_REQUEST); }
+    var ctx = alloc(32);
+    store64(ctx, instance);
+    store64(ctx + 8, adapter);
+    store64(ctx + 16, device);
+    store64(ctx + 24, queue);
+    return gpu_ok(ctx);
+}
+
+fn gpu_context_release(ctx) {
+    if (ctx == 0) { return 0; }
+    wgpu_device_release(gpu_ctx_device(ctx));
+    wgpu_adapter_release(gpu_ctx_adapter(ctx));
+    wgpu_instance_release(gpu_ctx_instance(ctx));
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# buffer.cyr — GPU buffer management
+# Ported from mabda/src/buffer.rs
+#
+# Buffer creation helpers, readback, and GrowableBuffer.
+# All functions use wgpu FFI function table.
+
+# ================================================================
+# Buffer creation helpers
+# ================================================================
+
+# Create a storage buffer with initial data
+fn create_storage_buffer(device, queue, data, size, label) {
+    var usage = WGPU_BUFFER_USAGE_STORAGE | WGPU_BUFFER_USAGE_COPY_DST | WGPU_BUFFER_USAGE_COPY_SRC;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    if (buf != 0) {
+        wgpu_queue_write_buffer(queue, buf, 0, data, size);
+    }
+    return buf;
+}
+
+# Create an empty storage buffer (for compute output)
+fn create_storage_buffer_empty(device, size, label) {
+    var usage = WGPU_BUFFER_USAGE_STORAGE | WGPU_BUFFER_USAGE_COPY_DST | WGPU_BUFFER_USAGE_COPY_SRC;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    return wgpu_device_create_buffer(device, desc);
+}
+
+# Create a uniform buffer with initial data
+fn create_uniform_buffer(device, queue, data, size, label) {
+    var usage = WGPU_BUFFER_USAGE_UNIFORM | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    if (buf != 0) {
+        wgpu_queue_write_buffer(queue, buf, 0, data, size);
+    }
+    return buf;
+}
+
+# Create a staging buffer for CPU readback
+fn create_staging_buffer(device, size, label) {
+    var usage = WGPU_BUFFER_USAGE_MAP_READ | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    return wgpu_device_create_buffer(device, desc);
+}
+
+# Create a vertex buffer with initial data
+fn create_vertex_buffer(device, queue, data, size, label) {
+    var usage = WGPU_BUFFER_USAGE_VERTEX | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    if (buf != 0) {
+        wgpu_queue_write_buffer(queue, buf, 0, data, size);
+    }
+    return buf;
+}
+
+# Create an index buffer with initial data
+fn create_index_buffer(device, queue, data, size, label) {
+    var usage = WGPU_BUFFER_USAGE_INDEX | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    if (buf != 0) {
+        wgpu_queue_write_buffer(queue, buf, 0, data, size);
+    }
+    return buf;
+}
+
+# Create an indirect dispatch buffer
+fn create_dispatch_indirect_buffer(device, queue, data, size, label) {
+    var usage = WGPU_BUFFER_USAGE_INDIRECT | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc = wgpu_buffer_descriptor(label, usage, size, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    if (buf != 0) {
+        wgpu_queue_write_buffer(queue, buf, 0, data, size);
+    }
+    return buf;
+}
+
+# ================================================================
+# Synchronous buffer readback
+# ================================================================
+
+# Read buffer contents synchronously
+# Returns pointer to copied data (heap-allocated) or 0 on failure
+fn read_buffer(device, queue, buffer, size) {
+    # Create staging buffer
+    var staging = create_staging_buffer(device, size, "readback_staging");
+    if (staging == 0) { return 0; }
+
+    # Copy buffer → staging
+    var encoder = wgpu_device_create_command_encoder(device, "readback_enc");
+    wgpu_command_encoder_copy_buffer_to_buffer(encoder, buffer, 0, staging, 0, size);
+    var cmd_buf = wgpu_command_encoder_finish(encoder, "readback_cmd");
+    wgpu_queue_submit_one(queue, cmd_buf);
+
+    # Map and copy
+    var status = wgpu_buffer_map_sync(device, staging, WGPU_MAP_MODE_READ, 0, size);
+    if (status != WGPU_BUFFER_MAP_ASYNC_STATUS_SUCCESS) {
+        wgpu_buffer_release(staging);
+        return 0;
+    }
+
+    var mapped = wgpu_buffer_get_const_mapped_range(staging, 0, size);
+    if (mapped == 0) {
+        wgpu_buffer_unmap(staging);
+        wgpu_buffer_release(staging);
+        return 0;
+    }
+
+    # Copy to heap
+    var result = alloc(size);
+    memcpy(result, mapped, size);
+
+    wgpu_buffer_unmap(staging);
+    wgpu_buffer_release(staging);
+    return result;
+}
+
+# ================================================================
+# GrowableBuffer — dynamic GPU buffer with generation tracking
+# ================================================================
+#
+# GrowableBuffer struct layout (32 bytes):
+#   +0: buffer     (WGPUBuffer handle, 8)
+#   +8: capacity   (i64, bytes)
+#   +16: generation (i64, incremented on growth — invalidates bind groups)
+#   +24: usage      (i64, WGPUBufferUsage flags)
+
+fn growable_buffer_new(device, initial_capacity, usage) {
+    var gb = alloc(32);
+    var desc = wgpu_buffer_descriptor("growable", usage, initial_capacity, 0);
+    var buf = wgpu_device_create_buffer(device, desc);
+    store64(gb, buf);
+    store64(gb + 8, initial_capacity);
+    store64(gb + 16, 0);
+    store64(gb + 24, usage);
+    return gb;
+}
+
+fn growable_buffer_handle(gb)     { return load64(gb); }
+fn growable_buffer_capacity(gb)   { return load64(gb + 8); }
+fn growable_buffer_generation(gb) { return load64(gb + 16); }
+
+# Update buffer contents — grows if needed, returns 1 if grown (bind group invalidated)
+fn growable_buffer_update(gb, device, queue, data, size) {
+    var cap = load64(gb + 8);
+    var grew = 0;
+    if (size > cap) {
+        # Grow to 2x or size, whichever is larger
+        var new_cap = cap * 2;
+        if (size > new_cap) { new_cap = size; }
+        # Release old buffer
+        var old = load64(gb);
+        if (old != 0) { wgpu_buffer_release(old); }
+        # Create new
+        var usage = load64(gb + 24);
+        var desc = wgpu_buffer_descriptor("growable", usage, new_cap, 0);
+        var new_buf = wgpu_device_create_buffer(device, desc);
+        store64(gb, new_buf);
+        store64(gb + 8, new_cap);
+        store64(gb + 16, load64(gb + 16) + 1);  # increment generation
+        grew = 1;
+    }
+    wgpu_queue_write_buffer(queue, load64(gb), 0, data, size);
+    return grew;
+}
+
+# ================================================================
+# Compute workgroup helpers (pure math, no GPU)
+# ================================================================
+
+# Calculate workgroup count for 1D dispatch
+# Returns ceil(total / workgroup_size)
+fn workgroups_1d(total, workgroup_size) {
+    return (total + workgroup_size - 1) / workgroup_size;
+}
+
+# Calculate workgroup count for 2D dispatch
+# Returns (x_groups, y_groups) packed as two i64 at dst
+fn workgroups_2d(dst, width, height, wg_x, wg_y) {
+    store64(dst, (width + wg_x - 1) / wg_x);
+    store64(dst + 8, (height + wg_y - 1) / wg_y);
+    return 0;
+}
+
+# Validate dispatch workgroup count against device limits
+# Returns 0 if valid, error code if exceeded
+fn validate_dispatch(x, y, z, max_per_dim) {
+    if (x > max_per_dim) { return GPU_ERR_WORKGROUP_LIMIT; }
+    if (y > max_per_dim) { return GPU_ERR_WORKGROUP_LIMIT; }
+    if (z > max_per_dim) { return GPU_ERR_WORKGROUP_LIMIT; }
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# typed_buffer.cyr — Typed GPU buffer wrappers with runtime alignment checks
+# Ported from mabda/src/typed_buffer.rs
+#
+# Cyrius has no generics; the Rust `UniformBuffer<T>` / `StorageBuffer<T>`
+# collapse to runtime-sized wrappers that carry capacity/count information
+# alongside the wgpu handle. Alignment validation happens at construction.
+#
+# For raw byte-level control without the wrapper overhead, use the functions
+# in buffer.cyr directly.
+#
+# UniformBuffer struct layout (16 bytes):
+#   +0: handle  (WGPUBuffer, 8)
+#   +8: size    (i64, bytes — always a multiple of 16)
+#
+# StorageBuffer struct layout (32 bytes):
+#   +0:  handle        (WGPUBuffer, 8)
+#   +8:  capacity      (i64, bytes)
+#   +16: count         (i64, element count)
+#   +24: element_size  (i64, bytes per element)
+#
+# ABI note: all functions in this file cap the parameter list at 6 to avoid
+# Cyrius's parameter-passing issue when a 7+-arg function also makes wgpu
+# fncalls. See feedback_fncall6_wgpu memory for the related fncall6 issue.
+
+# ================================================================
+# UniformBuffer
+# ================================================================
+
+# Create a uniform buffer initialized with `data`. Returns a GpuResult:
+#   Ok(ub_ptr) on success
+#   Err(gpu_err(...)) if size is zero or not a multiple of 16
+#
+# Enforces WebGPU's minUniformBufferOffsetAlignment = 16.
+fn uniform_buffer_new(device, queue, data, size, label) {
+    if (size == 0) {
+        return gpu_err_result_msg(GPU_ERR_BUFFER, "uniform buffer size is zero");
+    }
+    # size % 16 == 0 via bitwise AND since 16 is a power of two
+    if ((size & 15) != 0) {
+        return gpu_err_result_msg(GPU_ERR_BUFFER, "uniform buffer size must be multiple of 16");
+    }
+    var handle = create_uniform_buffer(device, queue, data, size, label);
+    if (handle == 0) {
+        return gpu_err_result_msg(GPU_ERR_BUFFER, "wgpuDeviceCreateBuffer returned null");
+    }
+    var ub = alloc(16);
+    store64(ub, handle);
+    store64(ub + 8, size);
+    return gpu_ok(ub);
+}
+
+# Write new data to the uniform buffer. Caller must pass the same size as
+# was used at creation; writes of a different size are undefined behavior.
+fn uniform_buffer_write(queue, ub, data, size) {
+    wgpu_queue_write_buffer(queue, load64(ub), 0, data, size);
+    return 0;
+}
+
+# Accessors
+fn uniform_buffer_handle(ub) { return load64(ub); }
+fn uniform_buffer_size(ub)   { return load64(ub + 8); }
+
+# Release the underlying GPU buffer. The struct itself is bump-allocated
+# and collected with the rest of the arena.
+fn uniform_buffer_release(ub) {
+    var h = load64(ub);
+    if (h != 0) { wgpu_buffer_release(h); }
+    store64(ub, 0);
+    return 0;
+}
+
+# ================================================================
+# StorageBuffer
+# ================================================================
+
+fn _storage_usage(read_only) {
+    if (read_only == 0) {
+        return WGPU_BUFFER_USAGE_STORAGE | WGPU_BUFFER_USAGE_COPY_DST | WGPU_BUFFER_USAGE_COPY_SRC;
+    }
+    return WGPU_BUFFER_USAGE_STORAGE | WGPU_BUFFER_USAGE_COPY_DST;
+}
+
+# Create a raw storage buffer handle. Does not track count or element size
+# — use storage_buffer_wrap if you need metadata on top of this handle.
+fn storage_buffer_create(device, capacity, label, read_only) {
+    var usage = _storage_usage(read_only);
+    var desc = wgpu_buffer_descriptor(label, usage, capacity, 0);
+    return wgpu_device_create_buffer(device, desc);
+}
+
+# Wrap a raw buffer handle with element-count metadata. Caller is responsible
+# for ensuring `capacity == count * element_size` (no runtime validation).
+fn storage_buffer_wrap(handle, capacity, count, element_size) {
+    var sb = alloc(32);
+    store64(sb, handle);
+    store64(sb + 8, capacity);
+    store64(sb + 16, count);
+    store64(sb + 24, element_size);
+    return sb;
+}
+
+# Convenience: create a storage buffer initialized with `data`.
+# 6 parameters max (Cyrius ABI ceiling — see header comment).
+# The caller folds (count × element_size) into `capacity` before calling.
+# Element metadata on the returned wrapper is set to a byte-oriented view
+# (count = capacity, element_size = 1). Callers who need richer metadata
+# should use storage_buffer_create + storage_buffer_wrap directly.
+fn storage_buffer_new(device, queue, data, capacity, label, read_only) {
+    var handle = storage_buffer_create(device, capacity, label, read_only);
+    if (handle != 0) {
+        wgpu_queue_write_buffer(queue, handle, 0, data, capacity);
+    }
+    return storage_buffer_wrap(handle, capacity, capacity, 1);
+}
+
+# Convenience: create an empty storage buffer of the given byte capacity.
+fn storage_buffer_empty(device, capacity, label, read_only) {
+    var handle = storage_buffer_create(device, capacity, label, read_only);
+    return storage_buffer_wrap(handle, capacity, capacity, 1);
+}
+
+# Write `write_count` elements into the storage buffer. Returns a GpuResult:
+#   Ok(0)          on success
+#   Err(...)       if write_count > stored count (exceeds capacity)
+fn storage_buffer_write(queue, sb, data, write_count) {
+    var capacity_count = load64(sb + 16);
+    if (write_count > capacity_count) {
+        return gpu_err_result_msg(GPU_ERR_BUFFER, "storage buffer write exceeds capacity");
+    }
+    var element_size = load64(sb + 24);
+    var write_bytes = write_count * element_size;
+    wgpu_queue_write_buffer(queue, load64(sb), 0, data, write_bytes);
+    return gpu_ok(0);
+}
+
+# Accessors
+fn storage_buffer_handle(sb)       { return load64(sb); }
+fn storage_buffer_capacity(sb)     { return load64(sb + 8); }
+fn storage_buffer_count(sb)        { return load64(sb + 16); }
+fn storage_buffer_element_size(sb) { return load64(sb + 24); }
+
+# Release the underlying GPU buffer.
+fn storage_buffer_release(sb) {
+    var h = load64(sb);
+    if (h != 0) { wgpu_buffer_release(h); }
+    store64(sb, 0);
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# gpu_timestamps.cyr — GPU timestamp query profiling
+# Ported from mabda/src/profiler.rs :: GpuTimestamps
+#
+# Wraps wgpu's QuerySet + resolve buffer + read buffer triple to provide
+# per-pass GPU timing. The adapter must support `TIMESTAMP_QUERY` (feature
+# code 0x9 in WGPUFeatureName).
+#
+# GpuTimestamps struct layout (56 bytes):
+#   +0:  query_set        (WGPUQuerySet handle, 8)
+#   +8:  resolve_buffer   (WGPUBuffer handle, 8)
+#   +16: read_buffer      (WGPUBuffer handle, 8)
+#   +24: max_queries      (i64, query pair count × 2)
+#   +32: timestamp_period_bits (i64, f32 bit-pattern — 1.0f by default)
+#   +40: _pad             (8)
+#   +48: _pad             (8)
+
+# WGPUQueryType constants (webgpu.h)
+enum WGPUQueryType {
+    WGPU_QUERY_TYPE_OCCLUSION = 1;
+    WGPU_QUERY_TYPE_TIMESTAMP = 2;
+}
+
+# WGPUFeatureName::TimestampQuery from webgpu.h
+var WGPU_FEATURE_TIMESTAMP_QUERY = 9;
+
+# WGPUBufferUsage::QueryResolve (0x200) — must combine with COPY_SRC
+var WGPU_BUFFER_USAGE_QUERY_RESOLVE = 0x200;
+
+# ================================================================
+# Adapter feature query
+# ================================================================
+
+# Returns 1 if the DEVICE has timestamp queries enabled, 0 otherwise.
+# Note: wgpu requires TIMESTAMP_QUERY to be explicitly requested when
+# creating the device — an adapter supporting the feature is not enough.
+# Check the device, not the adapter.
+fn gpu_timestamps_supported(device) {
+    if (device == 0) { return 0; }
+    return wgpu_device_has_feature(device, WGPU_FEATURE_TIMESTAMP_QUERY);
+}
+
+# ================================================================
+# Allocation
+# ================================================================
+
+# Create GPU timestamp queries. Returns a GpuResult:
+#   Ok(ts_ptr)   — on success
+#   Err(...)     — if the device doesn't support TIMESTAMP_QUERY
+#
+# max_passes is the number of query PAIRS (begin + end per pass).
+# The query set is sized at max_passes * 2.
+fn gpu_timestamps_new(device, queue, max_passes) {
+    if (gpu_timestamps_supported(device) == 0) {
+        return gpu_err_result_msg(GPU_ERR_OTHER, "device lacks TIMESTAMP_QUERY feature");
+    }
+
+    var max_queries = max_passes * 2;
+
+    # 1. Create the query set
+    var qs_desc = wgpu_query_set_descriptor("gpu_timestamps",
+    WGPU_QUERY_TYPE_TIMESTAMP,
+    max_queries);
+    var qs = wgpu_device_create_query_set(device, qs_desc);
+    if (qs == 0) {
+        return gpu_err_result_msg(GPU_ERR_OTHER, "wgpuDeviceCreateQuerySet returned null");
+    }
+
+    # 2. Resolve buffer: QUERY_RESOLVE | COPY_SRC, 8 bytes per query
+    var buffer_size = max_queries * 8;
+    var resolve_usage = WGPU_BUFFER_USAGE_QUERY_RESOLVE | WGPU_BUFFER_USAGE_COPY_SRC;
+    var resolve_desc = wgpu_buffer_descriptor("timestamp_resolve",
+    resolve_usage, buffer_size, 0);
+    var resolve_buffer = wgpu_device_create_buffer(device, resolve_desc);
+
+    # 3. Read buffer: COPY_DST | MAP_READ
+    var read_usage = WGPU_BUFFER_USAGE_COPY_DST | WGPU_BUFFER_USAGE_MAP_READ;
+    var read_desc = wgpu_buffer_descriptor("timestamp_read",
+    read_usage, buffer_size, 0);
+    var read_buffer = wgpu_device_create_buffer(device, read_desc);
+
+    # 4. Record the hardware timestamp period
+    var period_bits = wgpu_queue_get_timestamp_period_bits(queue);
+
+    # 5. Build the wrapper struct
+    var ts = alloc(56);
+    store64(ts + 0,  qs);
+    store64(ts + 8,  resolve_buffer);
+    store64(ts + 16, read_buffer);
+    store64(ts + 24, max_queries);
+    store64(ts + 32, period_bits);
+    store64(ts + 40, 0);
+    store64(ts + 48, 0);
+    return gpu_ok(ts);
+}
+
+# ================================================================
+# Accessors
+# ================================================================
+
+fn gpu_timestamps_query_set(ts)      { return load64(ts + 0); }
+fn gpu_timestamps_resolve_buffer(ts) { return load64(ts + 8); }
+fn gpu_timestamps_read_buffer(ts)    { return load64(ts + 16); }
+fn gpu_timestamps_max_queries(ts)    { return load64(ts + 24); }
+fn gpu_timestamps_max_passes(ts)     { return load64(ts + 24) / 2; }
+fn gpu_timestamps_period_bits(ts)    { return load64(ts + 32); }
+
+# ================================================================
+# Resolve + readback
+# ================================================================
+
+# Resolve queries into the resolve buffer and copy to the read buffer.
+# Call after all passes with timestamp writes are submitted.
+#
+# query_count is the number of individual query slots to resolve (not pairs).
+fn gpu_timestamps_resolve(ts, encoder, query_count) {
+    var max = load64(ts + 24);
+    var count = query_count;
+    if (count > max) { count = max; }
+    var qs      = load64(ts + 0);
+    var resolve = load64(ts + 8);
+    var read    = load64(ts + 16);
+    wgpu_encoder_resolve_query_set(encoder, qs, 0, count, resolve, 0);
+    wgpu_command_encoder_copy_buffer_to_buffer(encoder, resolve, 0, read, 0, count * 8);
+    return 0;
+}
+
+# Map the read buffer synchronously and return a pointer to the raw u64
+# timestamp array. Caller must call gpu_timestamps_unmap when done.
+#
+# Returns 0 on failure. Call AFTER queue_submit and device_poll so the GPU
+# has finished writing the timestamps.
+fn gpu_timestamps_map(ts, device, query_count) {
+    var max = load64(ts + 24);
+    var count = query_count;
+    if (count > max) { count = max; }
+    var read = load64(ts + 16);
+    var status = wgpu_buffer_map_sync(device, read, WGPU_MAP_MODE_READ, 0, count * 8);
+    if (status != WGPU_BUFFER_MAP_ASYNC_STATUS_SUCCESS) {
+        return 0;
+    }
+    return wgpu_buffer_get_const_mapped_range(read, 0, count * 8);
+}
+
+fn gpu_timestamps_unmap(ts) {
+    wgpu_buffer_unmap(load64(ts + 16));
+    return 0;
+}
+
+# ================================================================
+# Release
+# ================================================================
+
+fn gpu_timestamps_release(ts) {
+    var qs      = load64(ts + 0);
+    var resolve = load64(ts + 8);
+    var read    = load64(ts + 16);
+    if (qs != 0)      { wgpu_query_set_release(qs); }
+    if (resolve != 0) { wgpu_buffer_release(resolve); }
+    if (read != 0)    { wgpu_buffer_release(read); }
+    store64(ts + 0, 0);
+    store64(ts + 8, 0);
+    store64(ts + 16, 0);
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# compute.cyr — compute pipeline creation and dispatch
+# Ported from mabda/src/compute.rs
+#
+# ComputePipeline struct layout (24 bytes):
+#   +0: pipeline          (WGPUComputePipeline handle, 8)
+#   +8: bind_group_layout (WGPUBindGroupLayout handle, 8)
+#   +16: pipeline_layout  (WGPUPipelineLayout handle, 8)
+
+# ================================================================
+# ComputePipeline creation
+# ================================================================
+
+# Create a compute pipeline with default storage buffer bindings
+# buffer 0 = read-write storage, buffers 1..n = read-only storage
+fn compute_pipeline_new(device, wgsl_source, entry_point, storage_count) {
+    # Build bind group layout entries
+    var entries = alloc(storage_count * 120);
+    var stage = WGPU_SHADER_STAGE_COMPUTE;
+    var rw = WGPU_BUFFER_BINDING_TYPE_STORAGE;
+    var ro = WGPU_BUFFER_BINDING_TYPE_READ_ONLY_STORAGE;
+    for (var i = 0; i < storage_count; i = i + 1) {
+        var e = entries + i * 120;
+        memset(e, 0, 120);
+        if (i == 0) {
+            # First buffer: read-write storage
+            wgpu_bgl_entry_buffer(e, i, stage, rw, 0, 0);
+        } else {
+            # Remaining: read-only storage
+            wgpu_bgl_entry_buffer(e, i, stage, ro, 0, 0);
+        }
+    }
+
+    # Create bind group layout
+    var bgl_desc = wgpu_bind_group_layout_descriptor("compute_bgl", entries, storage_count);
+    var bgl = wgpu_device_create_bind_group_layout(device, bgl_desc);
+    if (bgl == 0) { return 0; }
+
+    # Create pipeline layout
+    var layouts[8];
+    store64(&layouts, bgl);
+    var pl_desc = wgpu_pipeline_layout_descriptor("compute_pl", &layouts, 1);
+    var pl = wgpu_device_create_pipeline_layout(device, pl_desc);
+    if (pl == 0) { return 0; }
+
+    # Create shader module
+    var src = wgpu_shader_source_wgsl(wgsl_source);
+    var sm_desc = wgpu_shader_module_descriptor("compute_shader", src);
+    var shader = wgpu_device_create_shader_module(device, sm_desc);
+    if (shader == 0) { return 0; }
+
+    # Create compute pipeline
+    var cp_desc = wgpu_compute_pipeline_descriptor("compute_pipeline", pl, shader, entry_point);
+    var pipeline = wgpu_device_create_compute_pipeline(device, cp_desc);
+
+    wgpu_shader_module_release(shader);
+    if (pipeline == 0) { return 0; }
+
+    # Build ComputePipeline struct
+    var cp = alloc(24);
+    store64(cp, pipeline);
+    store64(cp + 8, bgl);
+    store64(cp + 16, pl);
+    return cp;
+}
+
+# Accessors
+fn compute_pipeline_handle(cp)     { return load64(cp); }
+fn compute_pipeline_bgl(cp)        { return load64(cp + 8); }
+fn compute_pipeline_layout(cp)     { return load64(cp + 16); }
+
+# ================================================================
+# Dispatch helpers
+# ================================================================
+
+# Dispatch a compute pipeline with one bind group
+fn compute_dispatch(device, queue, cp, bind_group, x, y, z) {
+    var encoder = wgpu_device_create_command_encoder(device, "compute_enc");
+
+    var pass_desc = wgpu_compute_pass_descriptor("compute_pass");
+    var pass = wgpu_command_encoder_begin_compute_pass(encoder, pass_desc);
+
+    wgpu_compute_pass_set_pipeline(pass, compute_pipeline_handle(cp));
+    wgpu_compute_pass_set_bind_group(pass, 0, bind_group, 0, 0);
+    wgpu_compute_pass_dispatch(pass, x, y, z);
+    wgpu_compute_pass_end(pass);
+
+    var cmd_buf = wgpu_command_encoder_finish(encoder, "compute_cmd");
+    wgpu_queue_submit_one(queue, cmd_buf);
+    return 0;
+}
+
+# ================================================================
+# PingPongBuffer — iterative compute with source/dest swapping
+# ================================================================
+#
+# PingPongBuffer struct layout (24 bytes):
+#   +0: buffer_a (WGPUBuffer, 8)
+#   +8: buffer_b (WGPUBuffer, 8)
+#   +16: current  (i64, 0=A is source, 1=B is source)
+
+fn ping_pong_new(device, size) {
+    var usage = WGPU_BUFFER_USAGE_STORAGE | WGPU_BUFFER_USAGE_COPY_SRC | WGPU_BUFFER_USAGE_COPY_DST;
+    var desc_a = wgpu_buffer_descriptor("ping", usage, size, 0);
+    var desc_b = wgpu_buffer_descriptor("pong", usage, size, 0);
+    var pp = alloc(24);
+    store64(pp, wgpu_device_create_buffer(device, desc_a));
+    store64(pp + 8, wgpu_device_create_buffer(device, desc_b));
+    store64(pp + 16, 0);
+    return pp;
+}
+
+fn ping_pong_source(pp) {
+    if (load64(pp + 16) == 0) { return load64(pp); }
+    return load64(pp + 8);
+}
+
+fn ping_pong_dest(pp) {
+    if (load64(pp + 16) == 0) { return load64(pp + 8); }
+    return load64(pp);
+}
+
+fn ping_pong_swap(pp) {
+    var cur = load64(pp + 16);
+    store64(pp + 16, 1 - cur);
+    return 0;
+}
+
+fn ping_pong_release(pp) {
+    wgpu_buffer_release(load64(pp));
+    wgpu_buffer_release(load64(pp + 8));
+    return 0;
+}
+
+# Release a compute pipeline
+fn compute_pipeline_release(cp) {
+    if (cp == 0) { return 0; }
+    wgpu_compute_pipeline_release(compute_pipeline_handle(cp));
+    wgpu_bind_group_layout_release(compute_pipeline_bgl(cp));
+    wgpu_pipeline_layout_release(compute_pipeline_layout(cp));
+    return 0;
+}
+# @internal — FFI / toolchain scaffolding, replaced in v3.0
+# cache_key.cyr — shared helper for hashmap-backed caches.
+#
+# All cache modules (shader_cache, pipeline_cache, bind_group_cache,
+# texture_cache) store hash keys as null-terminated decimal strings.
+# hashmap.cyr::map_set stores the key pointer WITHOUT copying, so the key
+# buffer must live on the heap — stack buffers dangle as soon as the caller
+# returns.
+#
+# Prior to this helper, each cache module had its own stack-buffer
+# implementation, which silently lost entries whenever two keys were
+# inserted back-to-back (the second call reused the same stack slot).
+# The test suite catches the regression.
+
+fn _hash_to_heap_key(key) {
+    var tmp[24];
+    var len = fmt_int_buf(key, &tmp);
+    var dst = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        store8(dst + i, load8(&tmp + i));
+        i = i + 1;
+    }
+    store8(dst + len, 0);
+    return dst;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# shader_cache.cyr — hash-based shader module deduplication
+# Ported from mabda/src/shader.rs
+#
+# ShaderCache stores compiled shader modules keyed by a hash of
+# their WGSL source code. Prevents recompiling identical shaders.
+#
+# Uses hashmap.cyr with u64 hash keys → shader module handles.
+
+# FNV-1a hash for shader source deduplication
+fn _shader_hash(source) {
+    var hash = 14695981039346656037;  # FNV offset basis (u64)
+    var i = 0;
+    var c = load8(source + i);
+    while (c != 0) {
+        hash = hash ^ c;
+        hash = hash * 1099511628211;  # FNV prime
+        i = i + 1;
+        c = load8(source + i);
+    }
+    return hash;
+}
+
+fn shader_cache_new() {
+    return map_new();
+}
+
+# NOTE: _hash_to_heap_key is defined in src/cache_key.cyr and must be
+# included before this module. The helper must heap-alloc (not stack-alloc)
+# because hashmap.cyr::map_set stores the key pointer directly without
+# copying — a stack buffer would be reclaimed before a subsequent map_get
+# could read it.
+
+# Get a cached shader module or 0 if not cached
+fn shader_cache_get(cache, wgsl_source) {
+    var key = _shader_hash(wgsl_source);
+    var kstr = _hash_to_heap_key(key);
+    return map_get(cache, kstr);
+}
+
+# Store a shader module in the cache
+fn shader_cache_set(cache, wgsl_source, module) {
+    var key = _shader_hash(wgsl_source);
+    var kstr = _hash_to_heap_key(key);
+    map_set(cache, kstr, module);
+    return 0;
+}
+
+# Get or compile: returns cached module or compiles new one
+fn shader_cache_get_or_compile(cache, device, wgsl_source, label) {
+    var existing = shader_cache_get(cache, wgsl_source);
+    if (existing != 0) { return existing; }
+
+    # Compile new shader
+    var src = wgpu_shader_source_wgsl(wgsl_source);
+    var desc = wgpu_shader_module_descriptor(label, src);
+    var module = wgpu_device_create_shader_module(device, desc);
+
+    if (module != 0) {
+        shader_cache_set(cache, wgsl_source, module);
+    }
+    return module;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# pipeline_cache.cyr — hash-based pipeline deduplication
+# Ported from mabda/src/pipeline_cache.rs
+#
+# Caches compute and render pipeline handles keyed by u64 hash.
+# Prevents recreating identical pipelines.
+
+fn pipeline_cache_new() {
+    return map_new();
+}
+
+fn pipeline_cache_get(cache, key) {
+    # Heap-alloc the key string — map_set in hashmap.cyr stores the pointer
+    # directly without copying, so a stack buffer would dangle.
+    return map_get(cache, _hash_to_heap_key(key));
+}
+
+fn pipeline_cache_set(cache, key, pipeline) {
+    map_set(cache, _hash_to_heap_key(key), pipeline);
+    return 0;
+}
+
+fn pipeline_cache_has(cache, key) {
+    if (pipeline_cache_get(cache, key) != 0) { return 1; }
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# bind_group_cache.cyr — hash-based bind group caching
+# Ported from mabda/src/bind_group_cache.rs
+#
+# Caches bind group handles keyed by u64 hash.
+
+fn bind_group_cache_new() {
+    return map_new();
+}
+
+fn bind_group_cache_get(cache, key) {
+    # See _hash_to_heap_key comment in shader_cache.cyr — hashmap keys must
+    # live on the heap.
+    return map_get(cache, _hash_to_heap_key(key));
+}
+
+fn bind_group_cache_set(cache, key, bind_group) {
+    map_set(cache, _hash_to_heap_key(key), bind_group);
+    return 0;
+}
+
+fn bind_group_cache_has(cache, key) {
+    if (bind_group_cache_get(cache, key) != 0) { return 1; }
+    return 0;
+}
+
+# Invalidate entries matching a predicate
+# pred_fn(key, value) → 1 to remove, 0 to keep
+# Note: hashmap.cyr doesn't support iteration with removal,
+# so this is a simplified version that clears the entire cache.
+fn bind_group_cache_clear(cache) {
+    # Replace with a fresh map (old one gets GC'd by bump allocator reset)
+    return map_new();
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# vertex.cyr — vertex types and buffer layout descriptors
+# Ported from mabda/src/vertex.rs
+#
+# Canonical vertex types for the AGNOS GPU ecosystem.
+# All values stored as f32 bit patterns via store32.
+#
+# Vertex2D (32 bytes):
+#   +0:  position[0] (f32)     shader_location 0
+#   +4:  position[1] (f32)
+#   +8:  tex_coords[0] (f32)   shader_location 1
+#   +12: tex_coords[1] (f32)
+#   +16: color[0] (f32)        shader_location 2
+#   +20: color[1] (f32)
+#   +24: color[2] (f32)
+#   +28: color[3] (f32)
+#
+# Vertex3D (48 bytes):
+#   +0:  position[0..3] (3×f32)      shader_location 0
+#   +12: normal[0..3] (3×f32)        shader_location 1
+#   +24: tex_coords[0..2] (2×f32)    shader_location 2
+#   +32: color[0..4] (4×f32)         shader_location 3
+#
+# SkinnedVertex3D (96 bytes):
+#   +0:  position[0..3] (3×f32)      shader_location 0
+#   +12: normal[0..3] (3×f32)        shader_location 1
+#   +24: tex_coords[0..2] (2×f32)    shader_location 2
+#   +32: color[0..4] (4×f32)         shader_location 3
+#   +48: joints[0..4] (4×f32)        shader_location 4
+#   +64: weights[0..4] (4×f32)       shader_location 5
+#   +80: tangent[0..4] (4×f32)       shader_location 6
+
+enum VertexSize {
+    VERTEX_2D_SIZE     = 32;
+    VERTEX_3D_SIZE     = 48;
+    SKINNED_3D_SIZE    = 96;
+}
+
+# ================================================================
+# Vertex2D — create and write
+# ================================================================
+
+# Allocate a Vertex2D and fill with f64 values (converted to f32)
+fn vertex2d_new(px, py, tx, ty, cr, cg, cb, ca) {
+    var v = alloc(32);
+    store32(v, f64_to_f32(px));
+    store32(v + 4, f64_to_f32(py));
+    store32(v + 8, f64_to_f32(tx));
+    store32(v + 12, f64_to_f32(ty));
+    store32(v + 16, f64_to_f32(cr));
+    store32(v + 20, f64_to_f32(cg));
+    store32(v + 24, f64_to_f32(cb));
+    store32(v + 28, f64_to_f32(ca));
+    return v;
+}
+
+# Write a Vertex2D at dst (doesn't allocate, writes 32 bytes)
+fn vertex2d_write(dst, px, py, tx, ty, cr, cg, cb, ca) {
+    store32(dst, f64_to_f32(px));
+    store32(dst + 4, f64_to_f32(py));
+    store32(dst + 8, f64_to_f32(tx));
+    store32(dst + 12, f64_to_f32(ty));
+    store32(dst + 16, f64_to_f32(cr));
+    store32(dst + 20, f64_to_f32(cg));
+    store32(dst + 24, f64_to_f32(cb));
+    store32(dst + 28, f64_to_f32(ca));
+    return 0;
+}
+
+# ================================================================
+# Vertex3D — create and write
+# ================================================================
+
+fn vertex3d_new(px, py, pz, nx, ny, nz, tx, ty, cr, cg, cb, ca) {
+    var v = alloc(48);
+    store32(v, f64_to_f32(px));
+    store32(v + 4, f64_to_f32(py));
+    store32(v + 8, f64_to_f32(pz));
+    store32(v + 12, f64_to_f32(nx));
+    store32(v + 16, f64_to_f32(ny));
+    store32(v + 20, f64_to_f32(nz));
+    store32(v + 24, f64_to_f32(tx));
+    store32(v + 28, f64_to_f32(ty));
+    store32(v + 32, f64_to_f32(cr));
+    store32(v + 36, f64_to_f32(cg));
+    store32(v + 40, f64_to_f32(cb));
+    store32(v + 44, f64_to_f32(ca));
+    return v;
+}
+
+# ================================================================
+# WGPUVertexFormat constants (for layout descriptors)
+# ================================================================
+
+enum WGPUVertexFormat {
+    WGPU_VERTEX_FORMAT_FLOAT32X2 = 21;
+    WGPU_VERTEX_FORMAT_FLOAT32X3 = 22;
+    WGPU_VERTEX_FORMAT_FLOAT32X4 = 23;
+}
+
+# ================================================================
+# WGPUVertexAttribute layout (24 bytes per attribute)
+#   +0:  format (u32)
+#   +8:  offset (u64)
+#   +16: shaderLocation (u32)
+# ================================================================
+
+fn _vertex_attr(dst, format, offset, location) {
+    store32(dst, format);
+    store64(dst + 8, offset);
+    store32(dst + 16, location);
+    return 0;
+}
+
+# ================================================================
+# WGPUVertexBufferLayout (24 bytes)
+#   +0:  arrayStride (u64)
+#   +8:  stepMode (u32)
+#   +16: attributeCount (u64) — wait, check actual layout
+# Actually: need to verify from webgpu.h
+# For now, provide attribute arrays that can be used with
+# the render pipeline builder
+# ================================================================
+
+# Build a Vertex2D attribute array (3 attributes × 24 bytes = 72 bytes)
+# Returns pointer to attribute array
+fn vertex2d_attributes() {
+    var attrs = alloc(72);
+    _vertex_attr(attrs, WGPU_VERTEX_FORMAT_FLOAT32X2, 0, 0);       # position
+    _vertex_attr(attrs + 24, WGPU_VERTEX_FORMAT_FLOAT32X2, 8, 1);  # tex_coords
+    _vertex_attr(attrs + 48, WGPU_VERTEX_FORMAT_FLOAT32X4, 16, 2); # color
+    return attrs;
+}
+
+# Build a Vertex3D attribute array (4 attributes × 24 bytes = 96 bytes)
+fn vertex3d_attributes() {
+    var attrs = alloc(96);
+    _vertex_attr(attrs, WGPU_VERTEX_FORMAT_FLOAT32X3, 0, 0);       # position
+    _vertex_attr(attrs + 24, WGPU_VERTEX_FORMAT_FLOAT32X3, 12, 1); # normal
+    _vertex_attr(attrs + 48, WGPU_VERTEX_FORMAT_FLOAT32X2, 24, 2); # tex_coords
+    _vertex_attr(attrs + 72, WGPU_VERTEX_FORMAT_FLOAT32X4, 32, 3); # color
+    return attrs;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# blend.cyr — blend state presets
+# Ported from mabda/src/blend.rs
+#
+# WGPUBlendState layout (24 bytes):
+#   +0:  color (WGPUBlendComponent = 12 bytes)
+#   +12: alpha (WGPUBlendComponent = 12 bytes)
+#
+# WGPUBlendComponent layout (12 bytes):
+#   +0:  operation (u32)
+#   +4:  srcFactor (u32)
+#   +8:  dstFactor (u32)
+
+# WGPUBlendOperation
+enum WGPUBlendOp {
+    WGPU_BLEND_OP_ADD = 1;
+}
+
+# WGPUBlendFactor
+enum WGPUBlendFactor {
+    WGPU_BLEND_FACTOR_ZERO      = 1;
+    WGPU_BLEND_FACTOR_ONE       = 2;
+    WGPU_BLEND_FACTOR_SRC       = 3;
+    WGPU_BLEND_FACTOR_ONE_MINUS_SRC = 4;
+    WGPU_BLEND_FACTOR_SRC_ALPHA = 5;
+    WGPU_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA = 6;
+    WGPU_BLEND_FACTOR_DST       = 7;
+    WGPU_BLEND_FACTOR_ONE_MINUS_DST = 8;
+    WGPU_BLEND_FACTOR_DST_ALPHA = 9;
+    WGPU_BLEND_FACTOR_ONE_MINUS_DST_ALPHA = 10;
+}
+
+# ================================================================
+# Blend presets
+# ================================================================
+
+enum BlendPreset {
+    BLEND_OPAQUE              = 0;
+    BLEND_ALPHA_BLEND         = 1;
+    BLEND_PREMULTIPLIED_ALPHA = 2;
+    BLEND_ADDITIVE            = 3;
+    BLEND_MULTIPLY            = 4;
+}
+
+fn _blend_component(dst, op, src_factor, dst_factor) {
+    store32(dst, op);
+    store32(dst + 4, src_factor);
+    store32(dst + 8, dst_factor);
+    return 0;
+}
+
+# Write a blend state (24 bytes) at dst for the given preset
+fn blend_state(dst, preset) {
+    var add = WGPU_BLEND_OP_ADD;
+    var one = WGPU_BLEND_FACTOR_ONE;
+    var zero = WGPU_BLEND_FACTOR_ZERO;
+    var src_a = WGPU_BLEND_FACTOR_SRC_ALPHA;
+    var inv_src_a = WGPU_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    if (preset == BLEND_OPAQUE) {
+        # Replace: src=One, dst=Zero
+        _blend_component(dst, add, one, zero);
+        _blend_component(dst + 12, add, one, zero);
+    }
+    elif (preset == BLEND_ALPHA_BLEND) {
+        # Standard alpha: src=SrcAlpha, dst=OneMinusSrcAlpha
+        _blend_component(dst, add, src_a, inv_src_a);
+        _blend_component(dst + 12, add, one, inv_src_a);
+    }
+    elif (preset == BLEND_PREMULTIPLIED_ALPHA) {
+        # Premultiplied: src=One, dst=OneMinusSrcAlpha
+        _blend_component(dst, add, one, inv_src_a);
+        _blend_component(dst + 12, add, one, inv_src_a);
+    }
+    elif (preset == BLEND_ADDITIVE) {
+        # Additive: src=One, dst=One
+        _blend_component(dst, add, one, one);
+        _blend_component(dst + 12, add, one, one);
+    }
+    elif (preset == BLEND_MULTIPLY) {
+        # Multiply: src=Dst, dst=Zero
+        _blend_component(dst, add, WGPU_BLEND_FACTOR_DST, zero);
+        _blend_component(dst + 12, add, WGPU_BLEND_FACTOR_DST_ALPHA, zero);
+    }
+    return 0;
+}
+
+# Allocate and return a blend state for the given preset
+fn blend_state_new(preset) {
+    var bs = alloc(24);
+    blend_state(bs, preset);
+    return bs;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# sampler.cyr — sampler presets and creation helpers
+# Ported from mabda/src/sampler.rs
+#
+# WGPUSamplerDescriptor layout (56 bytes — from webgpu.h):
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: addressModeU (u32)
+#   +28: addressModeV (u32)
+#   +32: addressModeW (u32)
+#   +36: magFilter (u32)
+#   +40: minFilter (u32)
+#   +44: mipmapFilter (u32)
+#   +48: lodMinClamp (f32)
+#   +52: lodMaxClamp (f32)
+#   +56: compare (u32)
+#   +60: maxAnisotropy (u16)
+
+# WGPUAddressMode (wgpu-native v29 values)
+var WGPU_ADDRESS_MODE_CLAMP_TO_EDGE = 1;
+var WGPU_ADDRESS_MODE_REPEAT        = 2;
+var WGPU_ADDRESS_MODE_MIRROR_REPEAT = 3;
+
+# WGPUFilterMode (v29)
+var WGPU_FILTER_MODE_NEAREST = 1;
+var WGPU_FILTER_MODE_LINEAR  = 2;
+
+# WGPUMipmapFilterMode (v29)
+var WGPU_MIPMAP_FILTER_NEAREST = 1;
+var WGPU_MIPMAP_FILTER_LINEAR  = 2;
+
+# WGPUCompareFunction (v29)
+var WGPU_COMPARE_UNDEFINED   = 0;
+var WGPU_COMPARE_NEVER       = 1;
+var WGPU_COMPARE_LESS        = 2;
+var WGPU_COMPARE_EQUAL       = 3;
+var WGPU_COMPARE_LESS_EQUAL  = 4;
+var WGPU_COMPARE_GREATER     = 5;
+var WGPU_COMPARE_NOT_EQUAL   = 6;
+var WGPU_COMPARE_GREATER_EQUAL = 7;
+var WGPU_COMPARE_ALWAYS      = 8;
+
+# Sampler presets
+var SAMPLER_NEAREST     = 0;
+var SAMPLER_LINEAR      = 1;
+var SAMPLER_ANISOTROPIC = 2;
+var SAMPLER_COMPARISON  = 3;
+
+# Build a sampler descriptor at dst (64-byte WGPUSamplerDescriptor)
+# WGPU_SAMPLER_DESCRIPTOR_INIT defaults:
+#   nextInChain=NULL, label=empty, addressMode=ClampToEdge
+#   filters=Nearest, lodMinClamp=0.0, lodMaxClamp=32.0,
+#   compare=Undefined, maxAnisotropy=1
+fn _sampler_desc_init(dst, label) {
+    memset(dst, 0, 64);
+    if (label != 0) { wgpu_string_view(dst + 8, label); }
+    store32(dst + 24, WGPU_ADDRESS_MODE_CLAMP_TO_EDGE);
+    store32(dst + 28, WGPU_ADDRESS_MODE_CLAMP_TO_EDGE);
+    store32(dst + 32, WGPU_ADDRESS_MODE_CLAMP_TO_EDGE);
+    # lodMaxClamp = 32.0f (default per WGPU_SAMPLER_DESCRIPTOR_INIT)
+    store32(dst + 52, 0x42000000);  # 32.0f bit pattern
+    # maxAnisotropy = 1 (uint16); anything less triggers a wgpu validation error
+    store16(dst + 60, 1);
+    return 0;
+}
+
+fn sampler_descriptor(preset) {
+    var desc = alloc(64);
+    if (preset == SAMPLER_NEAREST) {
+        _sampler_desc_init(desc, "sampler_nearest");
+        store32(desc + 36, WGPU_FILTER_MODE_NEAREST);
+        store32(desc + 40, WGPU_FILTER_MODE_NEAREST);
+        store32(desc + 44, WGPU_MIPMAP_FILTER_NEAREST);
+    }
+    elif (preset == SAMPLER_LINEAR) {
+        _sampler_desc_init(desc, "sampler_linear");
+        store32(desc + 36, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 40, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 44, WGPU_MIPMAP_FILTER_LINEAR);
+    }
+    elif (preset == SAMPLER_ANISOTROPIC) {
+        _sampler_desc_init(desc, "sampler_anisotropic");
+        store32(desc + 36, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 40, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 44, WGPU_MIPMAP_FILTER_LINEAR);
+        # Override the init's maxAnisotropy=1 with 16× anisotropic filtering.
+        store16(desc + 60, 16);
+    }
+    elif (preset == SAMPLER_COMPARISON) {
+        _sampler_desc_init(desc, "sampler_comparison");
+        store32(desc + 36, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 40, WGPU_FILTER_MODE_LINEAR);
+        store32(desc + 44, WGPU_MIPMAP_FILTER_NEAREST);
+        store32(desc + 56, WGPU_COMPARE_LESS_EQUAL);
+    }
+    return desc;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# depth.cyr — depth/stencil texture management
+# Ported from mabda/src/depth.rs
+#
+# DepthTexture struct layout (40 bytes):
+#   +0:  texture (WGPUTexture handle, 8)
+#   +8:  view    (WGPUTextureView handle, 8)
+#   +16: format  (u32 WGPUTextureFormat)
+#   +24: width   (i64)
+#   +32: height  (i64)
+
+# Depth format constants (wgpu-native v29 values)
+var DEPTH_FORMAT_DEPTH32_FLOAT         = 0x30;  # WGPUTextureFormat_Depth32Float
+var DEPTH_FORMAT_DEPTH24_PLUS_STENCIL8 = 0x2F;  # WGPUTextureFormat_Depth24PlusStencil8
+var DEPTH_DEFAULT_FORMAT               = 0x30;
+
+# WGPUTextureDescriptor layout (72 bytes):
+#   +0:  nextInChain (8)
+#   +8:  label (StringView = 16)
+#   +24: usage (u64 flags)
+#   +32: dimension (u32)
+#   +40: size (Extent3D = 12: width u32, height u32, depthOrArrayLayers u32)
+#   +52: format (u32)
+#   +56: mipLevelCount (u32)
+#   +60: sampleCount (u32)
+#   +64: viewFormatCount (u64)
+#   +72: viewFormats (ptr)
+
+fn _depth_texture_descriptor(label, width, height, format) {
+    var desc = alloc(80);
+    memset(desc, 0, 80);
+    if (label != 0) { wgpu_string_view(desc + 8, label); }
+    # usage = RENDER_ATTACHMENT | TEXTURE_BINDING
+    store64(desc + 24, 0x10 | 0x04);
+    # dimension = 2D (1)
+    store32(desc + 32, 1);
+    # size: width, height, depth=1
+    if (width < 1) { width = 1; }
+    if (height < 1) { height = 1; }
+    store32(desc + 40, width);
+    store32(desc + 44, height);
+    store32(desc + 48, 1);
+    # format
+    store32(desc + 52, format);
+    # mipLevelCount = 1
+    store32(desc + 56, 1);
+    # sampleCount = 1
+    store32(desc + 60, 1);
+    return desc;
+}
+
+# Create a depth texture
+# Returns DepthTexture struct pointer
+fn depth_texture_new(device, width, height, format) {
+    var desc = _depth_texture_descriptor("depth_texture", width, height, format);
+    var texture = wgpu_device_create_buffer(device, desc);  # TODO: use create_texture
+    # NOTE: actual GPU creation requires wgpuDeviceCreateTexture + wgpuTextureCreateView
+    # which need to be added to wgpu_ffi.cyr. For now, store the descriptor info.
+    var dt = alloc(40);
+    store64(dt, 0);       # texture handle (populated when FFI available)
+    store64(dt + 8, 0);   # view handle
+    store32(dt + 16, format);
+    store64(dt + 24, width);
+    store64(dt + 32, height);
+    return dt;
+}
+
+# Create with default format (Depth32Float)
+fn depth_texture_new_default(device, width, height) {
+    return depth_texture_new(device, width, height, DEPTH_DEFAULT_FORMAT);
+}
+
+# Accessors
+fn depth_texture_handle(dt) { return load64(dt); }
+fn depth_texture_view(dt)   { return load64(dt + 8); }
+fn depth_texture_format(dt) { return load32(dt + 16); }
+fn depth_texture_width(dt)  { return load64(dt + 24); }
+fn depth_texture_height(dt) { return load64(dt + 32); }
+
+# WGPUCompareFunction constants
+var WGPU_COMPARE_LESS = 2;
+
+# Build a depth/stencil state (for render pipeline integration)
+# WGPUDepthStencilState layout (68 bytes):
+#   +0:  nextInChain (8)
+#   +8:  format (u32)
+#   +12: depthWriteEnabled (u32 OptionalBool)
+#   +16: depthCompare (u32)
+#   +20: stencilFront (StencilFaceState = 16)
+#   +36: stencilBack (StencilFaceState = 16)
+#   +52: stencilReadMask (u32)
+#   +56: stencilWriteMask (u32)
+#   +60: depthBias (i32)
+#   +64: depthBiasSlopeScale (f32)
+#   +68: depthBiasClamp (f32)
+fn depth_stencil_state(dst, format) {
+    memset(dst, 0, 72);
+    store32(dst + 8, format);
+    store32(dst + 12, 2);          # depthWriteEnabled = true (OptionalBool_True = 2)
+    store32(dst + 16, WGPU_COMPARE_LESS);
+    store32(dst + 52, 0xFFFFFFFF); # stencilReadMask
+    store32(dst + 56, 0xFFFFFFFF); # stencilWriteMask
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# bind_group.cyr — bind group layout builder
+# Ported from mabda/src/bind_group.rs
+#
+# Fluent builder for WGPUBindGroupLayout creation.
+# Uses a vec of WGPUBindGroupLayoutEntry structs (120 bytes each).
+#
+# BindGroupLayoutBuilder struct layout (8 bytes):
+#   +0: entries (vec ptr — vec of entry pointers)
+
+fn bglb_new() {
+    var b = alloc(8);
+    store64(b, vec_new());
+    return b;
+}
+
+fn _bglb_entries(b) { return load64(b); }
+
+# Add a uniform buffer binding
+fn bglb_uniform_buffer(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    wgpu_bgl_entry_buffer(e, idx, visibility, WGPU_BUFFER_BINDING_TYPE_UNIFORM, 0, 0);
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a uniform buffer binding with dynamic offset
+fn bglb_uniform_buffer_dynamic(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    wgpu_bgl_entry_buffer(e, idx, visibility, WGPU_BUFFER_BINDING_TYPE_UNIFORM, 1, 0);
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a storage buffer binding (read-only)
+fn bglb_storage_buffer_readonly(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    wgpu_bgl_entry_buffer(e, idx, visibility, WGPU_BUFFER_BINDING_TYPE_READ_ONLY_STORAGE, 0, 0);
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a storage buffer binding (read-write)
+fn bglb_storage_buffer(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    wgpu_bgl_entry_buffer(e, idx, visibility, WGPU_BUFFER_BINDING_TYPE_STORAGE, 0, 0);
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a 2D texture binding (float, filterable)
+# WGPUBindGroupLayoutEntry texture field at +72 (24 bytes):
+#   +72: sampleType (u32) — Float=1, UnfilterableFloat=2, Depth=3
+#   +76: viewDimension (u32) — D2=2
+#   +80: multisampled (u32 bool)
+fn bglb_texture_2d(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    store32(e + 8, idx);
+    store64(e + 16, visibility);
+    store32(e + 72, 1);   # sampleType = Float (filterable)
+    store32(e + 76, 2);   # viewDimension = D2
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a sampler binding (filtering)
+# WGPUBindGroupLayoutEntry sampler field at +56 (16 bytes):
+#   +56: type (u32) — Filtering=1, NonFiltering=2, Comparison=3
+fn bglb_sampler(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    store32(e + 8, idx);
+    store64(e + 16, visibility);
+    store32(e + 56, 1);   # type = Filtering
+    vec_push(entries, e);
+    return b;
+}
+
+# Add a comparison sampler binding (for shadow maps)
+fn bglb_comparison_sampler(b, visibility) {
+    var entries = _bglb_entries(b);
+    var idx = vec_len(entries);
+    var e = alloc(120);
+    memset(e, 0, 120);
+    store32(e + 8, idx);
+    store64(e + 16, visibility);
+    store32(e + 56, 3);   # type = Comparison
+    vec_push(entries, e);
+    return b;
+}
+
+# Build the bind group layout — returns entry array pointer + count
+# Caller uses these with wgpu_bind_group_layout_descriptor()
+fn bglb_entry_count(b) {
+    return vec_len(_bglb_entries(b));
+}
+
+# Copy entries into a contiguous array for wgpu (120 bytes each)
+fn bglb_build_entries(b) {
+    var entries = _bglb_entries(b);
+    var count = vec_len(entries);
+    if (count == 0) { return 0; }
+    var arr = alloc(count * 120);
+    for (var i = 0; i < count; i = i + 1) {
+        var src = vec_get(entries, i);
+        memcpy(arr + i * 120, src, 120);
+    }
+    return arr;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# texture.cyr — texture creation, view, sampler, and caching
+# Ported from mabda/src/texture.rs
+#
+# Texture struct layout (32 bytes):
+#   +0:  texture (WGPUTexture handle, 8)
+#   +8:  view    (WGPUTextureView handle, 8)
+#   +16: sampler (WGPUSampler handle, 8)
+#   +24: width × height packed (lower 32 bits = width, upper 32 bits = height)
+#
+# The last field is for informational purposes — the original 24-byte layout
+# lost size information, which makes `texture_from_*` results hard to use.
+#
+# FFI contract: all creation paths use wgpu_ffi slots 45–51. See
+# src/wgpu_descriptors.cyr for the struct builders.
+
+# ================================================================
+# Accessors
+# ================================================================
+fn texture_handle(t)    { return load64(t); }
+fn texture_view(t)      { return load64(t + 8); }
+fn texture_sampler(t)   { return load64(t + 16); }
+fn texture_width(t)     { return load32(t + 24); }
+fn texture_height(t)    { return load32(t + 28); }
+
+# Build a Texture struct from pre-created handles
+fn texture_from_handles(tex, view, sampler) {
+    var t = alloc(32);
+    store64(t + 0,  tex);
+    store64(t + 8,  view);
+    store64(t + 16, sampler);
+    store64(t + 24, 0);
+    return t;
+}
+
+# Release all handles held by a Texture struct (safe for partial fills)
+fn texture_release(t) {
+    var tex     = load64(t + 0);
+    var view    = load64(t + 8);
+    var sampler = load64(t + 16);
+    if (view != 0)    { wgpu_texture_view_release(view); }
+    if (tex != 0)     { wgpu_texture_release(tex); }
+    if (sampler != 0) { wgpu_sampler_release(sampler); }
+    store64(t + 0, 0);
+    store64(t + 8, 0);
+    store64(t + 16, 0);
+    return 0;
+}
+
+# ================================================================
+# Raw creation — create a texture handle without view/sampler
+# ================================================================
+
+# Creates a 2D texture with RGBA8_UNORM format and
+# TEXTURE_BINDING | COPY_DST usage (the common "upload + sample" case).
+fn texture_create_rgba8(device, width, height, label) {
+    var usage = WGPU_TEXTURE_USAGE_TEXTURE_BINDING | WGPU_TEXTURE_USAGE_COPY_DST;
+    var desc = wgpu_texture_descriptor(label, usage, WGPU_TEXTURE_DIMENSION_2D,
+    width, height, WGPU_TEXTURE_FORMAT_RGBA8_UNORM);
+    return wgpu_device_create_texture(device, desc);
+}
+
+# Create a default 2D TextureView for an RGBA8 texture.
+fn texture_view_create_rgba8(texture, label) {
+    var desc = wgpu_texture_view_descriptor(label,
+    WGPU_TEXTURE_FORMAT_RGBA8_UNORM,
+    WGPU_TEXTURE_VIEW_DIMENSION_2D);
+    return wgpu_texture_create_view(texture, desc);
+}
+
+# ================================================================
+# Upload — wraps wgpuQueueWriteTexture
+# ================================================================
+
+# Upload a tightly packed RGBA8 buffer into a texture.
+#   bytes_per_row = width × 4 (caller can override for aligned uploads)
+fn texture_upload_rgba8(queue, texture, data, width, height) {
+    var dest = wgpu_texel_copy_texture_info(texture, 0);
+    var layout = wgpu_texel_copy_buffer_layout(0, width * 4, height);
+    var size = wgpu_extent_3d(width, height, 1);
+    var data_size = width * height * 4;
+    wgpu_queue_write_texture(queue, dest, data, data_size, layout, size);
+    return 0;
+}
+
+# ================================================================
+# Convenience: RGBA8 texture + view + upload in one call
+# ================================================================
+# Caller must supply a tightly packed (width × height × 4) byte buffer.
+# Returns a Texture struct with texture + view populated (sampler = 0).
+fn texture_from_rgba(device, queue, rgba_ptr, width, height, label) {
+    var tex = texture_create_rgba8(device, width, height, label);
+    if (tex == 0) { return 0; }
+    var view = texture_view_create_rgba8(tex, label);
+    texture_upload_rgba8(queue, tex, rgba_ptr, width, height);
+    var t = alloc(32);
+    store64(t + 0,  tex);
+    store64(t + 8,  view);
+    store64(t + 16, 0);
+    store32(t + 24, width);
+    store32(t + 28, height);
+    return t;
+}
+
+# Create a 1×1 solid-color texture from a Color struct.
+fn texture_from_color(device, queue, color) {
+    var rgba[4];
+    store8(&rgba,     f64_to(f64_mul(color_r(color), f64_from(255))));
+    store8(&rgba + 1, f64_to(f64_mul(color_g(color), f64_from(255))));
+    store8(&rgba + 2, f64_to(f64_mul(color_b(color), f64_from(255))));
+    store8(&rgba + 3, f64_to(f64_mul(color_a(color), f64_from(255))));
+    return texture_from_rgba(device, queue, &rgba, 1, 1, "solid_color");
+}
+
+# ================================================================
+# Mip math (pure — no FFI)
+# ================================================================
+
+# Compute mip level count for a texture of given dimensions
+fn mip_level_count(width, height) {
+    var max_dim = width;
+    if (height > max_dim) { max_dim = height; }
+    if (max_dim == 0) { return 1; }
+    # floor(log2(max_dim)) + 1
+    var levels = 1;
+    var dim = max_dim;
+    while (dim > 1) { dim = dim / 2; levels = levels + 1; }
+    return levels;
+}
+
+# Validate texture dimensions against device limit
+fn validate_dimensions(width, height, max_dim) {
+    if (width > max_dim) { return GPU_ERR_TEXTURE_DIMENSION; }
+    if (height > max_dim) { return GPU_ERR_TEXTURE_DIMENSION; }
+    return 0;
+}
+
+# ================================================================
+# TextureCache — keyed caching for loaded textures
+# ================================================================
+# Uses the same _hash_to_heap_key helper as the other caches. Stack-allocated
+# keys would dangle as soon as the setter returned; see the cache-fix section
+# in shader_cache.cyr for the rationale.
+
+fn texture_cache_new() {
+    return map_new();
+}
+
+fn texture_cache_get(cache, key) {
+    return map_get(cache, _hash_to_heap_key(key));
+}
+
+fn texture_cache_set(cache, key, texture) {
+    map_set(cache, _hash_to_heap_key(key), texture);
+    return 0;
+}
+
+fn texture_cache_has(cache, key) {
+    if (texture_cache_get(cache, key) != 0) { return 1; }
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# render_target.cyr — offscreen render target with optional MSAA and depth
+# Ported from mabda/src/render_target.rs
+#
+# RenderTarget struct layout (48 bytes):
+#   +0:  texture      (WGPUTexture, 8)
+#   +8:  view         (WGPUTextureView, 8)
+#   +16: format       (u32 WGPUTextureFormat)
+#   +24: width        (i64)
+#   +32: height       (i64)
+#   +40: sample_count (i64)
+#   +48: msaa_view    (WGPUTextureView or 0, 8)
+#   +56: depth        (DepthTexture ptr or 0, 8)
+
+var RENDER_TARGET_SIZE = 64;
+
+# Accessors
+fn render_target_texture(rt)      { return load64(rt); }
+fn render_target_view(rt)         { return load64(rt + 8); }
+fn render_target_format(rt)       { return load32(rt + 16); }
+fn render_target_width(rt)        { return load64(rt + 24); }
+fn render_target_height(rt)       { return load64(rt + 32); }
+fn render_target_sample_count(rt) { return load64(rt + 40); }
+fn render_target_msaa_view(rt)    { return load64(rt + 48); }
+fn render_target_depth(rt)        { return load64(rt + 56); }
+
+# Get the view to render into (MSAA view if multisampled, else main view)
+fn render_target_render_view(rt) {
+    var msaa = render_target_msaa_view(rt);
+    if (msaa != 0) { return msaa; }
+    return render_target_view(rt);
+}
+
+# Get the resolve target (main view if MSAA, else 0)
+fn render_target_resolve(rt) {
+    var msaa = render_target_msaa_view(rt);
+    if (msaa != 0) { return render_target_view(rt); }
+    return 0;
+}
+
+# Get depth view (or 0)
+fn render_target_depth_view(rt) {
+    var depth = render_target_depth(rt);
+    if (depth == 0) { return 0; }
+    return depth_texture_view(depth);
+}
+
+# ================================================================
+# RenderTargetBuilder
+# ================================================================
+#
+# Builder struct layout (32 bytes):
+#   +0:  width (i64)
+#   +8:  height (i64)
+#   +16: format (u32)
+#   +20: sample_count (u32)
+#   +24: depth_format (u32, 0 = no depth)
+
+fn rtb_new(width, height) {
+    var b = alloc(32);
+    memset(b, 0, 32);
+    store64(b, width);
+    store64(b + 8, height);
+    store32(b + 16, WGPU_TEXTURE_FORMAT_RGBA8_UNORM_SRGB);
+    store32(b + 20, 1);  # no MSAA by default
+    return b;
+}
+
+fn rtb_format(b, format) {
+    store32(b + 16, format);
+    return b;
+}
+
+fn rtb_msaa(b, sample_count) {
+    store32(b + 20, sample_count);
+    return b;
+}
+
+fn rtb_depth(b, depth_format) {
+    store32(b + 24, depth_format);
+    return b;
+}
+
+# Build — creates GPU resources
+# Returns RenderTarget ptr (GPU texture creation requires FFI extensions)
+fn rtb_build(b, device) {
+    var rt = alloc(RENDER_TARGET_SIZE);
+    memset(rt, 0, RENDER_TARGET_SIZE);
+    store32(rt + 16, load32(b + 16));           # format
+    store64(rt + 24, load64(b));                 # width
+    store64(rt + 32, load64(b + 8));             # height
+    store64(rt + 40, load32(b + 20));            # sample_count
+    # TODO: create texture, view, MSAA view, depth via wgpu FFI
+    # (requires wgpuDeviceCreateTexture in function table)
+    return rt;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# render_pipeline.cyr — render pipeline creation and draw commands
+# Ported from mabda/src/render_pipeline.rs
+#
+# The WGPURenderPipelineDescriptor is the most complex struct in the wgpu
+# API (168 bytes, verified via offsetof). To keep the Cyrius builder under
+# the 6-parameter ceiling, we expose two entry points:
+#
+#   render_pipeline_create_simple(device, module, color_format)
+#     — no vertex buffers, no depth, no MSAA, TriangleList, no cull, no blend
+#       Matches what a full-screen triangle / fragment-only effect needs.
+#
+#   render_pipeline_create_from_config(device, config)
+#     — accepts a heap-allocated RenderPipelineConfig struct for anything
+#       beyond the simple case. See `rpc_new` / `rpc_*` setters below.
+#
+# The v29 render pipeline layout:
+#   +0:   nextInChain                    (8)
+#   +8:   label (StringView)             (16)
+#   +24:  layout (WGPUPipelineLayout)    (8)  — null = auto-layout
+#   +32:  vertex (WGPUVertexState)      (64)
+#   +96:  primitive (WGPUPrimitiveState)(32)
+#   +128: depthStencil (ptr, nullable)   (8)
+#   +136: multisample (WGPUMultisampleState)(24)
+#   +160: fragment (ptr, nullable)       (8)
+#
+# Primitive topology/cull/frontFace values (wgpu v29):
+#   Topology::TriangleList = 4, LineList = 2, PointList = 1
+#   FrontFace::CCW = 1
+#   CullMode::None = 1, Back = 3, Front = 2
+
+# ================================================================
+# RenderPipeline struct + accessors (24 bytes)
+# ================================================================
+# Layout:
+#   +0:  pipeline  (WGPURenderPipeline, 8)
+#   +8:  reserved
+#   +16: reserved
+# We drop the old bind_group_layout array because the simple path uses
+# auto-layout; complex cases set their own layout via rpc_layout.
+
+fn render_pipeline_handle(rp) { return load64(rp); }
+fn render_pipeline_release(rp) {
+    var h = load64(rp);
+    if (h != 0) { wgpu_render_pipeline_release(h); }
+    store64(rp, 0);
+    return 0;
+}
+
+# Kept for backward compatibility with the stub API — always returns 0.
+fn render_pipeline_bgl(rp, idx) { return 0; }
+fn render_pipeline_layout_count(rp) { return 0; }
+
+# ================================================================
+# Primitive topology / cull / front-face constants (wgpu v29)
+# ================================================================
+var WGPU_TOPOLOGY_POINT_LIST     = 1;
+var WGPU_TOPOLOGY_LINE_LIST      = 2;
+var WGPU_TOPOLOGY_LINE_STRIP     = 3;
+var WGPU_TOPOLOGY_TRIANGLE_LIST  = 4;
+var WGPU_TOPOLOGY_TRIANGLE_STRIP = 5;
+
+var WGPU_FRONT_FACE_CCW = 1;
+var WGPU_FRONT_FACE_CW  = 2;
+
+var WGPU_CULL_MODE_NONE  = 1;
+var WGPU_CULL_MODE_FRONT = 2;
+var WGPU_CULL_MODE_BACK  = 3;
+
+# WGPUColorWriteMask — bitmask. All = R|G|B|A = 0xF
+var WGPU_COLOR_WRITE_MASK_NONE = 0x0;
+var WGPU_COLOR_WRITE_MASK_ALL  = 0xF;
+
+# ================================================================
+# Internal helpers — descriptor struct initializers
+# ================================================================
+
+# Initialize a VertexState (64 bytes) at `dst` with just a module + entry.
+# No vertex buffers, no constants. Suitable for full-screen effects.
+fn _vertex_state_init(dst, module, entry_cstr) {
+    memset(dst, 0, 64);
+    store64(dst + 8, module);
+    wgpu_string_view(dst + 16, entry_cstr);
+    # constantCount=0, constants=NULL, bufferCount=0, buffers=NULL — zeroed
+    return 0;
+}
+
+# Initialize a PrimitiveState (32 bytes) at `dst`.
+fn _primitive_state_init(dst, topology, front_face, cull_mode) {
+    memset(dst, 0, 32);
+    store32(dst + 8,  topology);
+    # stripIndexFormat at +12 stays 0 (Undefined)
+    store32(dst + 16, front_face);
+    store32(dst + 20, cull_mode);
+    # unclippedDepth (WGPUBool at +24) stays 0
+    return 0;
+}
+
+# Initialize a MultisampleState (24 bytes) at `dst`.
+fn _multisample_state_init(dst, sample_count) {
+    memset(dst, 0, 24);
+    store32(dst + 8,  sample_count);
+    store32(dst + 12, 0xFFFFFFFF);  # mask = all bits set
+    # alphaToCoverageEnabled at +16 stays 0 (false)
+    return 0;
+}
+
+# Build a ColorTargetState (32 bytes). writeMask = All by default.
+fn _color_target_state_new(format, blend_ptr) {
+    var t = alloc(32);
+    memset(t, 0, 32);
+    store32(t + 8,  format);
+    store64(t + 16, blend_ptr);        # 0 = no blend
+    store32(t + 24, WGPU_COLOR_WRITE_MASK_ALL);
+    return t;
+}
+
+# Build a FragmentState (64 bytes) pointing at a single color target.
+fn _fragment_state_new(module, entry_cstr, target_ptr) {
+    var f = alloc(64);
+    memset(f, 0, 64);
+    store64(f + 8,  module);
+    wgpu_string_view(f + 16, entry_cstr);
+    # constantCount=0, constants=NULL stays zeroed
+    store64(f + 48, 1);                # targetCount = 1
+    # targets is a pointer to an array of ColorTargetState; allocate the
+    # 1-element array here so Cyrius owns the backing storage.
+    var targets_array = alloc(32);
+    memset(targets_array, 0, 32);
+    # Copy the color target struct into the array slot
+    memcpy(targets_array, target_ptr, 32);
+    store64(f + 56, targets_array);
+    return f;
+}
+
+# ================================================================
+# render_pipeline_create_simple — minimal full-screen-style pipeline
+# ================================================================
+# - auto-layout (no bind groups needed for the simple case)
+# - TriangleList, CCW, no cull
+# - No depth, no MSAA (sample_count=1)
+# - Single color target with write-all mask, no blend
+# - Vertex entry = "vs_main", fragment entry = "fs_main"
+#
+# Returns a RenderPipeline struct (24 bytes) with the handle populated,
+# or 0 on failure.
+fn render_pipeline_create_simple(device, module, color_format) {
+    # 1. Allocate the 168-byte descriptor and zero it
+    var desc = alloc(168);
+    memset(desc, 0, 168);
+
+    # 2. label (optional — empty)
+    wgpu_string_view_null(desc + 8);
+
+    # 3. layout = NULL → auto-layout
+    store64(desc + 24, 0);
+
+    # 4. Embedded VertexState at +32
+    _vertex_state_init(desc + 32, module, "vs_main");
+
+    # 5. Embedded PrimitiveState at +96
+    _primitive_state_init(desc + 96, WGPU_TOPOLOGY_TRIANGLE_LIST,
+    WGPU_FRONT_FACE_CCW, WGPU_CULL_MODE_NONE);
+
+    # 6. depthStencil pointer at +128 = NULL (no depth)
+    store64(desc + 128, 0);
+
+    # 7. Embedded MultisampleState at +136
+    _multisample_state_init(desc + 136, 1);
+
+    # 8. FragmentState pointer at +160
+    var color_target = _color_target_state_new(color_format, 0);
+    var fragment = _fragment_state_new(module, "fs_main", color_target);
+    store64(desc + 160, fragment);
+
+    # 9. Create the pipeline
+    var handle = wgpu_device_create_render_pipeline(device, desc);
+    if (handle == 0) { return 0; }
+
+    var rp = alloc(24);
+    store64(rp, handle);
+    store64(rp + 8, 0);
+    store64(rp + 16, 0);
+    return rp;
+}
+
+# ================================================================
+# DrawCommand (40 bytes) — unchanged from the stub
+# ================================================================
+
+var DRAW_CMD_DRAW             = 0;
+var DRAW_CMD_DRAW_INDEXED     = 1;
+var DRAW_CMD_INDIRECT         = 2;
+var DRAW_CMD_INDEXED_INDIRECT = 3;
+
+fn draw_cmd_draw(vertex_count, instance_count) {
+    var cmd = alloc(40);
+    store64(cmd, DRAW_CMD_DRAW);
+    store64(cmd + 8, vertex_count);
+    store64(cmd + 16, instance_count);
+    store64(cmd + 24, 0);
+    store64(cmd + 32, 0);
+    return cmd;
+}
+
+fn draw_cmd_draw_indexed(index_count, instance_count, first_index, base_vertex, first_instance) {
+    var cmd = alloc(40);
+    store64(cmd, DRAW_CMD_DRAW_INDEXED);
+    store64(cmd + 8, index_count);
+    store64(cmd + 16, instance_count);
+    store64(cmd + 24, first_index);
+    store64(cmd + 32, base_vertex);
+    return cmd;
+}
+
+# ================================================================
+# Legacy RenderPipelineBuilder — kept for API compatibility
+# ================================================================
+#
+# The old builder API is preserved but `rpb_build` now delegates to
+# `render_pipeline_create_simple` internally. Callers that previously
+# configured the builder fields (vertex layouts, bind groups, blend)
+# will still compile but only the minimal-path fields take effect.
+#
+# Builder struct layout (80 bytes) — field map unchanged.
+
+fn rpb_new(device, shader_source, vs_entry) {
+    var b = alloc(80);
+    memset(b, 0, 80);
+    store64(b, device);
+    store64(b + 8, shader_source);
+    store64(b + 16, vs_entry);
+    store32(b + 32, WGPU_TEXTURE_FORMAT_BGRA8_UNORM_SRGB);
+    store32(b + 52, WGPU_TOPOLOGY_TRIANGLE_LIST);
+    store32(b + 56, 1);
+    store64(b + 60, vec_new());
+    store64(b + 68, vec_new());
+    return b;
+}
+
+fn rpb_fragment_entry(b, entry) { store64(b + 24, entry); return b; }
+fn rpb_color_target(b, format, blend_ptr) {
+    store32(b + 32, format);
+    store64(b + 36, blend_ptr);
+    return b;
+}
+fn rpb_depth(b, format) { store32(b + 44, format); return b; }
+fn rpb_cull_mode(b, mode) { store32(b + 48, mode); return b; }
+fn rpb_topology(b, topo) { store32(b + 52, topo); return b; }
+fn rpb_multisample(b, count) { store32(b + 56, count); return b; }
+fn rpb_label(b, label) { store64(b + 76, label); return b; }
+
+fn rpb_bind_group(b, bgl) {
+    vec_push(load64(b + 60), bgl);
+    return b;
+}
+
+fn rpb_vertex_layout(b, layout_ptr) {
+    vec_push(load64(b + 68), layout_ptr);
+    return b;
+}
+
+# Build — delegates to the simple path. The builder's additional knobs
+# (vertex layouts, bind groups, depth, blend) are ignored on this path.
+# To use them, construct the descriptor directly via the helpers above.
+fn rpb_build(b) {
+    var device = load64(b + 0);
+    # In the old builder, the caller passed a pre-compiled shader module as
+    # `shader_source`. We preserve that — the field is labeled "source" but
+    # is expected to hold the module handle in the current API.
+    var module = load64(b + 8);
+    var format = load32(b + 32);
+    return render_pipeline_create_simple(device, module, format);
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# render_pass.cyr — render pass builder
+# Ported from mabda/src/render_pass.rs
+#
+# Fluent builder for configuring render pass color and depth attachments.
+#
+# RenderPassBuilder struct layout (48 bytes):
+#   +0:  label (cstr ptr, 8)
+#   +8:  color_attachments (vec of attachment ptrs)
+#   +16: depth_view (WGPUTextureView or 0, 8)
+#   +24: depth_clear (f32 bit pattern — default 1.0)
+#   +28: depth_load_op (u32 — Clear or Load)
+#   +32: stencil_clear (u32)
+#
+# ColorAttachment (56 bytes — matches WGPURenderPassColorAttachment):
+#   +0:  view (WGPUTextureView, 8)
+#   +8:  depthSlice (u32)
+#   +16: resolveTarget (WGPUTextureView or 0, 8)
+#   +24: loadOp (u32)
+#   +28: storeOp (u32)
+#   +32: clearValue (WGPUColor = 32 bytes: r,g,b,a as f64)
+
+var COLOR_ATTACHMENT_SIZE = 64;
+
+fn rpb_pass_new() {
+    var b = alloc(48);
+    memset(b, 0, 48);
+    store64(b + 8, vec_new());
+    # depth_clear = 1.0 as f32
+    store32(b + 24, 0x3F800000);
+    store32(b + 28, WGPU_LOAD_OP_CLEAR);
+    return b;
+}
+
+fn rpb_pass_label(b, label) { store64(b, label); return b; }
+
+# Add a color attachment (clear with given color, or load existing)
+fn rpb_pass_color(b, view, clear_color) {
+    var att = alloc(COLOR_ATTACHMENT_SIZE);
+    memset(att, 0, COLOR_ATTACHMENT_SIZE);
+    store64(att, view);
+    store32(att + 8, 0xFFFFFFFF);  # depthSlice = WGPU_DEPTH_SLICE_UNDEFINED
+    if (clear_color != 0) {
+        store32(att + 24, WGPU_LOAD_OP_CLEAR);
+        store32(att + 28, WGPU_STORE_OP_STORE);
+        color_write_f64(clear_color, att + 32);
+    } else {
+        store32(att + 24, WGPU_LOAD_OP_LOAD);
+        store32(att + 28, WGPU_STORE_OP_STORE);
+    }
+    vec_push(load64(b + 8), att);
+    return b;
+}
+
+# Add a color attachment with MSAA resolve
+fn rpb_pass_color_msaa(b, render_view, resolve_view, clear_color) {
+    var att = alloc(COLOR_ATTACHMENT_SIZE);
+    memset(att, 0, COLOR_ATTACHMENT_SIZE);
+    store64(att, render_view);
+    store32(att + 8, 0xFFFFFFFF);
+    store64(att + 16, resolve_view);
+    if (clear_color != 0) {
+        store32(att + 24, WGPU_LOAD_OP_CLEAR);
+        store32(att + 28, WGPU_STORE_OP_STORE);
+        color_write_f64(clear_color, att + 32);
+    } else {
+        store32(att + 24, WGPU_LOAD_OP_LOAD);
+        store32(att + 28, WGPU_STORE_OP_STORE);
+    }
+    vec_push(load64(b + 8), att);
+    return b;
+}
+
+# Set depth attachment
+fn rpb_pass_depth(b, depth_view) {
+    store64(b + 16, depth_view);
+    return b;
+}
+
+# Set depth load op (LOAD instead of CLEAR)
+fn rpb_pass_depth_load(b) {
+    store32(b + 28, WGPU_LOAD_OP_LOAD);
+    return b;
+}
+
+# Get the color attachment count
+fn rpb_pass_color_count(b) {
+    return vec_len(load64(b + 8));
+}
+
+# Get color attachment array pointer (for WGPURenderPassDescriptor)
+fn rpb_pass_color_array(b) {
+    var attachments = load64(b + 8);
+    var count = vec_len(attachments);
+    if (count == 0) { return 0; }
+    # Build contiguous array
+    var arr = alloc(count * COLOR_ATTACHMENT_SIZE);
+    for (var i = 0; i < count; i = i + 1) {
+        var src = vec_get(attachments, i);
+        memcpy(arr + i * COLOR_ATTACHMENT_SIZE, src, COLOR_ATTACHMENT_SIZE);
+    }
+    return arr;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# surface.cyr — window surface lifecycle management
+# Ported from mabda/src/surface.rs
+#
+# mabda is headless — creating a WGPUSurface requires a platform-specific
+# handle (X11 window, Wayland surface, HWND, NSView, etc). Consumers like
+# soorat provide the handle; this module owns everything that happens
+# after creation: configure, acquire-frame, present, release.
+#
+# SurfaceState struct layout (48 bytes):
+#   +0:  surface          (WGPUSurface handle, 8)
+#   +8:  device           (WGPUDevice handle, 8) — needed for reconfigure
+#   +16: format           (u32 WGPUTextureFormat)
+#   +24: width            (i64)
+#   +32: height           (i64)
+#   +40: present_mode     (u32)
+
+# ================================================================
+# Present mode preferences (wgpu-native v29 values)
+# ================================================================
+var PRESENT_VSYNC     = 0;
+var PRESENT_NO_VSYNC  = 1;
+var PRESENT_IMMEDIATE = 2;
+var PRESENT_MAILBOX   = 3;
+
+# WGPUPresentMode — v29 values
+var WGPU_PRESENT_MODE_FIFO         = 1;
+var WGPU_PRESENT_MODE_FIFO_RELAXED = 2;
+var WGPU_PRESENT_MODE_IMMEDIATE    = 3;
+var WGPU_PRESENT_MODE_MAILBOX      = 4;
+
+# WGPUSurfaceGetCurrentTextureStatus — v29 values
+var WGPU_SURFACE_STATUS_SUCCESS_OPTIMAL    = 1;
+var WGPU_SURFACE_STATUS_SUCCESS_SUBOPTIMAL = 2;
+var WGPU_SURFACE_STATUS_TIMEOUT            = 3;
+
+fn present_mode_to_wgpu(pref) {
+    if (pref == PRESENT_VSYNC)     { return WGPU_PRESENT_MODE_FIFO; }
+    if (pref == PRESENT_NO_VSYNC)  { return WGPU_PRESENT_MODE_FIFO_RELAXED; }
+    if (pref == PRESENT_IMMEDIATE) { return WGPU_PRESENT_MODE_IMMEDIATE; }
+    if (pref == PRESENT_MAILBOX)   { return WGPU_PRESENT_MODE_MAILBOX; }
+    return WGPU_PRESENT_MODE_FIFO;
+}
+
+# ================================================================
+# SurfaceState accessors
+# ================================================================
+fn surface_state_handle(ss)  { return load64(ss + 0); }
+fn surface_state_device(ss)  { return load64(ss + 8); }
+fn surface_state_format(ss)  { return load32(ss + 16); }
+fn surface_state_width(ss)   { return load64(ss + 24); }
+fn surface_state_height(ss)  { return load64(ss + 32); }
+fn surface_state_present(ss) { return load32(ss + 40); }
+
+# ================================================================
+# SurfaceState construction — called by the consumer after they obtain
+# a WGPUSurface handle from their windowing library.
+# ================================================================
+fn surface_state_new(surface, device, format, width, height, present_pref) {
+    var ss = alloc(48);
+    store64(ss + 0,  surface);
+    store64(ss + 8,  device);
+    store32(ss + 16, format);
+    store64(ss + 24, width);
+    store64(ss + 32, height);
+    store32(ss + 40, present_mode_to_wgpu(present_pref));
+    _surface_state_configure(ss);
+    return ss;
+}
+
+# Internal: build a SurfaceConfiguration and call wgpuSurfaceConfigure.
+# Used by surface_state_new and surface_state_resize.
+fn _surface_state_configure(ss) {
+    var usage = WGPU_TEXTURE_USAGE_RENDER_ATTACHMENT;
+    var cfg = wgpu_surface_configuration(surface_state_device(ss),
+    surface_state_format(ss),
+    surface_state_width(ss),
+    surface_state_height(ss),
+    usage,
+    surface_state_present(ss));
+    wgpu_surface_configure(surface_state_handle(ss), cfg);
+    return 0;
+}
+
+# ================================================================
+# Resize — reconfigure the surface with new dimensions
+# ================================================================
+fn surface_state_resize(ss, width, height) {
+    if (width == 0) { return 0; }
+    if (height == 0) { return 0; }
+    store64(ss + 24, width);
+    store64(ss + 32, height);
+    _surface_state_configure(ss);
+    return 0;
+}
+
+# ================================================================
+# Frame acquisition — wraps wgpuSurfaceGetCurrentTexture
+# ================================================================
+# Returns a GpuResult:
+#   Ok(texture_handle) — success (optimal or suboptimal)
+#   Err(...)           — timeout, outdated, lost, etc.
+#
+# wgpuSurfaceGetCurrentTexture writes into a WGPUSurfaceTexture struct
+# (24 bytes): +0 nextInChain, +8 texture, +16 status.
+fn surface_state_acquire(ss) {
+    var out = alloc(24);
+    memset(out, 0, 24);
+    wgpu_surface_get_current_texture(surface_state_handle(ss), out);
+    var status = load32(out + 16);
+    var texture = load64(out + 8);
+    if (status == WGPU_SURFACE_STATUS_SUCCESS_OPTIMAL) { return gpu_ok(texture); }
+    if (status == WGPU_SURFACE_STATUS_SUCCESS_SUBOPTIMAL) { return gpu_ok(texture); }
+    if (status == WGPU_SURFACE_STATUS_TIMEOUT) {
+        return gpu_err_result_msg(GPU_ERR_SURFACE_TIMEOUT, "surface texture acquire timed out");
+    }
+    return gpu_err_result_msg(GPU_ERR_SURFACE_LOST, "surface texture acquire failed");
+}
+
+# ================================================================
+# Present + release
+# ================================================================
+fn surface_state_present(ss) {
+    wgpu_surface_present(surface_state_handle(ss));
+    return 0;
+}
+
+fn surface_state_release(ss) {
+    var h = load64(ss + 0);
+    if (h != 0) { wgpu_surface_release(h); }
+    store64(ss + 0, 0);
+    return 0;
+}
+
+# ================================================================
+# Size helper (unchanged from pre-FFI version)
+# ================================================================
+fn surface_state_size(ss, dst) {
+    store64(dst + 0, surface_state_width(ss));
+    store64(dst + 8, surface_state_height(ss));
+    return 0;
+}
+# @public — stable API surface (survives the v3.0 backend swap)
+# instancing.cyr — per-instance transform and color data
+# Ported from mabda/src/instancing.rs
+#
+# InstanceData (80 bytes):
+#   +0:  model[0..16]  (16 × f32 = 64 bytes, column-major 4x4 matrix)
+#   +64: color[0..4]   (4 × f32 = 16 bytes, RGBA tint)
+#
+# Shader locations: 7-10 (model matrix columns), 11 (color tint)
+
+var INSTANCE_DATA_SIZE = 80;
+
+# Write an identity InstanceData at dst (80 bytes)
+fn instance_data_identity(dst) {
+    memset(dst, 0, 80);
+    # Identity matrix: 1.0 on diagonal (column-major)
+    # [0]=1, [5]=1, [10]=1, [15]=1  (column-major indices)
+    var f32_one = f64_to_f32(F64_1);
+    store32(dst, f32_one);        # model[0] = 1.0
+    store32(dst + 20, f32_one);   # model[5] = 1.0
+    store32(dst + 40, f32_one);   # model[10] = 1.0
+    store32(dst + 60, f32_one);   # model[15] = 1.0
+    # color = white (1,1,1,1)
+    store32(dst + 64, f32_one);
+    store32(dst + 68, f32_one);
+    store32(dst + 72, f32_one);
+    store32(dst + 76, f32_one);
+    return 0;
+}
+
+# Create an InstanceData with identity matrix + white color
+fn instance_data_new() {
+    var d = alloc(80);
+    instance_data_identity(d);
+    return d;
+}
+
+# Create an InstanceData from a translation (x, y, z are f64)
+fn instance_data_from_translation(x, y, z) {
+    var d = alloc(80);
+    instance_data_identity(d);
+    # Translation in column 3: model[12]=x, model[13]=y, model[14]=z
+    store32(d + 48, f64_to_f32(x));  # model[12]
+    store32(d + 52, f64_to_f32(y));  # model[13]
+    store32(d + 56, f64_to_f32(z));  # model[14]
+    return d;
+}
+
+# Set translation on existing InstanceData
+fn instance_data_set_translation(d, x, y, z) {
+    store32(d + 48, f64_to_f32(x));
+    store32(d + 52, f64_to_f32(y));
+    store32(d + 56, f64_to_f32(z));
+    return 0;
+}
+
+# Set color tint on existing InstanceData (rgba as f64)
+fn instance_data_set_color(d, r, g, b, a) {
+    store32(d + 64, f64_to_f32(r));
+    store32(d + 68, f64_to_f32(g));
+    store32(d + 72, f64_to_f32(b));
+    store32(d + 76, f64_to_f32(a));
+    return 0;
+}
+
+# Build vertex attribute layout for InstanceData (5 attributes × 24 bytes = 120 bytes)
+# Shader locations 7-11
+fn instance_data_attributes() {
+    var attrs = alloc(120);
+    # model matrix: 4 × Float32x4 at locations 7-10
+    _vertex_attr(attrs, WGPU_VERTEX_FORMAT_FLOAT32X4, 0, 7);
+    _vertex_attr(attrs + 24, WGPU_VERTEX_FORMAT_FLOAT32X4, 16, 8);
+    _vertex_attr(attrs + 48, WGPU_VERTEX_FORMAT_FLOAT32X4, 32, 9);
+    _vertex_attr(attrs + 72, WGPU_VERTEX_FORMAT_FLOAT32X4, 48, 10);
+    # color tint: Float32x4 at location 11
+    _vertex_attr(attrs + 96, WGPU_VERTEX_FORMAT_FLOAT32X4, 64, 11);
+    return attrs;
+}
+
+# ================================================================
+# InstanceBuffer — dynamic GPU buffer for instance data
+# ================================================================
+#
+# InstanceBuffer struct layout (24 bytes):
+#   +0: buffer   (WGPUBuffer handle, 8)
+#   +8: count    (i64, current instance count)
+#   +16: capacity (i64, allocated capacity in instances)
+
+fn instance_buffer_new(capacity) {
+    var ib = alloc(24);
+    store64(ib, 0);           # buffer handle (set on first update)
+    store64(ib + 8, 0);       # count
+    store64(ib + 16, capacity);
+    return ib;
+}
+
+fn instance_buffer_handle(ib)   { return load64(ib); }
+fn instance_buffer_count(ib)    { return load64(ib + 8); }
+fn instance_buffer_capacity(ib) { return load64(ib + 16); }
+# @public — stable API surface (survives the v3.0 backend swap)
+# debug.cyr — GPU debug labels and marker groups
+# Ported from mabda/src/debug.rs
+#
+# Explicit push/pop instead of RAII DebugScope.
+# All functions are FFI wrappers — require wgpu function table.
+
+# Debug group push/pop for command encoder
+# wgpuCommandEncoderPushDebugGroup(encoder, label) — not yet in fn table
+# wgpuCommandEncoderPopDebugGroup(encoder) — not yet in fn table
+# wgpuCommandEncoderInsertDebugMarker(encoder, label) — not yet in fn table
+#
+# These will be added to the function table when render pipeline support lands.
+# For now, provide no-op stubs so consuming code compiles.
+
+fn debug_push(encoder, label) {
+    # TODO: call wgpuCommandEncoderPushDebugGroup when available
+    return 0;
+}
+
+fn debug_pop(encoder) {
+    # TODO: call wgpuCommandEncoderPopDebugGroup when available
+    return 0;
+}
+
+fn debug_marker(encoder, label) {
+    # TODO: call wgpuCommandEncoderInsertDebugMarker when available
+    return 0;
+}
+
+# Render pass debug groups
+fn debug_render_push(pass, label) {
+    return 0;
+}
+
+fn debug_render_pop(pass) {
+    return 0;
+}
+
+fn debug_render_marker(pass, label) {
+    return 0;
+}
+
+# Compute pass debug groups
+fn debug_compute_push(pass, label) {
+    return 0;
+}
+
+fn debug_compute_pop(pass) {
+    return 0;
+}
+
+fn debug_compute_marker(pass, label) {
+    return 0;
+}

@@ -1,0 +1,153 @@
+# core.bcyr — shakti hot-path benchmarks
+#
+# Exercises the inner loops of every request: command validation,
+# pattern matching, policy parsing, authorization, and environment
+# sanitization. All paths must stay well under sudo-like latency.
+#
+# Run: cyrius bench tests/bcyr/core.bcyr
+
+include "src/lib.cyr"
+
+# ── Fixtures ────────────────────
+
+var _BENCH_POLICY_TEXT = "[defaults]\ntimestamp_ttl = 300\nrequire_auth = true\naudit_log = true\nenv_keep = [\"EDITOR\", \"VISUAL\"]\nmax_command_len = 4096\n\n[[rules]]\nuser = \"admin\"\nrun_as = \"root\"\ncommands = []\nrequire_auth = true\n\n[[rules]]\ngroup = \"wheel\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/systemctl\", \"/usr/bin/journalctl\"]\n\n[[rules]]\nuser = \"deploy\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/systemctl restart *\", \"/usr/bin/docker\"]\ndeny_commands = [\"/usr/bin/systemctl stop firewall\"]\nrequire_auth = false\n\n[[rules]]\nuser = \"*\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/passwd\"]\nrequire_auth = true\n";
+
+# These are built once and reused across iterations — parsing them inside
+# the bench loop would swamp the measured work.
+var _BENCH_POLICY = 0;
+var _BENCH_GROUPS = 0;
+var _BENCH_ARGV_OK = 0;
+
+fn _bench_init() {
+    _BENCH_POLICY = parse_policy(_BENCH_POLICY_TEXT, strlen(_BENCH_POLICY_TEXT));
+    _BENCH_GROUPS = vec_new();
+    vec_push(_BENCH_GROUPS, "wheel");
+    _BENCH_ARGV_OK = vec_new();
+    vec_push(_BENCH_ARGV_OK, "/usr/bin/systemctl");
+    vec_push(_BENCH_ARGV_OK, "restart");
+    vec_push(_BENCH_ARGV_OK, "nginx");
+    return 0;
+}
+
+# ── command_matches ────────────────────
+
+fn bench_matches_exact() {
+    command_matches("/usr/bin/systemctl", "/usr/bin/systemctl");
+    return 0;
+}
+
+fn bench_matches_arg_wildcard() {
+    command_matches("/usr/bin/systemctl restart nginx", "/usr/bin/systemctl restart *");
+    return 0;
+}
+
+fn bench_matches_dir_glob() {
+    command_matches("/usr/bin/ls -la", "/usr/bin/*");
+    return 0;
+}
+
+fn bench_matches_basename() {
+    command_matches("/usr/local/bin/systemctl restart nginx", "systemctl");
+    return 0;
+}
+
+# ── validate_command ────────────────────
+
+fn bench_validate_command_ok() {
+    validate_command(_BENCH_ARGV_OK, 4096);
+    return 0;
+}
+
+# ── parse_policy ────────────────────
+
+fn bench_parse_policy() {
+    parse_policy(_BENCH_POLICY_TEXT, strlen(_BENCH_POLICY_TEXT));
+    return 0;
+}
+
+# ── check_authorization ────────────────────
+
+fn bench_authz_allowed_admin() {
+    check_authorization(_BENCH_POLICY, "admin", _BENCH_GROUPS,
+        "root", "/usr/bin/anything");
+    return 0;
+}
+
+fn bench_authz_allowed_deploy_wildcard() {
+    check_authorization(_BENCH_POLICY, "deploy", _BENCH_GROUPS,
+        "root", "/usr/bin/systemctl restart nginx");
+    return 0;
+}
+
+fn bench_authz_denied() {
+    check_authorization(_BENCH_POLICY, "unknown", _BENCH_GROUPS,
+        "root", "/usr/bin/dangerous");
+    return 0;
+}
+
+# ── sanitize_environment ────────────────────
+# Reads /proc/self/environ each call — slower path, small batch.
+
+var _BENCH_ENV_KEEP = 0;
+
+fn bench_sanitize_environment() {
+    sanitize_environment(_BENCH_ENV_KEEP, "alice", 1000, 1000,
+        "root", "/root", "/bin/bash");
+    return 0;
+}
+
+# ── driver ────────────────────
+
+fn main() {
+    alloc_init();
+    _bench_init();
+    _BENCH_ENV_KEEP = vec_new();
+
+    var benches = vec_new();
+
+    var b1 = bench_new("command_matches/exact");
+    bench_run(b1, &bench_matches_exact, 1000000);
+    vec_push(benches, b1);
+
+    var b2 = bench_new("command_matches/arg_wildcard");
+    bench_run(b2, &bench_matches_arg_wildcard, 1000000);
+    vec_push(benches, b2);
+
+    var b3 = bench_new("command_matches/dir_glob");
+    bench_run(b3, &bench_matches_dir_glob, 1000000);
+    vec_push(benches, b3);
+
+    var b4 = bench_new("command_matches/basename");
+    bench_run(b4, &bench_matches_basename, 1000000);
+    vec_push(benches, b4);
+
+    var b5 = bench_new("validate_command");
+    bench_run(b5, &bench_validate_command_ok, 500000);
+    vec_push(benches, b5);
+
+    var b6 = bench_new("parse_policy");
+    bench_run(b6, &bench_parse_policy, 10000);
+    vec_push(benches, b6);
+
+    var b7 = bench_new("check_authorization/allowed_admin");
+    bench_run(b7, &bench_authz_allowed_admin, 500000);
+    vec_push(benches, b7);
+
+    var b8 = bench_new("check_authorization/allowed_deploy");
+    bench_run(b8, &bench_authz_allowed_deploy_wildcard, 500000);
+    vec_push(benches, b8);
+
+    var b9 = bench_new("check_authorization/denied");
+    bench_run(b9, &bench_authz_denied, 500000);
+    vec_push(benches, b9);
+
+    var b10 = bench_new("sanitize_environment");
+    bench_run(b10, &bench_sanitize_environment, 10000);
+    vec_push(benches, b10);
+
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

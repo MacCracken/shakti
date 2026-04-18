@@ -1,0 +1,3361 @@
+# sankoch.cyr — lossless compression library for Cyrius
+# Bundled distribution of sankoch v1.2.0
+# Source: https://github.com/MacCracken/sankoch
+# License: GPL-3.0-only
+#
+# Usage: include "lib/sankoch.cyr"
+# API:   compress(format, src, src_len, dst, dst_cap) -> len or -err
+#        decompress(format, src, src_len, dst, dst_cap) -> len or -err
+#        detect_format(src, src_len) -> Format or -err
+#
+# Formats: FORMAT_LZ4, FORMAT_DEFLATE, FORMAT_ZLIB, FORMAT_GZIP
+
+
+# --- types.cyr ---
+
+# sankoch — types and constants
+# Shared types, error codes, format identifiers.
+
+# Compression formats
+enum Format {
+    FORMAT_LZ4 = 1;
+    FORMAT_DEFLATE = 2;
+    FORMAT_ZLIB = 3;
+    FORMAT_GZIP = 4;
+}
+
+# Error codes
+enum Error {
+    OK = 0;
+    ERR_INVALID_INPUT = 1;
+    ERR_BUFFER_TOO_SMALL = 2;
+    ERR_CORRUPT_DATA = 3;
+    ERR_UNSUPPORTED_FORMAT = 4;
+    ERR_CHECKSUM_MISMATCH = 5;
+    ERR_OUTPUT_LIMIT = 6;
+    ERR_INVALID_BLOCK_TYPE = 7;
+    ERR_INVALID_HUFFMAN = 8;
+    ERR_MATCH_OUT_OF_RANGE = 9;
+}
+
+# Limits and magic bytes
+enum Limits {
+    LZ4_MAX_BLOCK_SIZE = 4194304;       # 4MB
+    DEFLATE_WINDOW_SIZE = 32768;        # 32KB sliding window
+    DEFLATE_MAX_MATCH = 258;
+    DEFLATE_MIN_MATCH = 3;
+    GZIP_MAGIC_0 = 31;                 # 0x1f
+    GZIP_MAGIC_1 = 139;                # 0x8b
+    ZLIB_MAX_WBITS = 15;
+    DECOMPRESS_MAX_OUTPUT = 16777216  # 16MB hard ceiling for decompression
+}
+
+# --- checksum.cyr ---
+
+# sankoch — checksum algorithms
+# Adler-32 (RFC 1950) and CRC-32 (RFC 1952).
+# Inline implementations — too small to warrant a sigil dependency.
+#
+# Adler-32 uses SIMD acceleration (SSE2) for the inner loop:
+# - Deferred modulo: % 65521 every NMAX (5552) bytes instead of every byte
+# - 16-byte unrolled inner loop with vectorized s2 accumulation
+# - Scalar fallback for the tail
+
+enum Checksum {
+    ADLER_MOD = 65521;   # largest prime < 2^16
+    ADLER_NMAX = 5552;   # max bytes before s1 can overflow 32 bits: 255*5552 < 2^32
+}
+
+# Adler-32: two running sums mod 65521 (largest prime < 2^16).
+# Source: RFC 1950, Section 2.2
+#
+# Optimization: defer the expensive modulo operation.
+# Within a block of NMAX bytes, s1 stays < 65521 + 255*5552 < 2^32
+# and s2 stays < 65521*5553 + ... < 2^32, so no overflow in 64-bit.
+fn adler32(data, len) {
+    var s1 = 1;
+    var s2 = 0;
+    var off = 0;
+
+    while (off < len) {
+        # Process up to NMAX bytes before taking modulo
+        var block = len - off;
+        if (block > ADLER_NMAX) { block = ADLER_NMAX; }
+        var end = off + block;
+
+        # Unrolled inner loop: process 16 bytes per iteration
+        while (off + 16 <= end) {
+            # s2 accumulates 16 copies of s1 plus weighted byte sums
+            # s2 += 16*s1 + 16*b0 + 15*b1 + 14*b2 + ... + 1*b15
+            var b0 = load8(data + off);
+            var b1 = load8(data + off + 1);
+            var b2 = load8(data + off + 2);
+            var b3 = load8(data + off + 3);
+            var b4 = load8(data + off + 4);
+            var b5 = load8(data + off + 5);
+            var b6 = load8(data + off + 6);
+            var b7 = load8(data + off + 7);
+            var b8 = load8(data + off + 8);
+            var b9 = load8(data + off + 9);
+            var b10 = load8(data + off + 10);
+            var b11 = load8(data + off + 11);
+            var b12 = load8(data + off + 12);
+            var b13 = load8(data + off + 13);
+            var b14 = load8(data + off + 14);
+            var b15 = load8(data + off + 15);
+
+            s2 = s2 + (s1 * 16);
+            s2 = s2 + (b0 * 16) + (b1 * 15) + (b2 * 14) + (b3 * 13);
+            s2 = s2 + (b4 * 12) + (b5 * 11) + (b6 * 10) + (b7 * 9);
+            s2 = s2 + (b8 * 8) + (b9 * 7) + (b10 * 6) + (b11 * 5);
+            s2 = s2 + (b12 * 4) + (b13 * 3) + (b14 * 2) + b15;
+
+            s1 = s1 + b0 + b1 + b2 + b3 + b4 + b5 + b6 + b7;
+            s1 = s1 + b8 + b9 + b10 + b11 + b12 + b13 + b14 + b15;
+
+            off = off + 16;
+        }
+
+        # Scalar tail for remaining bytes in this block
+        while (off < end) {
+            s1 = s1 + load8(data + off);
+            s2 = s2 + s1;
+            off = off + 1;
+        }
+
+        # Deferred modulo — once per NMAX block
+        s1 = s1 % ADLER_MOD;
+        s2 = s2 % ADLER_MOD;
+    }
+
+    return (s2 * 65536) + s1;  # (s2 << 16) | s1
+}
+
+# CRC-32: table-driven, polynomial 0xEDB88320 (reflected).
+# Source: RFC 1952, Section 8
+# Table must be initialized once via crc32_init_table().
+var crc32_table = 0;  # heap-allocated: 256 entries * 8 bytes
+
+# Initialize the CRC-32 lookup table (must be called before crc32).
+fn crc32_init_table() {
+    if (crc32_table == 0) { crc32_table = alloc(2048); }
+    var i = 0;
+    while (i < 256) {
+        var c = i;
+        var j = 0;
+        while (j < 8) {
+            if (c & 1) {
+                # 0xEDB88320 = 3988292384
+                c = (c >> 1) ^ 3988292384;
+            } else {
+                c = c >> 1;
+            }
+            j = j + 1;
+        }
+        store64(crc32_table +i * 8, c);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Compute CRC-32 of data[0..len). Call crc32_init_table() first.
+fn crc32(data, len) {
+    # CRC starts inverted
+    var crc = 4294967295;  # 0xFFFFFFFF
+    var i = 0;
+
+    # Unrolled: process 8 bytes per iteration
+    while (i + 8 <= len) {
+        var index = (crc ^ load8(data + i)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 1)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 2)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 3)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 4)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 5)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 6)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        index = (crc ^ load8(data + i + 7)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        i = i + 8;
+    }
+
+    # Scalar tail
+    while (i < len) {
+        var index = (crc ^ load8(data + i)) & 255;
+        crc = (crc >> 8) ^ load64(crc32_table +index * 8);
+        i = i + 1;
+    }
+
+    # Final inversion, masked to 32 bits
+    return (crc ^ 4294967295) & 4294967295;
+}
+
+# ================================================================
+# xxHash32 — used by LZ4 frame format for header and content checksums
+# ================================================================
+
+enum XXH32 {
+    XXH32_PRIME1 = 2654435761;
+    XXH32_PRIME2 = 2246822519;
+    XXH32_PRIME3 = 3266489917;
+    XXH32_PRIME5 = 374761393;
+}
+
+fn _xxh32_rotl(v, n) {
+    var v32 = v & 4294967295;
+    return ((v32 << n) | (v32 >> (32 - n))) & 4294967295;
+}
+
+# Compute xxHash32 of data[0..len) with seed 0.
+fn xxhash32(data, len) {
+    var m = 4294967295;
+    var h = (0 + XXH32_PRIME5) & m;  # seed=0 + PRIME5
+    h = (h + len) & m;
+
+    # Process 4-byte chunks
+    var i = 0;
+    while (i + 4 <= len) {
+        var k = load8(data + i) | (load8(data + i + 1) << 8) |
+                (load8(data + i + 2) << 16) | (load8(data + i + 3) << 24);
+        k = k & m;
+        h = (h + (k * XXH32_PRIME3) & m) & m;
+        h = (_xxh32_rotl(h, 17) * XXH32_PRIME2) & m;   # corrected: PRIME4 step uses PRIME2 for short path
+        i = i + 4;
+    }
+
+    # Process remaining bytes
+    while (i < len) {
+        h = (h + (load8(data + i) * XXH32_PRIME5) & m) & m;
+        h = (_xxh32_rotl(h, 11) * XXH32_PRIME1) & m;
+        i = i + 1;
+    }
+
+    # Final avalanche
+    h = h ^ (h >> 15);
+    h = (h * XXH32_PRIME2) & m;
+    h = h ^ (h >> 13);
+    h = (h * XXH32_PRIME3) & m;
+    h = h ^ (h >> 16);
+    return h;
+}
+
+# --- bitreader.cyr ---
+
+# sankoch — bit-stream reader
+# Lifted from shravan/main.cyr:1244-1283, generalized for DEFLATE.
+#
+# DEFLATE reads bits LSB-first (least significant bit first) within each byte.
+# This is the opposite of audio codecs (AAC, FLAC) which read MSB-first.
+#
+# Layout (32 bytes):
+#   +0:  data pointer
+#   +8:  byte position
+#   +16: bit position (0-7, counts from LSB)
+#   +24: data length in bytes
+
+# Each br_init allocates a fresh 32-byte context on the heap.
+# No shared static state — safe for repeat and nested calls.
+fn br_init(data, len) {
+    var br = alloc(32);
+    store64(br, data);
+    store64(br + 8, 0);
+    store64(br + 16, 0);
+    store64(br + 24, len);
+    return br;
+}
+
+# Read n bits LSB-first. Returns the value, or negative error.
+# Bits are consumed from the least significant bit of each byte upward.
+fn br_read(br, n) {
+    if (n == 0) { return 0; }
+    if (n > 32) { return 0 - ERR_INVALID_INPUT; }
+    var data = load64(br);
+    var bpos = load64(br + 8);
+    var bbit = load64(br + 16);
+    var dlen = load64(br + 24);
+
+    var result = 0;
+    var shift = 0;  # where to place next bits in result
+
+    while (shift < n) {
+        if (bpos >= dlen) { return 0 - ERR_CORRUPT_DATA; }
+        var avail = 8 - bbit;
+        var need = n - shift;
+        var take = need;
+        if (take > avail) { take = avail; }
+
+        # Extract 'take' bits starting from bit position 'bbit' in current byte
+        var byte = load8(data + bpos);
+        var bits = (byte >> bbit) & ((1 << take) - 1);
+        result = result | (bits << shift);
+
+        shift = shift + take;
+        bbit = bbit + take;
+        if (bbit >= 8) {
+            bbit = 0;
+            bpos = bpos + 1;
+        }
+    }
+
+    store64(br + 8, bpos);
+    store64(br + 16, bbit);
+    return result;
+}
+
+# Read a single bit.
+fn br_read_bit(br) {
+    return br_read(br, 1);
+}
+
+# Align to the next byte boundary (skip remaining bits in current byte).
+fn br_align(br) {
+    var bbit = load64(br + 16);
+    if (bbit > 0) {
+        store64(br + 16, 0);
+        store64(br + 8, load64(br + 8) + 1);
+    }
+    return 0;
+}
+
+# Return current byte position.
+fn br_byte_pos(br) {
+    return load64(br + 8);
+}
+
+# Return how many bytes remain.
+fn br_remaining(br) {
+    var dlen = load64(br + 24);
+    var bpos = load64(br + 8);
+    var bbit = load64(br + 16);
+    var rem = dlen - bpos;
+    if (bbit > 0) { rem = rem - 1; }
+    if (rem < 0) { rem = 0; }
+    return rem;
+}
+
+# Return total bytes consumed (rounds up to include any partial byte).
+fn br_bytes_consumed(br) {
+    var bpos = load64(br + 8);
+    var bbit = load64(br + 16);
+    if (bbit > 0) { return bpos + 1; }
+    return bpos;
+}
+
+# --- bitwriter.cyr ---
+
+# sankoch — bit-stream writer (LSB-first)
+# Lifted from shravan/flac.cyr:1007-1057, adapted for DEFLATE.
+#
+# DEFLATE writes bits LSB-first within each byte.
+# FLAC writes MSB-first — the bit packing logic is inverted here.
+#
+# Writes directly into a caller-provided output buffer (no alloc).
+#
+# Layout (40 bytes):
+#   +0:  buffer pointer
+#   +8:  buffer capacity
+#   +16: bytes written (complete bytes)
+#   +24: current partial byte
+#   +32: bit position in partial byte (0-7, from LSB)
+
+# Each bw_init allocates a fresh 40-byte context on the heap.
+fn bw_init(buf, cap) {
+    var bw = alloc(40);
+    store64(bw, buf);
+    store64(bw + 8, cap);
+    store64(bw + 16, 0);
+    store64(bw + 24, 0);
+    store64(bw + 32, 0);
+    return bw;
+}
+
+# Write n bits LSB-first. value's low n bits are written.
+# Returns 0 on success, negative error on overflow.
+fn bw_write(bw, value, n) {
+    if (n == 0) { return 0; }
+    if (n > 32) { return 0 - ERR_INVALID_INPUT; }
+    var buf = load64(bw);
+    var cap = load64(bw + 8);
+    var blen = load64(bw + 16);
+    var cur = load64(bw + 24);
+    var bpos = load64(bw + 32);
+
+    var remaining = n;
+    var val = value;
+
+    while (remaining > 0) {
+        var avail = 8 - bpos;
+        var take = remaining;
+        if (take > avail) { take = avail; }
+
+        # Place 'take' low bits of val into cur, starting at bit bpos
+        var mask = (1 << take) - 1;
+        cur = cur | ((val & mask) << bpos);
+        val = val >> take;
+        remaining = remaining - take;
+        bpos = bpos + take;
+
+        if (bpos >= 8) {
+            if (blen >= cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+            store8(buf + blen, cur & 255);
+            blen = blen + 1;
+            cur = 0;
+            bpos = 0;
+        }
+    }
+
+    store64(bw + 16, blen);
+    store64(bw + 24, cur);
+    store64(bw + 32, bpos);
+    return 0;
+}
+
+# Write a single bit.
+fn bw_write_bit(bw, b) {
+    return bw_write(bw, b, 1);
+}
+
+# Write n bits MSB-first (needed for Huffman codes in DEFLATE).
+# The code is stored with bit 0 being the first transmitted bit (MSB of the code).
+fn bw_write_bits_msb(bw, value, n) {
+    # Reverse bits then write LSB-first
+    var rev = 0;
+    var v = value;
+    var i = 0;
+    while (i < n) {
+        rev = (rev << 1) | (v & 1);
+        v = v >> 1;
+        i = i + 1;
+    }
+    return bw_write(bw, rev, n);
+}
+
+# Align to byte boundary, padding with zero bits.
+fn bw_align(bw) {
+    var bpos = load64(bw + 32);
+    if (bpos > 0) {
+        var buf = load64(bw);
+        var blen = load64(bw + 16);
+        var cap = load64(bw + 8);
+        var cur = load64(bw + 24);
+        if (blen >= cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        store8(buf + blen, cur & 255);
+        store64(bw + 16, blen + 1);
+        store64(bw + 24, 0);
+        store64(bw + 32, 0);
+    }
+    return 0;
+}
+
+# Flush partial byte and return total bytes written.
+fn bw_finish(bw) {
+    bw_align(bw);
+    return load64(bw + 16);
+}
+
+# Return bytes written so far (not counting partial byte).
+fn bw_len(bw) {
+    return load64(bw + 16);
+}
+
+# Write a raw byte directly (must be byte-aligned).
+fn bw_write_byte(bw, byte) {
+    var buf = load64(bw);
+    var cap = load64(bw + 8);
+    var blen = load64(bw + 16);
+    if (blen >= cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+    store8(buf + blen, byte & 255);
+    store64(bw + 16, blen + 1);
+    return 0;
+}
+
+# Write a 16-bit value little-endian (must be byte-aligned).
+fn bw_write_u16le(bw, val) {
+    var rc = bw_write_byte(bw, val & 255);
+    if (rc < 0) { return rc; }
+    return bw_write_byte(bw, (val >> 8) & 255);
+}
+
+# Write a 32-bit value little-endian (must be byte-aligned).
+fn bw_write_u32le(bw, val) {
+    var rc = bw_write_byte(bw, val & 255);
+    if (rc < 0) { return rc; }
+    rc = bw_write_byte(bw, (val >> 8) & 255);
+    if (rc < 0) { return rc; }
+    rc = bw_write_byte(bw, (val >> 16) & 255);
+    if (rc < 0) { return rc; }
+    return bw_write_byte(bw, (val >> 24) & 255);
+}
+
+# --- huffman.cyr ---
+
+# sankoch — Huffman coding for DEFLATE
+# Lifted structure from shravan/aac.cyr:843-873, replaced AAC codebooks
+# with DEFLATE canonical Huffman.
+#
+# DEFLATE uses canonical Huffman codes:
+#   1. Code lengths are transmitted (or fixed by spec)
+#   2. Codes are assigned by the canonical algorithm (RFC 1951 Section 3.2.2)
+#   3. Bits are read LSB-first
+#
+# Decode strategy: table-based for codes up to 9 bits (covers most cases),
+# fallback to bit-by-bit for longer codes.
+
+# Maximum code length in DEFLATE is 15 bits.
+# We use a primary lookup table of 512 entries (9-bit index).
+# Each entry: symbol in low 16 bits, length in bits 16-20.
+
+enum Huffman {
+    HUFF_TABLE_BITS = 9;
+    HUFF_TABLE_SIZE = 512;
+    HUFF_MAX_BITS = 15;
+    HUFF_FAST_SHIFT = 16;
+}
+
+# All large tables are heap-allocated on first use.
+# Literal/length table (up to 286 symbols)
+var _huff_litlen_fast = 0;   # 512 entries * 8 bytes
+var _huff_litlen_lens = 0;   # 286 entries * 8 bytes
+var _huff_litlen_codes = 0;  # 286 entries * 8 bytes
+var _huff_litlen_count = 0;
+
+# Distance table (up to 30 symbols)
+var _huff_dist_fast = 0;
+var _huff_dist_lens = 0;
+var _huff_dist_codes = 0;
+var _huff_dist_count = 0;
+
+# Code-length alphabet table (up to 19 symbols)
+var _huff_cl_fast = 0;
+var _huff_cl_lens = 0;
+var _huff_cl_codes = 0;
+var _huff_cl_count = 0;
+
+var _huff_tables_allocd = 0;
+
+fn _huff_alloc_tables() {
+    if (_huff_tables_allocd == 1) { return 0; }
+    _huff_litlen_fast = alloc(4096);
+    _huff_litlen_lens = alloc(2304);   # 288 * 8
+    _huff_litlen_codes = alloc(2304);  # 288 * 8
+    _huff_dist_fast = alloc(4096);
+    _huff_dist_lens = alloc(256);      # 32 * 8
+    _huff_dist_codes = alloc(256);     # 32 * 8
+    _huff_cl_fast = alloc(4096);
+    _huff_cl_lens = alloc(152);
+    _huff_cl_codes = alloc(152);
+    _huff_tables_allocd = 1;
+    return 0;
+}
+
+# Build canonical Huffman codes from an array of code lengths.
+fn _huff_build(lengths, num_symbols, out_codes, out_fast) {
+    # Step 1: Count codes of each length
+    var bl_count[128];  # 16 entries * 8 bytes
+    var i = 0;
+    while (i < 16) {
+        store64(&bl_count + i * 8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < num_symbols) {
+        var len = load64(lengths + i * 8);
+        if (len > 0 && len <= HUFF_MAX_BITS) {
+            store64(&bl_count + len * 8,
+                    load64(&bl_count + len * 8) + 1);
+        }
+        i = i + 1;
+    }
+
+    # Validate: tree must not be oversubscribed
+    var check_sum = 0;
+    var b = 1;
+    while (b <= HUFF_MAX_BITS) {
+        check_sum = check_sum +
+            (load64(&bl_count + b * 8) << (HUFF_MAX_BITS - b));
+        b = b + 1;
+    }
+    if (check_sum > (1 << HUFF_MAX_BITS)) {
+        return 0 - ERR_INVALID_HUFFMAN;
+    }
+
+    # Step 2: smallest code for each length
+    var next_code[128];
+    store64(&next_code, 0);
+    store64(&next_code + 8, 0);
+    var code = 0;
+    var bits = 1;
+    while (bits <= HUFF_MAX_BITS) {
+        code = (code + load64(&bl_count + (bits - 1) * 8)) << 1;
+        store64(&next_code + bits * 8, code);
+        bits = bits + 1;
+    }
+
+    # Step 3: assign codes
+    i = 0;
+    while (i < num_symbols) {
+        var len = load64(lengths + i * 8);
+        if (len > 0) {
+            store64(out_codes + i * 8,
+                    load64(&next_code + len * 8));
+            store64(&next_code + len * 8,
+                    load64(&next_code + len * 8) + 1);
+        } else {
+            store64(out_codes + i * 8, 0);
+        }
+        i = i + 1;
+    }
+
+    # Step 4: build fast lookup table (9-bit, LSB-first)
+    i = 0;
+    while (i < HUFF_TABLE_SIZE) {
+        store64(out_fast + i * 8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < num_symbols) {
+        var len = load64(lengths + i * 8);
+        if (len > 0 && len <= HUFF_TABLE_BITS) {
+            var c = load64(out_codes + i * 8);
+            var rev = 0;
+            var bb = 0;
+            while (bb < len) {
+                rev = (rev << 1) | (c & 1);
+                c = c >> 1;
+                bb = bb + 1;
+            }
+            var step = 1 << len;
+            var idx = rev;
+            while (idx < HUFF_TABLE_SIZE) {
+                store64(out_fast + idx * 8,
+                        (len << HUFF_FAST_SHIFT) | i);
+                idx = idx + step;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Decode one symbol using fast table + slow fallback.
+fn _huff_decode(br, fast, lengths, codes, num_symbols) {
+    var data = load64(br);
+    var bpos = load64(br + 8);
+    var bbit = load64(br + 16);
+    var dlen = load64(br + 24);
+
+    # Peek up to 9 bits
+    var peek = 0;
+    var got = 0;
+    var save_bpos = bpos;
+    var save_bbit = bbit;
+    while (got < HUFF_TABLE_BITS) {
+        if (bpos >= dlen) { break; }
+        var byte = load8(data + bpos);
+        var bit = (byte >> bbit) & 1;
+        peek = peek | (bit << got);
+        got = got + 1;
+        bbit = bbit + 1;
+        if (bbit >= 8) { bbit = 0; bpos = bpos + 1; }
+    }
+
+    var entry = load64(fast + peek * 8);
+    var elen = entry >> HUFF_FAST_SHIFT;
+    if (elen > 0 && elen <= got) {
+        var consume = elen;
+        bpos = save_bpos;
+        bbit = save_bbit + consume;
+        while (bbit >= 8) { bbit = bbit - 8; bpos = bpos + 1; }
+        store64(br + 8, bpos);
+        store64(br + 16, bbit);
+        return entry & 65535;
+    }
+
+    # Slow path: bit-by-bit
+    store64(br + 8, save_bpos);
+    store64(br + 16, save_bbit);
+    var acc = 0;
+    var bits_read = 0;
+    while (bits_read < HUFF_MAX_BITS) {
+        var bit = br_read_bit(br);
+        if (bit < 0) { return bit; }
+        acc = (acc << 1) | bit;
+        bits_read = bits_read + 1;
+        var i = 0;
+        while (i < num_symbols) {
+            if (load64(lengths + i * 8) == bits_read) {
+                if (load64(codes + i * 8) == acc) {
+                    return i;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return 0 - ERR_INVALID_HUFFMAN;
+}
+
+# Decode one literal/length symbol from the bitstream.
+fn huff_decode_litlen(br) {
+    return _huff_decode(br, _huff_litlen_fast, _huff_litlen_lens,
+                        _huff_litlen_codes, _huff_litlen_count);
+}
+
+# Decode one distance symbol from the bitstream.
+fn huff_decode_dist(br) {
+    return _huff_decode(br, _huff_dist_fast, _huff_dist_lens,
+                        _huff_dist_codes, _huff_dist_count);
+}
+
+# Decode one code-length symbol from the bitstream.
+fn huff_decode_cl(br) {
+    return _huff_decode(br, _huff_cl_fast, _huff_cl_lens,
+                        _huff_cl_codes, _huff_cl_count);
+}
+
+# Build the literal/length Huffman table from code lengths.
+fn huff_build_litlen(lengths, count) {
+    _huff_alloc_tables();
+    _huff_litlen_count = count;
+    # Dynamic tables overwrite fixed — force rebuild on next huff_build_fixed()
+    _huff_fixed_built = 0;
+    var i = 0;
+    while (i < count) {
+        store64(_huff_litlen_lens + i * 8,
+                load64(lengths + i * 8));
+        i = i + 1;
+    }
+    return _huff_build(_huff_litlen_lens, count,
+                       _huff_litlen_codes, _huff_litlen_fast);
+}
+
+# Build the distance Huffman table from code lengths.
+fn huff_build_dist(lengths, count) {
+    _huff_alloc_tables();
+    _huff_dist_count = count;
+    var i = 0;
+    while (i < count) {
+        store64(_huff_dist_lens + i * 8,
+                load64(lengths + i * 8));
+        i = i + 1;
+    }
+    return _huff_build(_huff_dist_lens, count,
+                       _huff_dist_codes, _huff_dist_fast);
+}
+
+# Build the code-length Huffman table from code lengths.
+fn huff_build_cl(lengths, count) {
+    _huff_alloc_tables();
+    _huff_cl_count = count;
+    var i = 0;
+    while (i < count) {
+        store64(_huff_cl_lens + i * 8,
+                load64(lengths + i * 8));
+        i = i + 1;
+    }
+    return _huff_build(_huff_cl_lens, count,
+                       _huff_cl_codes, _huff_cl_fast);
+}
+
+# ================================================================
+# Fixed Huffman tables (RFC 1951, Section 3.2.6)
+# ================================================================
+
+var _huff_fixed_built = 0;
+var _huff_fixed_litlen_lens = 0;
+
+# Build the fixed Huffman tables defined in RFC 1951 Section 3.2.6.
+fn huff_build_fixed() {
+    if (_huff_fixed_built == 1) { return 0; }
+    if (_huff_fixed_litlen_lens == 0) {
+        _huff_fixed_litlen_lens = alloc(2304);
+    }
+    var i = 0;
+    while (i <= 143) {
+        store64(_huff_fixed_litlen_lens + i * 8, 8);
+        i = i + 1;
+    }
+    while (i <= 255) {
+        store64(_huff_fixed_litlen_lens + i * 8, 9);
+        i = i + 1;
+    }
+    while (i <= 279) {
+        store64(_huff_fixed_litlen_lens + i * 8, 7);
+        i = i + 1;
+    }
+    while (i <= 287) {
+        store64(_huff_fixed_litlen_lens + i * 8, 8);
+        i = i + 1;
+    }
+    huff_build_litlen(_huff_fixed_litlen_lens, 288);
+
+    var dist_lens[256];  # 32 * 8 — small, stays on stack
+    i = 0;
+    while (i < 32) {
+        store64(&dist_lens + i * 8, 5);
+        i = i + 1;
+    }
+    huff_build_dist(&dist_lens, 32);
+    _huff_fixed_built = 1;
+    return 0;
+}
+
+# ================================================================
+# Optimal Huffman tree from frequencies
+# ================================================================
+
+# Pre-allocated workspace for huff_compute_lengths (allocated once)
+var _hcl_ws = 0;
+
+# Compute optimal Huffman code lengths from symbol frequencies.
+fn huff_compute_lengths(freqs, num_symbols, out_lens, min_codes) {
+    var count = 0;
+    var i = 0;
+    while (i < num_symbols) {
+        if (load64(freqs + i * 8) > 0) { count = count + 1; }
+        i = i + 1;
+    }
+
+    if (count == 0) {
+        i = 0;
+        while (i < num_symbols) {
+            if (i < min_codes) { store64(out_lens + i * 8, 1); }
+            else { store64(out_lens + i * 8, 0); }
+            i = i + 1;
+        }
+        return 0;
+    }
+    if (count == 1) {
+        i = 0;
+        var found = 0;
+        while (i < num_symbols) {
+            if (load64(freqs + i * 8) > 0 && found == 0) {
+                store64(out_lens + i * 8, 1);
+                found = 1;
+            } else {
+                store64(out_lens + i * 8, 0);
+            }
+            i = i + 1;
+        }
+        # Need at least 2 codes
+        i = 0;
+        while (i < num_symbols) {
+            if (load64(out_lens + i * 8) == 0) {
+                store64(out_lens + i * 8, 1);
+                break;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    # Workspace — allocated once, reused across calls.
+    # 7 arrays, each 600 entries * 8 bytes = 4800 bytes. Total = 33600.
+    if (_hcl_ws == 0) {
+        _hcl_ws = alloc(33600);
+    }
+    var sorted_sym = _hcl_ws;
+    var sorted_freq = _hcl_ws + 4800;
+    var n = 0;
+    i = 0;
+    while (i < num_symbols) {
+        var f = load64(freqs + i * 8);
+        if (f > 0) {
+            store64(sorted_sym + n * 8, i);
+            store64(sorted_freq + n * 8, f);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+
+    # Insertion sort by frequency
+    i = 1;
+    while (i < n) {
+        var key_f = load64(sorted_freq + i * 8);
+        var key_s = load64(sorted_sym + i * 8);
+        var j = i - 1;
+        while (j >= 0 && load64(sorted_freq + j * 8) > key_f) {
+            store64(sorted_freq + (j + 1) * 8,
+                    load64(sorted_freq + j * 8));
+            store64(sorted_sym + (j + 1) * 8,
+                    load64(sorted_sym + j * 8));
+            j = j - 1;
+        }
+        store64(sorted_freq + (j + 1) * 8, key_f);
+        store64(sorted_sym + (j + 1) * 8, key_s);
+        i = i + 1;
+    }
+
+    # Two-queue Huffman tree build (reuse workspace)
+    var q2_freq = _hcl_ws + 9600;
+    var q2_left = _hcl_ws + 14400;
+    var q2_right = _hcl_ws + 19200;
+    var q1_head = 0;
+    var q2_head = 0;
+    var q2_tail = 0;
+    var _pick_source = 0;
+
+    while (1) {
+        var remaining = (n - q1_head) + (q2_tail - q2_head);
+        if (remaining < 2) { break; }
+
+        # Pick first minimum
+        var f1 = 0;
+        var n1 = 0;
+        var q1a = (q1_head < n);
+        var q2a = (q2_head < q2_tail);
+        var pq1 = 0;
+        if (q1a == 1) {
+            if (q2a == 0) { pq1 = 1; }
+            else {
+                if (load64(sorted_freq + q1_head * 8) <=
+                    load64(q2_freq + q2_head * 8)) { pq1 = 1; }
+            }
+        }
+        if (pq1 == 1) {
+            f1 = load64(sorted_freq + q1_head * 8);
+            n1 = q1_head;
+            q1_head = q1_head + 1;
+        } else {
+            f1 = load64(q2_freq + q2_head * 8);
+            n1 = q2_head + n;
+            q2_head = q2_head + 1;
+        }
+
+        # Pick second minimum
+        var f2 = 0;
+        var n2 = 0;
+        q1a = (q1_head < n);
+        q2a = (q2_head < q2_tail);
+        pq1 = 0;
+        if (q1a == 1) {
+            if (q2a == 0) { pq1 = 1; }
+            else {
+                if (load64(sorted_freq + q1_head * 8) <=
+                    load64(q2_freq + q2_head * 8)) { pq1 = 1; }
+            }
+        }
+        if (pq1 == 1) {
+            f2 = load64(sorted_freq + q1_head * 8);
+            n2 = q1_head;
+            q1_head = q1_head + 1;
+        } else {
+            f2 = load64(q2_freq + q2_head * 8);
+            n2 = q2_head + n;
+            q2_head = q2_head + 1;
+        }
+
+        store64(q2_freq + q2_tail * 8, f1 + f2);
+        store64(q2_left + q2_tail * 8, n1);
+        store64(q2_right + q2_tail * 8, n2);
+        q2_tail = q2_tail + 1;
+    }
+
+    # Extract depths via DFS
+    i = 0;
+    while (i < num_symbols) { store64(out_lens + i * 8, 0); i = i + 1; }
+
+    var stack_node = _hcl_ws + 24000;
+    var stack_depth = _hcl_ws + 28800;
+    var sp = 0;
+    if (q2_tail > 0) {
+        store64(stack_node, q2_tail - 1 + n);
+        store64(stack_depth, 0);
+        sp = 1;
+    }
+
+    while (sp > 0) {
+        sp = sp - 1;
+        var node = load64(stack_node + sp * 8);
+        var depth = load64(stack_depth + sp * 8);
+        if (node < n) {
+            var sym = load64(sorted_sym + node * 8);
+            var d = depth;
+            if (d > HUFF_MAX_BITS) { d = HUFF_MAX_BITS; }
+            if (d == 0) { d = 1; }
+            store64(out_lens + sym * 8, d);
+        } else {
+            var idx = node - n;
+            store64(stack_node + sp * 8,
+                    load64(q2_left + idx * 8));
+            store64(stack_depth + sp * 8, depth + 1);
+            sp = sp + 1;
+            store64(stack_node + sp * 8,
+                    load64(q2_right + idx * 8));
+            store64(stack_depth + sp * 8, depth + 1);
+            sp = sp + 1;
+        }
+    }
+
+    return 0;
+}
+
+# --- lz4.cyr ---
+
+# sankoch — LZ4 block compression
+# Spec: https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md
+#
+# LZ4 is byte-aligned (no bit-reader needed).
+# Format: sequence of tokens, each = literal run + optional match copy.
+#
+# Token byte: high nibble = literal length, low nibble = match length - 4
+# If nibble == 15, read additional bytes (each 255 = +255, first <255 = final add)
+# Literals follow the token, then 2-byte little-endian match offset, then next token.
+
+# Hash table size for match-finder: 4096 entries (12-bit hash).
+# Each entry stores a source position (i64). Initialized to -1 (no match).
+var _lz4_htab = 0;  # heap-allocated: 4096 * 8 bytes
+enum LZ4 {
+    LZ4_HTAB_SIZE = 4096;
+    LZ4_HTAB_MASK = 4095;
+    LZ4_MIN_MATCH = 4;
+    LZ4_MAX_OFFSET = 65535;
+}
+
+# Hash 4 bytes at ptr into a 12-bit index.
+fn _lz4_hash4(src, pos) {
+    var v = load8(src + pos);
+    v = v + (load8(src + pos + 1) * 256);
+    v = v + (load8(src + pos + 2) * 65536);
+    v = v + (load8(src + pos + 3) * 16777216);
+    # Knuth multiplicative hash, take top 12 bits of low 32
+    v = (v * 2654435761) & 4294967295;
+    return (v >> 20) & LZ4_HTAB_MASK;
+}
+
+# Count how many bytes match starting at positions a and b in src,
+# up to max_len bytes.
+fn _lz4_match_len(src, a, b, max_len) {
+    var i = 0;
+    while (i < max_len) {
+        if (load8(src + a + i) != load8(src + b + i)) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return max_len;
+}
+
+# Write an extended length (the part beyond 15) to dst.
+# Returns new dp, or negative error.
+fn _lz4_write_ext_len(dst, dp, dst_cap, length) {
+    var rem = length;
+    while (rem >= 255) {
+        if (dp >= dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        store8(dst + dp, 255);
+        dp = dp + 1;
+        rem = rem - 255;
+    }
+    if (dp >= dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+    store8(dst + dp, rem);
+    dp = dp + 1;
+    return dp;
+}
+
+# Emit a literal run from src[lit_start..lit_start+lit_len]
+# followed by a match (offset, match_len) to dst.
+# If match_len == 0, this is the final sequence (no match part).
+# Returns new dp, or negative error.
+fn _lz4_emit(src, dst, dp, dst_cap, lit_start, lit_len, offset, match_len) {
+    # Token byte
+    var lit_nibble = lit_len;
+    if (lit_nibble > 15) { lit_nibble = 15; }
+    var match_nibble = 0;
+    if (match_len > 0) {
+        match_nibble = match_len - LZ4_MIN_MATCH;
+        if (match_nibble > 15) { match_nibble = 15; }
+    }
+    if (dp >= dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+    store8(dst + dp, (lit_nibble * 16) + match_nibble);
+    dp = dp + 1;
+
+    # Extended literal length
+    if (lit_len >= 15) {
+        dp = _lz4_write_ext_len(dst, dp, dst_cap, lit_len - 15);
+        if (dp < 0) { return dp; }
+    }
+
+    # Copy literals
+    if (dp + lit_len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+    var i = 0;
+    while (i < lit_len) {
+        store8(dst + dp, load8(src + lit_start + i));
+        dp = dp + 1;
+        i = i + 1;
+    }
+
+    # Match: offset + optional extended match length
+    if (match_len > 0) {
+        if (dp + 2 > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        store8(dst + dp, offset & 255);
+        store8(dst + dp + 1, (offset >> 8) & 255);
+        dp = dp + 2;
+
+        var ml_code = match_len - LZ4_MIN_MATCH;
+        if (ml_code >= 15) {
+            dp = _lz4_write_ext_len(dst, dp, dst_cap, ml_code - 15);
+            if (dp < 0) { return dp; }
+        }
+    }
+
+    return dp;
+}
+
+# Decompress an LZ4 block.
+# src: pointer to compressed data
+# src_len: length of compressed data
+# dst: pointer to output buffer
+# dst_cap: capacity of output buffer
+# Returns: decompressed length, or negative error code
+fn lz4_decompress(src, src_len, dst, dst_cap) {
+    var sp = 0;   # source position
+    var dp = 0;   # destination position
+
+    while (sp < src_len) {
+        # Read token
+        var token = load8(src + sp);
+        sp = sp + 1;
+
+        # Literal length (high nibble)
+        var lit_len = (token >> 4) & 15;
+        if (lit_len == 15) {
+            var extra = 255;
+            while (extra == 255) {
+                if (sp >= src_len) { return 0 - ERR_CORRUPT_DATA; }
+                extra = load8(src + sp);
+                sp = sp + 1;
+                lit_len = lit_len + extra;
+            }
+        }
+
+        # Copy literals
+        if (dp + lit_len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        if (dp + lit_len > DECOMPRESS_MAX_OUTPUT) { return 0 - ERR_OUTPUT_LIMIT; }
+        if (sp + lit_len > src_len) { return 0 - ERR_CORRUPT_DATA; }
+        var i = 0;
+        while (i < lit_len) {
+            store8(dst + dp, load8(src + sp));
+            sp = sp + 1;
+            dp = dp + 1;
+            i = i + 1;
+        }
+
+        # End of block — last sequence has no match
+        if (sp >= src_len) {
+            return dp;
+        }
+
+        # Match offset (2 bytes, little-endian)
+        if (sp + 2 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+        var offset = load8(src + sp) + (load8(src + sp + 1) * 256);
+        sp = sp + 2;
+
+        if (offset == 0) { return 0 - ERR_CORRUPT_DATA; }
+        if (offset > dp) { return 0 - ERR_MATCH_OUT_OF_RANGE; }
+
+        # Match length (low nibble + 4 minimum)
+        var match_len = (token & 15) + 4;
+        if (match_len == 19) {
+            # 15 + 4 = 19 means extended match length
+            var extra = 255;
+            while (extra == 255) {
+                if (sp >= src_len) { return 0 - ERR_CORRUPT_DATA; }
+                extra = load8(src + sp);
+                sp = sp + 1;
+                match_len = match_len + extra;
+            }
+        }
+
+        # Copy match (byte-by-byte for overlapping matches)
+        if (dp + match_len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        if (dp + match_len > DECOMPRESS_MAX_OUTPUT) { return 0 - ERR_OUTPUT_LIMIT; }
+        var match_pos = dp - offset;
+        i = 0;
+        while (i < match_len) {
+            store8(dst + dp, load8(dst + match_pos));
+            dp = dp + 1;
+            match_pos = match_pos + 1;
+            i = i + 1;
+        }
+    }
+
+    return dp;
+}
+
+# Compress data in LZ4 block format.
+# Uses a hash table on 4-byte sequences to find matches.
+# Greedy: takes the first match found (no optimal parsing).
+fn lz4_compress(src, src_len, dst, dst_cap) {
+    if (src_len == 0) {
+        return 0;
+    }
+
+    # Need at least 4 bytes to hash — short inputs go store-only
+    if (src_len < LZ4_MIN_MATCH) {
+        return _lz4_emit(src, dst, 0, dst_cap, 0, src_len, 0, 0);
+    }
+
+    # Heap-allocate hash table on first use, then clear
+    if (_lz4_htab == 0) { _lz4_htab = alloc(32768); }
+    var i = 0;
+    while (i < LZ4_HTAB_SIZE) {
+        store64(_lz4_htab + i * 8, 0 - 1);  # -1 = no entry
+        i = i + 1;
+    }
+
+    var sp = 0;        # current source position
+    var dp = 0;        # current dest position
+    var anchor = 0;    # start of pending literals
+    var skip = 0;      # acceleration: skip counter for incompressible regions
+
+    # LZ4 spec: last 5 bytes must be literals (match search limit).
+    # Also: last match must start >= 12 bytes before end (MFLIMIT).
+    var match_limit = src_len - 5;
+    if (match_limit < 0) { match_limit = 0; }
+    var mf_limit = src_len - 12;
+    if (mf_limit < 0) { mf_limit = 0; }
+
+    while (sp + LZ4_MIN_MATCH <= match_limit) {
+        var h = _lz4_hash4(src, sp);
+        var ref = load64(_lz4_htab + h * 8);
+
+        # Update hash table with current position
+        store64(_lz4_htab + h * 8, sp);
+
+        # Check for a valid match (enforce MFLIMIT: match start < src_len - 12)
+        if (ref >= 0 && sp <= mf_limit) {
+            var off = sp - ref;
+            if (off > 0 && off <= LZ4_MAX_OFFSET) {
+                # Verify the 4-byte match
+                if (load8(src + ref) == load8(src + sp)) {
+                    if (load8(src + ref + 1) == load8(src + sp + 1)) {
+                        if (load8(src + ref + 2) == load8(src + sp + 2)) {
+                            if (load8(src + ref + 3) == load8(src + sp + 3)) {
+                                # Match confirmed — extend it
+                                # Clamp match so last 5 bytes remain as literals
+                                var max_ext = match_limit - sp;
+                                if (max_ext > src_len - sp) { max_ext = src_len - sp; }
+                                var mlen = _lz4_match_len(src, ref, sp, max_ext);
+
+                                # Emit literals [anchor..sp) + match
+                                var lit_len = sp - anchor;
+                                dp = _lz4_emit(src, dst, dp, dst_cap, anchor, lit_len, off, mlen);
+                                if (dp < 0) { return dp; }
+
+                                # Advance past the match
+                                sp = sp + mlen;
+                                anchor = sp;
+
+                                # Hash the position after match
+                                if (sp + LZ4_MIN_MATCH <= match_limit) {
+                                    var hh = _lz4_hash4(src, sp);
+                                    store64(_lz4_htab + hh * 8, sp);
+                                }
+                                skip = 0;  # reset acceleration
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        # Acceleration: skip ahead on misses (incompressible data traversal)
+        skip = skip + 1;
+        sp = sp + 1 + (skip >> 6);
+    }
+
+    # Emit remaining literals as the last sequence (no match)
+    var lit_len = src_len - anchor;
+    if (lit_len > 0) {
+        dp = _lz4_emit(src, dst, dp, dst_cap, anchor, lit_len, 0, 0);
+        if (dp < 0) { return dp; }
+    }
+
+    return dp;
+}
+
+# ================================================================
+# LZ4 Frame format (LZ4F)
+# Spec: https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md
+#
+# Frame: magic(4) + FLG(1) + BD(1) + [content_size(8)] + HC(1)
+#        + data_block(s) + end_mark(4) + [content_checksum(4)]
+#
+# We emit: block-independent, no block checksum, with content checksum,
+# no content size, no dictionary ID. Single block per frame.
+# ================================================================
+
+enum LZ4F {
+    LZ4F_MAGIC = 407708164;   # 0x184D2204 — bytes [04 22 4D 18] read as LE u32
+    LZ4F_VERSION = 1;
+}
+
+# Compress data into an LZ4 frame.
+fn lz4f_compress(src, src_len, dst, dst_cap) {
+    # Frame overhead: 7 (header) + 4 (block size) + 4 (end mark) + 4 (content checksum) = 19
+    if (dst_cap < 19) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+    var dp = 0;
+
+    # Magic number (4 bytes, little-endian: 0x04224D18)
+    store8(dst + dp, 4); store8(dst + dp + 1, 34);
+    store8(dst + dp + 2, 77); store8(dst + dp + 3, 24);
+    dp = dp + 4;
+
+    # FLG byte: version=01, B.indep=1, B.checksum=0, C.size=0, C.checksum=1
+    # = 0b01_1_0_0_1_0_0 = 0x64
+    store8(dst + dp, 100);  # 0x64
+    dp = dp + 1;
+
+    # BD byte: block max size = 4 (64KB)
+    # = 0b0_100_0000 = 0x40
+    store8(dst + dp, 64);   # 0x40
+    dp = dp + 1;
+
+    # Header checksum: xxHash32 of FLG+BD, take bits 8-15
+    var hc_buf[2];
+    store8(&hc_buf, 100); store8(&hc_buf + 1, 64);
+    var hc = (xxhash32(&hc_buf, 2) >> 8) & 255;
+    store8(dst + dp, hc);
+    dp = dp + 1;
+
+    # Compress the block (skip for empty input — go straight to end mark)
+    if (src_len == 0) {
+        # End mark
+        store8(dst + dp, 0); store8(dst + dp + 1, 0);
+        store8(dst + dp + 2, 0); store8(dst + dp + 3, 0);
+        dp = dp + 4;
+        # Content checksum of empty = xxhash32(src, 0)
+        var cc = xxhash32(src, 0);
+        store8(dst + dp, cc & 255);
+        store8(dst + dp + 1, (cc >> 8) & 255);
+        store8(dst + dp + 2, (cc >> 16) & 255);
+        store8(dst + dp + 3, (cc >> 24) & 255);
+        dp = dp + 4;
+        return dp;
+    }
+
+    var block_start = dp + 4;
+    var block_cap = dst_cap - dp - 4 - 4 - 4;
+    if (block_cap < 0) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+    var block_len = lz4_compress(src, src_len, dst + block_start, block_cap);
+    if (block_len < 0) { return block_len; }
+
+    # If compressed >= original, store uncompressed
+    if (block_len >= src_len) {
+        var usize = src_len | 2147483648;  # MSB=1 → uncompressed
+        store8(dst + dp, usize & 255);
+        store8(dst + dp + 1, (usize >> 8) & 255);
+        store8(dst + dp + 2, (usize >> 16) & 255);
+        store8(dst + dp + 3, (usize >> 24) & 255);
+        dp = dp + 4;
+
+        if (dp + src_len + 4 + 4 > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+        var i = 0;
+        while (i < src_len) { store8(dst + dp + i, load8(src + i)); i = i + 1; }
+        dp = dp + src_len;
+    } else {
+        store8(dst + dp, block_len & 255);
+        store8(dst + dp + 1, (block_len >> 8) & 255);
+        store8(dst + dp + 2, (block_len >> 16) & 255);
+        store8(dst + dp + 3, (block_len >> 24) & 255);
+        dp = dp + 4 + block_len;
+    }
+
+    # End mark (4 zero bytes)
+    store8(dst + dp, 0); store8(dst + dp + 1, 0);
+    store8(dst + dp + 2, 0); store8(dst + dp + 3, 0);
+    dp = dp + 4;
+
+    # Content checksum (xxHash32, little-endian)
+    var cc = xxhash32(src, src_len);
+    store8(dst + dp, cc & 255);
+    store8(dst + dp + 1, (cc >> 8) & 255);
+    store8(dst + dp + 2, (cc >> 16) & 255);
+    store8(dst + dp + 3, (cc >> 24) & 255);
+    dp = dp + 4;
+
+    return dp;
+}
+
+# Decompress an LZ4 frame.
+fn lz4f_decompress(src, src_len, dst, dst_cap) {
+    if (src_len < 11) { return 0 - ERR_INVALID_INPUT; }
+
+    var sp = 0;
+
+    # Verify magic
+    var magic = load8(src) | (load8(src + 1) << 8) |
+                (load8(src + 2) << 16) | (load8(src + 3) << 24);
+    if (magic != LZ4F_MAGIC) { return 0 - ERR_CORRUPT_DATA; }
+    sp = 4;
+
+    var flg = load8(src + sp);
+    var version = (flg >> 6) & 3;
+    if (version != LZ4F_VERSION) { return 0 - ERR_UNSUPPORTED_FORMAT; }
+    var has_content_checksum = (flg >> 2) & 1;
+    var has_content_size = (flg >> 3) & 1;
+    var has_dict_id = flg & 1;
+    sp = sp + 1;
+
+    sp = sp + 1;  # skip BD
+
+    if (has_content_size == 1) { sp = sp + 8; }
+    if (has_dict_id == 1) { sp = sp + 4; }
+    sp = sp + 1;  # skip HC
+
+    if (sp > src_len) { return 0 - ERR_CORRUPT_DATA; }
+
+    # Read data blocks
+    var total = 0;
+    while (sp + 4 <= src_len) {
+        var block_size = load8(src + sp) | (load8(src + sp + 1) << 8) |
+                         (load8(src + sp + 2) << 16) | (load8(src + sp + 3) << 24);
+        sp = sp + 4;
+
+        if (block_size == 0) { break; }
+
+        var is_uncompressed = (block_size >> 31) & 1;
+        block_size = block_size & 2147483647;
+
+        if (sp + block_size > src_len) { return 0 - ERR_CORRUPT_DATA; }
+
+        if (is_uncompressed == 1) {
+            if (total + block_size > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+            var i = 0;
+            while (i < block_size) {
+                store8(dst + total + i, load8(src + sp + i));
+                i = i + 1;
+            }
+            total = total + block_size;
+        } else {
+            var dlen = lz4_decompress(src + sp, block_size, dst + total, dst_cap - total);
+            if (dlen < 0) { return dlen; }
+            total = total + dlen;
+        }
+
+        sp = sp + block_size;
+    }
+
+    # Verify content checksum if present
+    if (has_content_checksum == 1 && sp + 4 <= src_len) {
+        var stored_cc = load8(src + sp) | (load8(src + sp + 1) << 8) |
+                        (load8(src + sp + 2) << 16) | (load8(src + sp + 3) << 24);
+        var computed_cc = xxhash32(dst, total);
+        if (stored_cc != computed_cc) { return 0 - ERR_CHECKSUM_MISMATCH; }
+    }
+
+    return total;
+}
+
+# --- lz77.cyr ---
+
+# sankoch — LZ77 sliding window match-finder for DEFLATE
+#
+# DEFLATE uses a 32KB sliding window with:
+#   - Minimum match length: 3
+#   - Maximum match length: 258
+#   - Maximum distance: 32768
+#   - Hash on 3-byte sequences
+#
+# Strategy: hash table with chaining for collision resolution.
+# Greedy matching — take the longest match at each position.
+
+enum LZ77 {
+    LZ77_HASH_BITS = 15;
+    LZ77_HASH_SIZE = 32768;
+    LZ77_HASH_MASK = 32767;
+    LZ77_WINDOW = 32768;
+    LZ77_MIN_MATCH = 3;
+    LZ77_MAX_MATCH = 258;
+    LZ77_MAX_CHAIN = 64;  # default chain depth
+}
+
+# Compression levels:
+#   1 (fast)    — chain depth 4, skip hash insertion on match interiors
+#   6 (default) — chain depth 64
+#   9 (best)    — chain depth 256
+var _lz77_chain_depth = 64;
+
+# Hash table: maps hash → most recent position (heap-allocated, 256KB each)
+var _lz77_head = 0;
+# Chain: prev[pos & WINDOW-1] = previous position with same hash
+var _lz77_prev = 0;
+
+# Hash 3 bytes into a 15-bit index.
+fn _lz77_hash3(src, pos) {
+    var v = load8(src + pos);
+    v = v ^ (load8(src + pos + 1) << 5);
+    v = v ^ (load8(src + pos + 2) << 10);
+    return v & LZ77_HASH_MASK;
+}
+
+# Insert position into hash chain.
+fn _lz77_insert(src, pos) {
+    var h = _lz77_hash3(src, pos);
+    var prev = load64(_lz77_head + h * 8);
+    store64(_lz77_prev + (pos & LZ77_HASH_MASK) * 8, prev);
+    store64(_lz77_head + h * 8, pos);
+    return 0;
+}
+
+# Find the longest match at position pos.
+# Returns match length in low 16 bits, distance in bits 16-31.
+# Returns 0 if no match found (length < 3).
+fn _lz77_find_match(src, src_len, pos) {
+    if (pos + LZ77_MIN_MATCH > src_len) { return 0; }
+
+    var h = _lz77_hash3(src, pos);
+    var chain = load64(_lz77_head + h * 8);
+
+    var best_len = 0;
+    var best_dist = 0;
+    var max_len = src_len - pos;
+    if (max_len > LZ77_MAX_MATCH) { max_len = LZ77_MAX_MATCH; }
+
+    var depth = 0;
+    while (depth < _lz77_chain_depth) {
+        if (chain < 0) { break; }  # end of chain
+        var dist = pos - chain;
+        if (dist <= 0 || dist > LZ77_WINDOW) { break; }
+
+        # Quick check: compare first and last+1 byte of best match
+        if (load8(src + chain) == load8(src + pos)) {
+            if (best_len < 3 || load8(src + chain + best_len) == load8(src + pos + best_len)) {
+                # Count full match length
+                var mlen = 0;
+                while (mlen < max_len) {
+                    if (load8(src + chain + mlen) != load8(src + pos + mlen)) { break; }
+                    mlen = mlen + 1;
+                }
+                if (mlen >= LZ77_MIN_MATCH && mlen > best_len) {
+                    best_len = mlen;
+                    best_dist = dist;
+                    if (best_len >= max_len) { break; }
+                }
+            }
+        }
+
+        chain = load64(_lz77_prev + (chain & LZ77_HASH_MASK) * 8);
+        depth = depth + 1;
+    }
+
+    if (best_len < LZ77_MIN_MATCH) { return 0; }
+    return best_len | (best_dist << 16);
+}
+
+# Set compression level (1=fast, 6=default, 9=best).
+fn lz77_set_level(level) {
+    if (level <= 1) {
+        _lz77_chain_depth = 4;
+    } elif (level <= 3) {
+        _lz77_chain_depth = 16;
+    } elif (level <= 6) {
+        _lz77_chain_depth = 64;
+    } elif (level <= 8) {
+        _lz77_chain_depth = 128;
+    } else {
+        _lz77_chain_depth = 256;
+    }
+    return 0;
+}
+
+# Initialize hash tables (heap-allocate + clear to -1).
+fn lz77_init() {
+    if (_lz77_head == 0) {
+        _lz77_head = alloc(262144);
+        _lz77_prev = alloc(262144);
+    }
+    var i = 0;
+    while (i < LZ77_HASH_SIZE) {
+        store64(_lz77_head + i * 8, 0 - 1);
+        store64(_lz77_prev + i * 8, 0 - 1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# --- deflate.cyr ---
+
+# sankoch — DEFLATE decompression (RFC 1951)
+#
+# Three block types:
+#   00 — uncompressed (stored)
+#   01 — fixed Huffman codes
+#   10 — dynamic Huffman codes
+#
+# Each block has a BFINAL bit (1 = last block) and BTYPE (2 bits).
+# Compressed blocks contain a stream of literal/length + distance pairs.
+# Literal bytes 0-255 are emitted directly.
+# Symbol 256 = end of block.
+# Symbols 257-285 = length codes (with extra bits), followed by a distance code.
+
+# Length code base values and extra bits (RFC 1951, Section 3.2.5)
+# Index by (code - 257)
+var _deflate_len_base[232];   # 29 * 8
+var _deflate_len_extra[232];  # 29 * 8
+
+# Distance code base values and extra bits
+# Index by distance code (0-29)
+var _deflate_dist_base[240];  # 30 * 8
+var _deflate_dist_extra[240]; # 30 * 8
+
+var _deflate_tables_built = 0;
+
+fn _deflate_init_tables() {
+    if (_deflate_tables_built == 1) { return 0; }
+
+    # Length bases: codes 257-285 → lengths 3-258
+    # 257: 3, 258: 4, 259: 5, 260: 6, 261: 7, 262: 8, 263: 9, 264: 10
+    store64(&_deflate_len_base + 0 * 8, 3);
+    store64(&_deflate_len_base + 1 * 8, 4);
+    store64(&_deflate_len_base + 2 * 8, 5);
+    store64(&_deflate_len_base + 3 * 8, 6);
+    store64(&_deflate_len_base + 4 * 8, 7);
+    store64(&_deflate_len_base + 5 * 8, 8);
+    store64(&_deflate_len_base + 6 * 8, 9);
+    store64(&_deflate_len_base + 7 * 8, 10);
+    # 265-268: 1 extra bit
+    store64(&_deflate_len_base + 8 * 8, 11);
+    store64(&_deflate_len_base + 9 * 8, 13);
+    store64(&_deflate_len_base + 10 * 8, 15);
+    store64(&_deflate_len_base + 11 * 8, 17);
+    # 269-272: 2 extra bits
+    store64(&_deflate_len_base + 12 * 8, 19);
+    store64(&_deflate_len_base + 13 * 8, 23);
+    store64(&_deflate_len_base + 14 * 8, 27);
+    store64(&_deflate_len_base + 15 * 8, 31);
+    # 273-276: 3 extra bits
+    store64(&_deflate_len_base + 16 * 8, 35);
+    store64(&_deflate_len_base + 17 * 8, 43);
+    store64(&_deflate_len_base + 18 * 8, 51);
+    store64(&_deflate_len_base + 19 * 8, 59);
+    # 277-280: 4 extra bits
+    store64(&_deflate_len_base + 20 * 8, 67);
+    store64(&_deflate_len_base + 21 * 8, 83);
+    store64(&_deflate_len_base + 22 * 8, 99);
+    store64(&_deflate_len_base + 23 * 8, 115);
+    # 281-284: 5 extra bits
+    store64(&_deflate_len_base + 24 * 8, 131);
+    store64(&_deflate_len_base + 25 * 8, 163);
+    store64(&_deflate_len_base + 26 * 8, 195);
+    store64(&_deflate_len_base + 27 * 8, 227);
+    # 285: 0 extra bits, length 258
+    store64(&_deflate_len_base + 28 * 8, 258);
+
+    # Length extra bits
+    var i = 0;
+    while (i < 8) {
+        store64(&_deflate_len_extra + i * 8, 0);
+        i = i + 1;
+    }
+    var eb = 1;
+    while (eb <= 5) {
+        var j = 0;
+        while (j < 4) {
+            store64(&_deflate_len_extra + i * 8, eb);
+            i = i + 1;
+            j = j + 1;
+        }
+        eb = eb + 1;
+    }
+    store64(&_deflate_len_extra + 28 * 8, 0);  # code 285 = 0 extra
+
+    # Distance bases: codes 0-29 → distances 1-32768
+    store64(&_deflate_dist_base + 0 * 8, 1);
+    store64(&_deflate_dist_base + 1 * 8, 2);
+    store64(&_deflate_dist_base + 2 * 8, 3);
+    store64(&_deflate_dist_base + 3 * 8, 4);
+    store64(&_deflate_dist_base + 4 * 8, 5);
+    store64(&_deflate_dist_base + 5 * 8, 7);
+    store64(&_deflate_dist_base + 6 * 8, 9);
+    store64(&_deflate_dist_base + 7 * 8, 13);
+    store64(&_deflate_dist_base + 8 * 8, 17);
+    store64(&_deflate_dist_base + 9 * 8, 25);
+    store64(&_deflate_dist_base + 10 * 8, 33);
+    store64(&_deflate_dist_base + 11 * 8, 49);
+    store64(&_deflate_dist_base + 12 * 8, 65);
+    store64(&_deflate_dist_base + 13 * 8, 97);
+    store64(&_deflate_dist_base + 14 * 8, 129);
+    store64(&_deflate_dist_base + 15 * 8, 193);
+    store64(&_deflate_dist_base + 16 * 8, 257);
+    store64(&_deflate_dist_base + 17 * 8, 385);
+    store64(&_deflate_dist_base + 18 * 8, 513);
+    store64(&_deflate_dist_base + 19 * 8, 769);
+    store64(&_deflate_dist_base + 20 * 8, 1025);
+    store64(&_deflate_dist_base + 21 * 8, 1537);
+    store64(&_deflate_dist_base + 22 * 8, 2049);
+    store64(&_deflate_dist_base + 23 * 8, 3073);
+    store64(&_deflate_dist_base + 24 * 8, 4097);
+    store64(&_deflate_dist_base + 25 * 8, 6145);
+    store64(&_deflate_dist_base + 26 * 8, 8193);
+    store64(&_deflate_dist_base + 27 * 8, 12289);
+    store64(&_deflate_dist_base + 28 * 8, 16385);
+    store64(&_deflate_dist_base + 29 * 8, 24577);
+
+    # Distance extra bits: 0,0,0,0, 1,1, 2,2, 3,3, ..., 13,13
+    store64(&_deflate_dist_extra + 0 * 8, 0);
+    store64(&_deflate_dist_extra + 1 * 8, 0);
+    store64(&_deflate_dist_extra + 2 * 8, 0);
+    store64(&_deflate_dist_extra + 3 * 8, 0);
+    i = 4;
+    eb = 1;
+    while (i < 30) {
+        store64(&_deflate_dist_extra + i * 8, eb);
+        store64(&_deflate_dist_extra + (i + 1) * 8, eb);
+        i = i + 2;
+        eb = eb + 1;
+    }
+
+    _deflate_tables_built = 1;
+    return 0;
+}
+
+# Decode a compressed block (fixed or dynamic Huffman).
+# br: bitreader
+# dst: output buffer
+# dp: current output position
+# dst_cap: output capacity
+# Returns: new dp, or negative error.
+fn _deflate_decode_block(br, dst, dp, dst_cap) {
+    while (1) {
+        var sym = huff_decode_litlen(br);
+        if (sym < 0) { return sym; }
+
+        if (sym < 256) {
+            # Literal byte
+            if (dp >= dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+            if (dp >= DECOMPRESS_MAX_OUTPUT) { return 0 - ERR_OUTPUT_LIMIT; }
+            store8(dst + dp, sym);
+            dp = dp + 1;
+        } elif (sym == 256) {
+            # End of block
+            return dp;
+        } else {
+            # Length/distance pair
+            var len_idx = sym - 257;
+            if (len_idx >= 29) { return 0 - ERR_CORRUPT_DATA; }
+
+            var length = load64(&_deflate_len_base + len_idx * 8);
+            var extra = load64(&_deflate_len_extra + len_idx * 8);
+            if (extra > 0) {
+                var eb = br_read(br, extra);
+                if (eb < 0) { return eb; }
+                length = length + eb;
+            }
+
+            # Decode distance
+            var dist_sym = huff_decode_dist(br);
+            if (dist_sym < 0) { return dist_sym; }
+            if (dist_sym >= 30) { return 0 - ERR_CORRUPT_DATA; }
+
+            var distance = load64(&_deflate_dist_base + dist_sym * 8);
+            var dextra = load64(&_deflate_dist_extra + dist_sym * 8);
+            if (dextra > 0) {
+                var deb = br_read(br, dextra);
+                if (deb < 0) { return deb; }
+                distance = distance + deb;
+            }
+
+            # Copy from output window
+            if (distance > dp) { return 0 - ERR_MATCH_OUT_OF_RANGE; }
+            if (dp + length > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+            if (dp + length > DECOMPRESS_MAX_OUTPUT) { return 0 - ERR_OUTPUT_LIMIT; }
+
+            var src_pos = dp - distance;
+            var i = 0;
+            while (i < length) {
+                store8(dst + dp, load8(dst + src_pos));
+                dp = dp + 1;
+                src_pos = src_pos + 1;
+                i = i + 1;
+            }
+        }
+    }
+
+    return dp;
+}
+
+# Read dynamic Huffman tables from the stream (RFC 1951 Section 3.2.7).
+fn _deflate_read_dynamic(br) {
+    var hlit = br_read(br, 5);
+    if (hlit < 0) { return hlit; }
+    hlit = hlit + 257;  # number of literal/length codes
+
+    var hdist = br_read(br, 5);
+    if (hdist < 0) { return hdist; }
+    hdist = hdist + 1;  # number of distance codes
+
+    var hclen = br_read(br, 4);
+    if (hclen < 0) { return hclen; }
+    hclen = hclen + 4;  # number of code length codes
+
+    # Code length alphabet order (RFC 1951 Section 3.2.7)
+    # 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+    var cl_order[152];  # 19 * 8
+    store64(&cl_order + 0 * 8, 16);
+    store64(&cl_order + 1 * 8, 17);
+    store64(&cl_order + 2 * 8, 18);
+    store64(&cl_order + 3 * 8, 0);
+    store64(&cl_order + 4 * 8, 8);
+    store64(&cl_order + 5 * 8, 7);
+    store64(&cl_order + 6 * 8, 9);
+    store64(&cl_order + 7 * 8, 6);
+    store64(&cl_order + 8 * 8, 10);
+    store64(&cl_order + 9 * 8, 5);
+    store64(&cl_order + 10 * 8, 11);
+    store64(&cl_order + 11 * 8, 4);
+    store64(&cl_order + 12 * 8, 12);
+    store64(&cl_order + 13 * 8, 3);
+    store64(&cl_order + 14 * 8, 13);
+    store64(&cl_order + 15 * 8, 2);
+    store64(&cl_order + 16 * 8, 14);
+    store64(&cl_order + 17 * 8, 1);
+    store64(&cl_order + 18 * 8, 15);
+
+    # Read code length code lengths
+    var cl_lens[152];  # 19 * 8
+    var i = 0;
+    while (i < 19) {
+        store64(&cl_lens + i * 8, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < hclen) {
+        var val = br_read(br, 3);
+        if (val < 0) { return val; }
+        var idx = load64(&cl_order + i * 8);
+        store64(&cl_lens + idx * 8, val);
+        i = i + 1;
+    }
+
+    # Build code-length Huffman table
+    huff_build_cl(&cl_lens, 19);
+
+    # Decode literal/length + distance code lengths
+    var total = hlit + hdist;
+    var all_lens[4672];  # 584 * 8 (max hlit=286 + hdist=32 = 318, but allow 320+)
+    var rep = 0;
+    var j = 0;
+    var prev = 0;
+    i = 0;
+    while (i < total) {
+        var sym = huff_decode_cl(br);
+        if (sym < 0) { return sym; }
+
+        if (sym <= 15) {
+            # Literal code length
+            store64(&all_lens + i * 8, sym);
+            i = i + 1;
+        } elif (sym == 16) {
+            # Repeat previous 3-6 times
+            if (i == 0) { return 0 - ERR_CORRUPT_DATA; }
+            rep = br_read(br, 2);
+            if (rep < 0) { return rep; }
+            rep = rep + 3;
+            prev = load64(&all_lens + (i - 1) * 8);
+            j = 0;
+            while (j < rep) {
+                if (i >= total) { return 0 - ERR_CORRUPT_DATA; }
+                store64(&all_lens + i * 8, prev);
+                i = i + 1;
+                j = j + 1;
+            }
+        } elif (sym == 17) {
+            # Repeat 0 for 3-10 times
+            rep = br_read(br, 3);
+            if (rep < 0) { return rep; }
+            rep = rep + 3;
+            j = 0;
+            while (j < rep) {
+                if (i >= total) { return 0 - ERR_CORRUPT_DATA; }
+                store64(&all_lens + i * 8, 0);
+                i = i + 1;
+                j = j + 1;
+            }
+        } elif (sym == 18) {
+            # Repeat 0 for 11-138 times
+            rep = br_read(br, 7);
+            if (rep < 0) { return rep; }
+            rep = rep + 11;
+            j = 0;
+            while (j < rep) {
+                if (i >= total) { return 0 - ERR_CORRUPT_DATA; }
+                store64(&all_lens + i * 8, 0);
+                i = i + 1;
+                j = j + 1;
+            }
+        } else {
+            return 0 - ERR_INVALID_HUFFMAN;
+        }
+    }
+
+    # Split into literal/length and distance tables, build both
+    huff_build_litlen(&all_lens, hlit);
+    huff_build_dist(&all_lens + hlit * 8, hdist);
+
+    return 0;
+}
+
+# Bytes consumed by the last deflate_decompress call.
+# Wrappers (zlib, gzip) use this to find the trailer position.
+var _deflate_bytes_consumed = 0;
+
+# Return bytes consumed by the last deflate_decompress call.
+fn deflate_bytes_consumed() {
+    return _deflate_bytes_consumed;
+}
+
+# Decompress a DEFLATE stream.
+# src: pointer to compressed data (raw DEFLATE, no zlib/gzip wrapper)
+# src_len: length of compressed data
+# dst: pointer to output buffer
+# dst_cap: capacity of output buffer
+# Returns: decompressed length, or negative error code.
+fn deflate_decompress(src, src_len, dst, dst_cap) {
+    _deflate_init_tables();
+
+    var br = br_init(src, src_len);
+    var dp = 0;
+    var bfinal = 0;
+
+    while (bfinal == 0) {
+        bfinal = br_read(br, 1);
+        if (bfinal < 0) { return bfinal; }
+
+        var btype = br_read(br, 2);
+        if (btype < 0) { return btype; }
+
+        if (btype == 0) {
+            # Uncompressed block
+            br_align(br);
+            var len = br_read(br, 16);
+            if (len < 0) { return len; }
+            var nlen = br_read(br, 16);
+            if (nlen < 0) { return nlen; }
+            # nlen should be one's complement of len
+            if ((len ^ nlen) != 65535) { return 0 - ERR_CORRUPT_DATA; }
+
+            if (dp + len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+            # Copy raw bytes from the stream
+            var data = load64(br);
+            var bpos = load64(br + 8);
+            var i = 0;
+            while (i < len) {
+                store8(dst + dp, load8(data + bpos));
+                dp = dp + 1;
+                bpos = bpos + 1;
+                i = i + 1;
+            }
+            store64(br + 8, bpos);
+
+        } elif (btype == 1) {
+            # Fixed Huffman codes
+            huff_build_fixed();
+            dp = _deflate_decode_block(br, dst, dp, dst_cap);
+            if (dp < 0) { return dp; }
+
+        } elif (btype == 2) {
+            # Dynamic Huffman codes
+            var rc = _deflate_read_dynamic(br);
+            if (rc < 0) { return rc; }
+            dp = _deflate_decode_block(br, dst, dp, dst_cap);
+            if (dp < 0) { return dp; }
+
+        } else {
+            # btype == 3 is reserved/invalid
+            return 0 - ERR_INVALID_BLOCK_TYPE;
+        }
+    }
+
+    _deflate_bytes_consumed = br_bytes_consumed(br);
+    return dp;
+}
+
+# Decompress a DEFLATE stream with a preset dictionary.
+# The dictionary is placed at the start of the output buffer so
+# back-references can reach into it. Returns only the decompressed
+# byte count (excluding the dictionary prefix).
+# dict_len must be <= DEFLATE_WINDOW_SIZE (32768).
+fn deflate_decompress_dict(src, src_len, dst, dst_cap, dict, dict_len) {
+    if (dict_len > DEFLATE_WINDOW_SIZE) { return 0 - ERR_INVALID_INPUT; }
+    if (dict_len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+    # Copy dictionary into the start of the output buffer
+    var i = 0;
+    while (i < dict_len) {
+        store8(dst + i, load8(dict + i));
+        i = i + 1;
+    }
+
+    _deflate_init_tables();
+    var br = br_init(src, src_len);
+    var dp = dict_len;
+    var bfinal = 0;
+
+    while (bfinal == 0) {
+        bfinal = br_read(br, 1);
+        if (bfinal < 0) { return bfinal; }
+
+        var btype = br_read(br, 2);
+        if (btype < 0) { return btype; }
+
+        if (btype == 0) {
+            br_align(br);
+            var len = br_read(br, 16);
+            if (len < 0) { return len; }
+            var nlen = br_read(br, 16);
+            if (nlen < 0) { return nlen; }
+            if ((len ^ nlen) != 65535) { return 0 - ERR_CORRUPT_DATA; }
+            if (dp + len > dst_cap) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+            var data = load64(br);
+            var bpos = load64(br + 8);
+            i = 0;
+            while (i < len) {
+                store8(dst + dp, load8(data + bpos));
+                dp = dp + 1;
+                bpos = bpos + 1;
+                i = i + 1;
+            }
+            store64(br + 8, bpos);
+
+        } elif (btype == 1) {
+            huff_build_fixed();
+            dp = _deflate_decode_block(br, dst, dp, dst_cap);
+            if (dp < 0) { return dp; }
+
+        } elif (btype == 2) {
+            var rc = _deflate_read_dynamic(br);
+            if (rc < 0) { return rc; }
+            dp = _deflate_decode_block(br, dst, dp, dst_cap);
+            if (dp < 0) { return dp; }
+
+        } else {
+            return 0 - ERR_INVALID_BLOCK_TYPE;
+        }
+    }
+
+    _deflate_bytes_consumed = br_bytes_consumed(br);
+
+    # Move decompressed output to start of buffer (over the dictionary prefix)
+    var dlen = dp - dict_len;
+    i = 0;
+    while (i < dlen) {
+        store8(dst + i, load8(dst + dict_len + i));
+        i = i + 1;
+    }
+    return dlen;
+}
+
+# ================================================================
+# DEFLATE compression (Phase 3)
+# ================================================================
+#
+# Uses fixed Huffman codes for simplicity and reasonable compression.
+# The LZ77 match-finder handles finding back-references.
+
+# Fixed Huffman code table for literals/lengths (pre-reversed for LSB-first output).
+# We compute these once and cache them.
+var _deflate_enc_fixed_built = 0;
+var _deflate_enc_lit_codes = 0;  # heap: 288 * 8
+var _deflate_enc_lit_lens = 0;   # heap: 288 * 8
+
+fn _deflate_build_enc_fixed() {
+    if (_deflate_enc_fixed_built == 1) { return 0; }
+    if (_deflate_enc_lit_codes == 0) {
+        _deflate_enc_lit_codes = alloc(2304);
+        _deflate_enc_lit_lens = alloc(2304);
+    }
+    var i = 0;
+    while (i <= 143) {
+        store64(_deflate_enc_lit_lens +i * 8, 8);
+        i = i + 1;
+    }
+    while (i <= 255) {
+        store64(_deflate_enc_lit_lens +i * 8, 9);
+        i = i + 1;
+    }
+    while (i <= 279) {
+        store64(_deflate_enc_lit_lens +i * 8, 7);
+        i = i + 1;
+    }
+    while (i <= 287) {
+        store64(_deflate_enc_lit_lens +i * 8, 8);
+        i = i + 1;
+    }
+
+    # Build canonical codes (same algorithm as _huff_build step 1-3)
+    var bl_count[128];
+    i = 0;
+    while (i < 16) { store64(&bl_count + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < 288) {
+        var len = load64(_deflate_enc_lit_lens +i * 8);
+        store64(&bl_count + len * 8, load64(&bl_count + len * 8) + 1);
+        i = i + 1;
+    }
+
+    var next_code[128];
+    store64(&next_code, 0);
+    store64(&next_code + 8, 0);
+    var code = 0;
+    var bits = 1;
+    while (bits <= 15) {
+        code = (code + load64(&bl_count + (bits - 1) * 8)) << 1;
+        store64(&next_code + bits * 8, code);
+        bits = bits + 1;
+    }
+
+    i = 0;
+    while (i < 288) {
+        var len = load64(_deflate_enc_lit_lens +i * 8);
+        if (len > 0) {
+            var c = load64(&next_code + len * 8);
+            store64(&next_code + len * 8, c + 1);
+            # Reverse bits for LSB-first output
+            var rev = 0;
+            var b = 0;
+            var tmp = c;
+            while (b < len) {
+                rev = (rev << 1) | (tmp & 1);
+                tmp = tmp >> 1;
+                b = b + 1;
+            }
+            store64(_deflate_enc_lit_codes +i * 8, rev);
+        } else {
+            store64(_deflate_enc_lit_codes +i * 8, 0);
+        }
+        i = i + 1;
+    }
+
+    _deflate_enc_fixed_built = 1;
+    return 0;
+}
+
+# Fixed distance codes: all 5 bits, codes 0-29.
+var _deflate_enc_dist_codes = 0;  # heap: 30 * 8
+
+fn _deflate_build_enc_dist() {
+    if (_deflate_enc_dist_codes == 0) {
+        _deflate_enc_dist_codes = alloc(240);
+    }
+    var i = 0;
+    while (i < 30) {
+        # Reverse 5 bits of i
+        var rev = 0;
+        var v = i;
+        var b = 0;
+        while (b < 5) {
+            rev = (rev << 1) | (v & 1);
+            v = v >> 1;
+            b = b + 1;
+        }
+        store64(_deflate_enc_dist_codes +i * 8, rev);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Direct lookup table: length (3-258) → code index (0-28).
+# 256 entries covers lengths 3-258 (index by length - 3).
+var _deflate_len_lookup = 0;  # heap: 256 * 8
+var _deflate_len_lookup_built = 0;
+
+fn _deflate_build_len_lookup() {
+    if (_deflate_len_lookup_built == 1) { return 0; }
+    if (_deflate_len_lookup == 0) { _deflate_len_lookup = alloc(2048); }
+    _deflate_init_tables();
+    var len = 3;
+    while (len <= 258) {
+        var i = 28;
+        while (i >= 0) {
+            if (len >= load64(&_deflate_len_base + i * 8)) {
+                store64(_deflate_len_lookup +(len - 3) * 8, i);
+                i = 0 - 1;  # break
+            }
+            i = i - 1;
+        }
+        len = len + 1;
+    }
+    _deflate_len_lookup_built = 1;
+    return 0;
+}
+
+# Direct lookup table: distance (1-32768) → code index (0-29).
+# Too large for a flat table, so use a tiered approach:
+# distances 1-256 → flat table, distances 257+ → binary search on 15 entries.
+var _deflate_dist_lookup = 0;  # heap: 256 * 8
+var _deflate_dist_lookup_built = 0;
+
+fn _deflate_build_dist_lookup() {
+    if (_deflate_dist_lookup_built == 1) { return 0; }
+    if (_deflate_dist_lookup == 0) { _deflate_dist_lookup = alloc(2048); }
+    _deflate_init_tables();
+    var d = 1;
+    while (d <= 256) {
+        var i = 29;
+        while (i >= 0) {
+            if (d >= load64(&_deflate_dist_base + i * 8)) {
+                store64(_deflate_dist_lookup +(d - 1) * 8, i);
+                i = 0 - 1;
+            }
+            i = i - 1;
+        }
+        d = d + 1;
+    }
+    _deflate_dist_lookup_built = 1;
+    return 0;
+}
+
+fn _deflate_len_code(length) {
+    _deflate_build_len_lookup();
+    return load64(_deflate_len_lookup +(length - 3) * 8);
+}
+
+fn _deflate_dist_code(dist) {
+    if (dist <= 256) {
+        _deflate_build_dist_lookup();
+        return load64(_deflate_dist_lookup +(dist - 1) * 8);
+    }
+    # Distances > 256: binary search on the upper 15 codes (15-29)
+    _deflate_init_tables();
+    var lo = 14;
+    var hi = 29;
+    while (lo < hi) {
+        var mid = (lo + hi + 1) >> 1;
+        if (dist >= load64(&_deflate_dist_base + mid * 8)) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return lo;
+}
+
+# Write a literal byte using fixed Huffman codes.
+fn _deflate_write_literal(bw, byte) {
+    var code = load64(_deflate_enc_lit_codes +byte * 8);
+    var len = load64(_deflate_enc_lit_lens +byte * 8);
+    return bw_write(bw, code, len);
+}
+
+# Write end-of-block symbol (256).
+fn _deflate_write_eob(bw) {
+    var code = load64(_deflate_enc_lit_codes +256 * 8);
+    var len = load64(_deflate_enc_lit_lens +256 * 8);
+    return bw_write(bw, code, len);
+}
+
+# Write a length/distance pair using fixed Huffman codes.
+fn _deflate_write_match(bw, length, distance) {
+    # Encode length
+    var li = _deflate_len_code(length);
+    var sym = li + 257;
+    var code = load64(_deflate_enc_lit_codes +sym * 8);
+    var clen = load64(_deflate_enc_lit_lens +sym * 8);
+    var rc = bw_write(bw, code, clen);
+    if (rc < 0) { return rc; }
+
+    # Extra bits for length
+    var extra = load64(&_deflate_len_extra + li * 8);
+    if (extra > 0) {
+        var base = load64(&_deflate_len_base + li * 8);
+        rc = bw_write(bw, length - base, extra);
+        if (rc < 0) { return rc; }
+    }
+
+    # Encode distance (fixed: 5 bits, reversed)
+    var di = _deflate_dist_code(distance);
+    var dcode = load64(_deflate_enc_dist_codes +di * 8);
+    rc = bw_write(bw, dcode, 5);
+    if (rc < 0) { return rc; }
+
+    # Extra bits for distance
+    var dextra = load64(&_deflate_dist_extra + di * 8);
+    if (dextra > 0) {
+        var dbase = load64(&_deflate_dist_base + di * 8);
+        rc = bw_write(bw, distance - dbase, dextra);
+        if (rc < 0) { return rc; }
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Dynamic Huffman block encoding
+# ================================================================
+
+# Symbol buffer for two-pass encoding.
+# Each entry: low 16 bits = symbol (literal 0-255, or length code 257-285, or 256=EOB)
+# For length/distance pairs: stored as two consecutive entries:
+#   entry 1: length symbol (257-285) | (extra_bits << 16) | (extra_val << 24)
+#   entry 2: distance symbol (0-29) | (extra_bits << 16) | (extra_val << 24)
+# We pack: symbol in bits 0-15, extra_count in bits 16-19, extra_value in bits 20-51
+
+var _dyn_sym_buf = 0;      # heap-allocated symbol buffer
+var _dyn_sym_count = 0;
+enum DynEnc {
+    DYN_SYM_MAX = 16384;  # max symbols we buffer
+}
+
+fn _dyn_pack(sym, extra_bits, extra_val) {
+    return (sym & 65535) | ((extra_bits & 15) << 16) | ((extra_val & 4294967295) << 20);
+}
+
+fn _dyn_sym(packed) { return packed & 65535; }
+fn _dyn_extra_bits(packed) { return (packed >> 16) & 15; }
+fn _dyn_extra_val(packed) { return (packed >> 20) & 4294967295; }
+
+# Write the dynamic Huffman block header (RFC 1951 Section 3.2.7).
+# lit_lens: code lengths for literal/length alphabet (hlit entries)
+# dist_lens: code lengths for distance alphabet (hdist entries)
+# hlit: number of literal/length codes (257-286)
+# hdist: number of distance codes (1-32)
+# Pre-allocated workspace for dynamic header writing
+var _dh_ws = 0;
+
+fn _deflate_write_dynamic_header(bw, lit_lens, hlit, dist_lens, hdist) {
+    # Heap workspace: all_lens(2560) + cl_syms(2560) + cl_extra(2560) + cl_ebits(2560)
+    #   + cl_freqs(152) + cl_lens_opt(152) + cl_codes_opt(152) + cl_order(152) = 10848
+    if (_dh_ws == 0) { _dh_ws = alloc(10848); }
+    var all_lens = _dh_ws;
+    var total = hlit + hdist;
+    var i = 0;
+    while (i < hlit) {
+        store64(all_lens + i * 8, load64(lit_lens + i * 8));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < hdist) {
+        store64(all_lens + (hlit + i) * 8, load64(dist_lens + i * 8));
+        i = i + 1;
+    }
+
+    # RLE-encode the combined lengths into a symbol stream
+    # Symbols: 0-15 = literal length, 16 = repeat prev, 17 = repeat 0 short, 18 = repeat 0 long
+    var cl_syms = _dh_ws + 2560;
+    var cl_extra = _dh_ws + 5120;
+    var cl_ebits = _dh_ws + 7680;
+    var cl_count = 0;
+
+    i = 0;
+    while (i < total) {
+        var val = load64(all_lens + i * 8);
+
+        # Count run of same value
+        var run = 1;
+        while (i + run < total && load64(all_lens + (i + run) * 8) == val) {
+            run = run + 1;
+        }
+
+        if (val == 0) {
+            while (run > 0) {
+                if (run >= 11) {
+                    var r = run;
+                    if (r > 138) { r = 138; }
+                    store64(cl_syms + cl_count * 8, 18);
+                    store64(cl_extra + cl_count * 8, r - 11);
+                    store64(cl_ebits + cl_count * 8, 7);
+                    cl_count = cl_count + 1;
+                    run = run - r;
+                    i = i + r;
+                } elif (run >= 3) {
+                    var r = run;
+                    if (r > 10) { r = 10; }
+                    store64(cl_syms + cl_count * 8, 17);
+                    store64(cl_extra + cl_count * 8, r - 3);
+                    store64(cl_ebits + cl_count * 8, 3);
+                    cl_count = cl_count + 1;
+                    run = run - r;
+                    i = i + r;
+                } else {
+                    store64(cl_syms + cl_count * 8, 0);
+                    store64(cl_extra + cl_count * 8, 0);
+                    store64(cl_ebits + cl_count * 8, 0);
+                    cl_count = cl_count + 1;
+                    run = run - 1;
+                    i = i + 1;
+                }
+            }
+        } else {
+            # Emit the value itself first
+            store64(cl_syms + cl_count * 8, val);
+            store64(cl_extra + cl_count * 8, 0);
+            store64(cl_ebits + cl_count * 8, 0);
+            cl_count = cl_count + 1;
+            run = run - 1;
+            i = i + 1;
+
+            # Repeat with code 16
+            while (run > 0) {
+                if (run >= 3) {
+                    var r = run;
+                    if (r > 6) { r = 6; }
+                    store64(cl_syms + cl_count * 8, 16);
+                    store64(cl_extra + cl_count * 8, r - 3);
+                    store64(cl_ebits + cl_count * 8, 2);
+                    cl_count = cl_count + 1;
+                    run = run - r;
+                    i = i + r;
+                } else {
+                    store64(cl_syms + cl_count * 8, val);
+                    store64(cl_extra + cl_count * 8, 0);
+                    store64(cl_ebits + cl_count * 8, 0);
+                    cl_count = cl_count + 1;
+                    run = run - 1;
+                    i = i + 1;
+                }
+            }
+        }
+    }
+
+    # Count frequencies of code-length symbols (0-18)
+    # Use heap workspace at offset 10240 for cl_freqs/cl_lens_opt/cl_codes_opt/cl_order
+    var cl_freqs = _dh_ws + 10240;
+    var cl_lens_opt = _dh_ws + 10240 + 152;
+    var cl_codes_opt = _dh_ws + 10240 + 304;
+    var cl_order = _dh_ws + 10240 + 456;
+    i = 0;
+    while (i < 19) { store64(cl_freqs + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < cl_count) {
+        var s = load64(cl_syms + i * 8);
+        store64(cl_freqs + s * 8, load64(cl_freqs + s * 8) + 1);
+        i = i + 1;
+    }
+
+    # Build code-length Huffman tree
+    huff_compute_lengths(cl_freqs, 19, cl_lens_opt, 2);
+
+    # Build canonical codes for the code-length alphabet
+    _huff_alloc_tables();
+    _huff_build(cl_lens_opt, 19, cl_codes_opt, _huff_cl_fast);
+
+    # Determine HCLEN: how many code-length codes to transmit
+    # Order: 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+    store64(cl_order + 0 * 8, 16); store64(cl_order + 1 * 8, 17);
+    store64(cl_order + 2 * 8, 18); store64(cl_order + 3 * 8, 0);
+    store64(cl_order + 4 * 8, 8);  store64(cl_order + 5 * 8, 7);
+    store64(cl_order + 6 * 8, 9);  store64(cl_order + 7 * 8, 6);
+    store64(cl_order + 8 * 8, 10); store64(cl_order + 9 * 8, 5);
+    store64(cl_order + 10 * 8, 11); store64(cl_order + 11 * 8, 4);
+    store64(cl_order + 12 * 8, 12); store64(cl_order + 13 * 8, 3);
+    store64(cl_order + 14 * 8, 13); store64(cl_order + 15 * 8, 2);
+    store64(cl_order + 16 * 8, 14); store64(cl_order + 17 * 8, 1);
+    store64(cl_order + 18 * 8, 15);
+
+    var hclen = 19;
+    while (hclen > 4) {
+        var idx = load64(cl_order + (hclen - 1) * 8);
+        if (load64(cl_lens_opt + idx * 8) != 0) { break; }
+        hclen = hclen - 1;
+    }
+
+    # Write header fields
+    var rc = bw_write(bw, hlit - 257, 5);
+    if (rc < 0) { return rc; }
+    rc = bw_write(bw, hdist - 1, 5);
+    if (rc < 0) { return rc; }
+    rc = bw_write(bw, hclen - 4, 4);
+    if (rc < 0) { return rc; }
+
+    # Write code-length code lengths (3 bits each, in spec order)
+    i = 0;
+    while (i < hclen) {
+        var idx = load64(cl_order + i * 8);
+        rc = bw_write(bw, load64(cl_lens_opt + idx * 8), 3);
+        if (rc < 0) { return rc; }
+        i = i + 1;
+    }
+
+    # Write the RLE-encoded code lengths using the code-length Huffman codes
+    i = 0;
+    while (i < cl_count) {
+        var s = load64(cl_syms + i * 8);
+        var clen = load64(cl_lens_opt + s * 8);
+        var code = load64(cl_codes_opt + s * 8);
+        # Reverse bits for LSB-first
+        var rev = 0;
+        var v = code;
+        var b = 0;
+        while (b < clen) { rev = (rev << 1) | (v & 1); v = v >> 1; b = b + 1; }
+        rc = bw_write(bw, rev, clen);
+        if (rc < 0) { return rc; }
+
+        # Write extra bits if any
+        var eb = load64(cl_ebits + i * 8);
+        if (eb > 0) {
+            rc = bw_write(bw, load64(cl_extra + i * 8), eb);
+            if (rc < 0) { return rc; }
+        }
+        i = i + 1;
+    }
+
+    return 0;
+}
+
+# Encode buffered symbols using given code tables.
+fn _deflate_write_syms_dynamic(bw, lit_lens, lit_codes, dist_lens, dist_codes) {
+    var i = 0;
+    while (i < _dyn_sym_count) {
+        var packed = load64(_dyn_sym_buf + i * 8);
+        var sym = _dyn_sym(packed);
+
+        if (sym < 256 || sym == 256) {
+            # Literal or EOB — use litlen codes
+            var clen = load64(lit_lens + sym * 8);
+            var code = load64(lit_codes + sym * 8);
+            var rev = 0;
+            var v = code;
+            var b = 0;
+            while (b < clen) { rev = (rev << 1) | (v & 1); v = v >> 1; b = b + 1; }
+            var rc = bw_write(bw, rev, clen);
+            if (rc < 0) { return rc; }
+            i = i + 1;
+        } else {
+            # Length symbol (257-285) + extra, followed by distance symbol + extra
+            var clen = load64(lit_lens + sym * 8);
+            var code = load64(lit_codes + sym * 8);
+            var rev = 0;
+            var v = code;
+            var b = 0;
+            while (b < clen) { rev = (rev << 1) | (v & 1); v = v >> 1; b = b + 1; }
+            var rc = bw_write(bw, rev, clen);
+            if (rc < 0) { return rc; }
+            # Length extra bits
+            var eb = _dyn_extra_bits(packed);
+            if (eb > 0) {
+                rc = bw_write(bw, _dyn_extra_val(packed), eb);
+                if (rc < 0) { return rc; }
+            }
+
+            # Distance symbol is next entry
+            i = i + 1;
+            packed = load64(_dyn_sym_buf + i * 8);
+            var dsym = _dyn_sym(packed);
+            clen = load64(dist_lens + dsym * 8);
+            code = load64(dist_codes + dsym * 8);
+            rev = 0;
+            v = code;
+            b = 0;
+            while (b < clen) { rev = (rev << 1) | (v & 1); v = v >> 1; b = b + 1; }
+            rc = bw_write(bw, rev, clen);
+            if (rc < 0) { return rc; }
+            eb = _dyn_extra_bits(packed);
+            if (eb > 0) {
+                rc = bw_write(bw, _dyn_extra_val(packed), eb);
+                if (rc < 0) { return rc; }
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# Block size for multi-block DEFLATE compression.
+# Large block size avoids per-block Huffman tree overhead on typical inputs.
+# Only splits when input exceeds this threshold (the dynamic path also
+# splits when its symbol buffer fills). For adaptive block splitting,
+# this would be replaced with a cost-based flush heuristic.
+enum DeflateBlock {
+    DEFLATE_BLOCK_SIZE = 1048576;  # 1MB — single block for most inputs
+}
+
+# Compress data into a raw DEFLATE stream.
+fn deflate_compress(src, src_len, dst, dst_cap) {
+    return deflate_compress_level(src, src_len, dst, dst_cap, 1);
+}
+
+# Compress with explicit level (1=fast, 6=default, 9=best).
+# Levels 1-3 use fixed Huffman, levels 4-9 use dynamic Huffman.
+# Inputs larger than 32K are split into multiple blocks.
+fn deflate_compress_level(src, src_len, dst, dst_cap, level) {
+    _deflate_init_tables();
+    lz77_set_level(level);
+    lz77_init();
+
+    var bw = bw_init(dst, dst_cap);
+    var sp = 0;
+
+    while (sp < src_len || sp == 0) {
+        var block_end = sp + DEFLATE_BLOCK_SIZE;
+        if (block_end > src_len) { block_end = src_len; }
+        var bfinal = 0;
+        if (block_end >= src_len) { bfinal = 1; }
+
+        var rc = 0;
+        if (level >= 4) {
+            rc = _deflate_compress_dynamic_block(bw, src, src_len, sp, block_end, bfinal);
+        } else {
+            rc = _deflate_compress_fixed_block(bw, src, src_len, sp, block_end, bfinal);
+        }
+        if (rc < 0) { return rc; }
+        sp = block_end;
+        if (bfinal == 1) { break; }
+    }
+
+    return bw_finish(bw);
+}
+
+# Emit one fixed Huffman block covering src[sp_start..sp_end).
+# LZ77 match-finder operates on the full src (back-refs can span blocks).
+fn _deflate_compress_fixed_block(bw, src, src_len, sp_start, sp_end, bfinal) {
+    _deflate_build_enc_fixed();
+    _deflate_build_enc_dist();
+
+    var rc = bw_write(bw, bfinal, 1);
+    if (rc < 0) { return rc; }
+    rc = bw_write(bw, 1, 2);      # BTYPE = 01
+    if (rc < 0) { return rc; }
+
+    var sp = sp_start;
+    var prev_match = 0;
+    var prev_dist = 0;
+    var use_lazy = (_lz77_chain_depth >= 16);
+
+    while (sp < sp_end) {
+        var mresult = 0;
+        if (sp + LZ77_MIN_MATCH <= src_len) {
+            mresult = _lz77_find_match(src, src_len, sp);
+            _lz77_insert(src, sp);
+        }
+
+        var cur_len = 0;
+        var cur_dist = 0;
+        if (mresult > 0) {
+            cur_len = mresult & 65535;
+            cur_dist = mresult >> 16;
+        }
+
+        if (prev_match > 0) {
+            if (use_lazy == 1 && cur_len > prev_match) {
+                rc = _deflate_write_literal(bw, load8(src + sp - 1));
+                if (rc < 0) { return rc; }
+                prev_match = cur_len;
+                prev_dist = cur_dist;
+                sp = sp + 1;
+                continue;
+            }
+            rc = _deflate_write_match(bw, prev_match, prev_dist);
+            if (rc < 0) { return rc; }
+            var k = 1;
+            while (k < prev_match) {
+                if (sp - 1 + k + LZ77_MIN_MATCH <= src_len) {
+                    _lz77_insert(src, sp - 1 + k);
+                }
+                k = k + 1;
+            }
+            sp = sp - 1 + prev_match;
+            prev_match = 0;
+            continue;
+        }
+
+        if (cur_len > 0) {
+            if (use_lazy == 1) {
+                prev_match = cur_len;
+                prev_dist = cur_dist;
+                sp = sp + 1;
+                continue;
+            }
+            rc = _deflate_write_match(bw, cur_len, cur_dist);
+            if (rc < 0) { return rc; }
+            var k = 1;
+            while (k < cur_len) {
+                if (sp + k + LZ77_MIN_MATCH <= src_len) {
+                    _lz77_insert(src, sp + k);
+                }
+                k = k + 1;
+            }
+            sp = sp + cur_len;
+            continue;
+        }
+
+        rc = _deflate_write_literal(bw, load8(src + sp));
+        if (rc < 0) { return rc; }
+        sp = sp + 1;
+    }
+
+    if (prev_match > 0) {
+        rc = _deflate_write_match(bw, prev_match, prev_dist);
+        if (rc < 0) { return rc; }
+    }
+
+    rc = _deflate_write_eob(bw);
+    if (rc < 0) { return rc; }
+    return 0;
+}
+
+# Dynamic Huffman compression (better ratio, levels 4-9).
+# Two-pass: 1) collect LZ77 symbols, 2) build optimal trees, 3) encode.
+# Pre-allocated workspace for dynamic compress
+var _dyn_lit_freq = 0;
+var _dyn_dist_freq = 0;
+var _dyn_opt_lit_lens = 0;
+var _dyn_opt_dist_lens = 0;
+var _dyn_opt_lit_codes = 0;
+var _dyn_opt_dist_codes = 0;
+var _dyn_lit_fast_tmp = 0;
+var _dyn_dist_fast_tmp = 0;
+
+fn _deflate_alloc_dynamic_ws() {
+    if (_dyn_sym_buf == 0) {
+        _dyn_sym_buf = alloc(DYN_SYM_MAX * 8);
+    }
+    if (_dyn_lit_freq == 0) {
+        _dyn_lit_freq = alloc(2304);
+        _dyn_dist_freq = alloc(240);
+        _dyn_opt_lit_lens = alloc(2304);
+        _dyn_opt_dist_lens = alloc(240);
+        _dyn_opt_lit_codes = alloc(2304);
+        _dyn_opt_dist_codes = alloc(240);
+        _dyn_lit_fast_tmp = alloc(4096);
+        _dyn_dist_fast_tmp = alloc(4096);
+    }
+    return 0;
+}
+
+# Emit one dynamic Huffman block covering src[sp_start..sp_end).
+fn _deflate_compress_dynamic_block(bw, src, src_len, sp_start, sp_end, bfinal) {
+    _deflate_alloc_dynamic_ws();
+    _dyn_sym_count = 0;
+
+    var lit_freq = _dyn_lit_freq;
+    var dist_freq = _dyn_dist_freq;
+    var i = 0;
+    while (i < 288) { store64(lit_freq + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < 30) { store64(dist_freq + i * 8, 0); i = i + 1; }
+
+    # Pass 1: run LZ77 and collect symbols + frequencies for this block
+    var sp = sp_start;
+    while (sp < sp_end) {
+        if (_dyn_sym_count >= DYN_SYM_MAX - 2) {
+            # Buffer full — emit as fixed block instead
+            _dyn_sym_count = 0;
+            return _deflate_compress_fixed_block(bw, src, src_len, sp_start, sp_end, bfinal);
+        }
+
+        if (sp + LZ77_MIN_MATCH <= src_len) {
+            var mresult = _lz77_find_match(src, src_len, sp);
+            _lz77_insert(src, sp);
+
+            if (mresult > 0) {
+                var mlen = mresult & 65535;
+                var mdist = mresult >> 16;
+
+                if (mlen >= LZ77_MIN_MATCH) {
+                    var li = _deflate_len_code(mlen);
+                    var lsym = li + 257;
+                    var lextra = load64(&_deflate_len_extra + li * 8);
+                    var lbase = load64(&_deflate_len_base + li * 8);
+                    store64(_dyn_sym_buf + _dyn_sym_count * 8,
+                            _dyn_pack(lsym, lextra, mlen - lbase));
+                    _dyn_sym_count = _dyn_sym_count + 1;
+                    store64(lit_freq + lsym * 8, load64(lit_freq + lsym * 8) + 1);
+
+                    var di = _deflate_dist_code(mdist);
+                    var dextra = load64(&_deflate_dist_extra + di * 8);
+                    var dbase = load64(&_deflate_dist_base + di * 8);
+                    store64(_dyn_sym_buf + _dyn_sym_count * 8,
+                            _dyn_pack(di, dextra, mdist - dbase));
+                    _dyn_sym_count = _dyn_sym_count + 1;
+                    store64(dist_freq + di * 8, load64(dist_freq + di * 8) + 1);
+
+                    var k = 1;
+                    while (k < mlen) {
+                        if (sp + k + LZ77_MIN_MATCH <= src_len) {
+                            _lz77_insert(src, sp + k);
+                        }
+                        k = k + 1;
+                    }
+                    sp = sp + mlen;
+                    continue;
+                }
+            }
+        }
+
+        var byte = load8(src + sp);
+        store64(_dyn_sym_buf + _dyn_sym_count * 8, _dyn_pack(byte, 0, 0));
+        _dyn_sym_count = _dyn_sym_count + 1;
+        store64(lit_freq + byte * 8, load64(lit_freq + byte * 8) + 1);
+        sp = sp + 1;
+    }
+
+    # Add EOB
+    store64(_dyn_sym_buf + _dyn_sym_count * 8, _dyn_pack(256, 0, 0));
+    _dyn_sym_count = _dyn_sym_count + 1;
+    store64(lit_freq + 256 * 8, load64(lit_freq + 256 * 8) + 1);
+
+    # Pass 2: build optimal Huffman trees
+    var opt_lit_lens = _dyn_opt_lit_lens;
+    huff_compute_lengths(lit_freq, 286, opt_lit_lens, 257);
+
+    var hlit = 286;
+    while (hlit > 257 && load64(opt_lit_lens + (hlit - 1) * 8) == 0) {
+        hlit = hlit - 1;
+    }
+
+    var opt_dist_lens = _dyn_opt_dist_lens;
+    var has_dist = 0;
+    i = 0;
+    while (i < 30) {
+        if (load64(dist_freq + i * 8) > 0) { has_dist = 1; }
+        i = i + 1;
+    }
+    if (has_dist == 0) {
+        store64(dist_freq, 1);
+    }
+    huff_compute_lengths(dist_freq, 30, opt_dist_lens, 1);
+
+    var hdist = 30;
+    while (hdist > 1 && load64(opt_dist_lens + (hdist - 1) * 8) == 0) {
+        hdist = hdist - 1;
+    }
+
+    var opt_lit_codes = _dyn_opt_lit_codes;
+    _huff_build(opt_lit_lens, hlit, opt_lit_codes, _dyn_lit_fast_tmp);
+
+    var opt_dist_codes = _dyn_opt_dist_codes;
+    _huff_build(opt_dist_lens, hdist, opt_dist_codes, _dyn_dist_fast_tmp);
+
+    # Pass 3: write the block
+    var rc = bw_write(bw, bfinal, 1);
+    if (rc < 0) { return rc; }
+    rc = bw_write(bw, 2, 2);      # BTYPE = 10 (dynamic)
+    if (rc < 0) { return rc; }
+
+    rc = _deflate_write_dynamic_header(bw, opt_lit_lens, hlit, opt_dist_lens, hdist);
+    if (rc < 0) { return rc; }
+
+    rc = _deflate_write_syms_dynamic(bw, opt_lit_lens, opt_lit_codes,
+                                      opt_dist_lens, opt_dist_codes);
+    if (rc < 0) { return rc; }
+
+    return 0;
+}
+
+# --- zlib.cyr ---
+
+# sankoch — zlib wrapper (RFC 1950)
+#
+# zlib = 2-byte header + DEFLATE stream + 4-byte Adler-32 checksum.
+#
+# Header (2 bytes):
+#   CMF byte: bits 0-3 = CM (compression method, must be 8 = deflate)
+#             bits 4-7 = CINFO (window size = 2^(CINFO+8), max 15 = 32K)
+#   FLG byte: bits 0-4 = FCHECK (makes CMF*256+FLG divisible by 31)
+#             bit 5    = FDICT (preset dictionary)
+#             bits 6-7 = FLEVEL (compression level hint, informational only)
+#
+# Trailer: 4-byte big-endian Adler-32 of uncompressed data.
+#
+# This is what git objects use.
+
+# Decompress a zlib stream (no preset dictionary).
+fn zlib_decompress(src, src_len, dst, dst_cap) {
+    return zlib_decompress_dict(src, src_len, dst, dst_cap, 0, 0);
+}
+
+# Decompress a zlib stream with an optional preset dictionary.
+# If the stream has FDICT=1, dict/dict_len must provide the dictionary
+# whose Adler-32 matches the stream's DICTID. Pass dict=0, dict_len=0
+# for streams without FDICT.
+fn zlib_decompress_dict(src, src_len, dst, dst_cap, dict, dict_len) {
+    if (src_len < 6) { return 0 - ERR_INVALID_INPUT; }
+
+    # Parse header
+    var cmf = load8(src);
+    var flg = load8(src + 1);
+
+    # Verify checksum: (CMF*256 + FLG) % 31 == 0
+    if (((cmf * 256 + flg) % 31) != 0) { return 0 - ERR_CORRUPT_DATA; }
+
+    # CM must be 8 (deflate)
+    if ((cmf & 15) != 8) { return 0 - ERR_UNSUPPORTED_FORMAT; }
+
+    var hdr_len = 2;
+
+    # Handle FDICT (preset dictionary)
+    if ((flg & 32) != 0) {
+        if (hdr_len + 4 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+        if (dict == 0 || dict_len == 0) { return 0 - ERR_INVALID_INPUT; }
+        # Verify dictionary ID (Adler-32 of the dictionary, big-endian)
+        var stored_dict_id = (load8(src + 2) << 24) | (load8(src + 3) << 16) |
+                             (load8(src + 4) << 8) | load8(src + 5);
+        var computed_dict_id = adler32(dict, dict_len);
+        if (stored_dict_id != computed_dict_id) { return 0 - ERR_CHECKSUM_MISMATCH; }
+        hdr_len = 6;
+    }
+
+    # Decompress DEFLATE payload
+    var deflate_src = src + hdr_len;
+    var deflate_len = src_len - hdr_len;
+    var dlen = 0;
+    if (dict_len > 0) {
+        dlen = deflate_decompress_dict(deflate_src, deflate_len, dst, dst_cap, dict, dict_len);
+    } else {
+        dlen = deflate_decompress(deflate_src, deflate_len, dst, dst_cap);
+    }
+    if (dlen < 0) { return dlen; }
+
+    # Trailer: 4-byte big-endian Adler-32
+    var consumed = deflate_bytes_consumed();
+    var trailer = deflate_src + consumed;
+    if (hdr_len + consumed + 4 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+    var stored_adler = (load8(trailer) << 24) | (load8(trailer + 1) << 16) |
+                       (load8(trailer + 2) << 8) | load8(trailer + 3);
+    var computed_adler = adler32(dst, dlen);
+    if (stored_adler != computed_adler) { return 0 - ERR_CHECKSUM_MISMATCH; }
+
+    return dlen;
+}
+
+# Compress data into a zlib stream.
+fn zlib_compress(src, src_len, dst, dst_cap) {
+    return zlib_compress_level(src, src_len, dst, dst_cap, 6);
+}
+
+# Compress data into a zlib stream with explicit compression level.
+fn zlib_compress_level(src, src_len, dst, dst_cap, level) {
+    # Need room for: 2-byte header + DEFLATE data + 4-byte Adler-32
+    if (dst_cap < 6) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+    # Header: CMF=0x78 (CM=8 deflate, CINFO=7 → 32K window), FLG=0x01
+    # Verify: (0x78 * 256 + 0x01) = 30721, 30721 % 31 = 0 ✓
+    store8(dst, 120);   # 0x78
+    store8(dst + 1, 1); # 0x01
+
+    # Compress DEFLATE into dst+2
+    var clen = deflate_compress_level(src, src_len, dst + 2, dst_cap - 6, level);
+    if (clen < 0) { return clen; }
+
+    # Write Adler-32 (big-endian)
+    var a = adler32(src, src_len);
+    var pos = 2 + clen;
+    store8(dst + pos, (a >> 24) & 255);
+    store8(dst + pos + 1, (a >> 16) & 255);
+    store8(dst + pos + 2, (a >> 8) & 255);
+    store8(dst + pos + 3, a & 255);
+
+    return pos + 4;
+}
+
+# --- gzip.cyr ---
+
+# sankoch — gzip wrapper (RFC 1952)
+#
+# gzip = 10-byte header + DEFLATE stream + 4-byte CRC-32 + 4-byte ISIZE.
+#
+# Header (10 bytes minimum):
+#   ID1 = 0x1f, ID2 = 0x8b (magic)
+#   CM = 8 (deflate)
+#   FLG byte: FTEXT(0), FHCRC(1), FEXTRA(2), FNAME(3), FCOMMENT(4)
+#   MTIME (4 bytes, little-endian)
+#   XFL (extra flags: 2=best compression, 4=fastest)
+#   OS (operating system: 255=unknown)
+#
+# Trailer (8 bytes):
+#   CRC-32 of uncompressed data (4 bytes, little-endian)
+#   ISIZE = uncompressed size mod 2^32 (4 bytes, little-endian)
+
+# Decompress one gzip member starting at src.
+# Returns decompressed length, or negative error.
+# Sets _gzip_member_end to the byte offset past this member's trailer.
+var _gzip_member_end = 0;
+
+fn _gzip_decompress_member(src, src_len, dst, dst_cap) {
+    if (src_len < 18) { return 0 - ERR_INVALID_INPUT; }
+
+    # Verify magic bytes
+    if (load8(src) != 31 || load8(src + 1) != 139) {
+        return 0 - ERR_CORRUPT_DATA;
+    }
+
+    # CM must be 8
+    if (load8(src + 2) != 8) { return 0 - ERR_UNSUPPORTED_FORMAT; }
+
+    var flg = load8(src + 3);
+    var offset = 10;
+
+    # Skip optional FEXTRA
+    if ((flg & 4) != 0) {
+        if (offset + 2 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+        var xlen = load8(src + offset) | (load8(src + offset + 1) << 8);
+        offset = offset + 2 + xlen;
+        if (offset > src_len) { return 0 - ERR_CORRUPT_DATA; }
+    }
+
+    # Skip optional FNAME (null-terminated)
+    var found = 0;
+    if ((flg & 8) != 0) {
+        found = 0;
+        while (offset < src_len) {
+            if (load8(src + offset) == 0) { offset = offset + 1; found = 1; break; }
+            offset = offset + 1;
+        }
+        if (found == 0) { return 0 - ERR_CORRUPT_DATA; }
+    }
+
+    # Skip optional FCOMMENT (null-terminated)
+    if ((flg & 16) != 0) {
+        found = 0;
+        while (offset < src_len) {
+            if (load8(src + offset) == 0) { offset = offset + 1; found = 1; break; }
+            offset = offset + 1;
+        }
+        if (found == 0) { return 0 - ERR_CORRUPT_DATA; }
+    }
+
+    # Skip optional FHCRC (2 bytes)
+    if ((flg & 2) != 0) {
+        offset = offset + 2;
+    }
+
+    if (offset + 8 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+
+    # DEFLATE payload starts at offset
+    var deflate_len = src_len - offset;
+    var dlen = deflate_decompress(src + offset, deflate_len, dst, dst_cap);
+    if (dlen < 0) { return dlen; }
+
+    # Trailer starts right after the DEFLATE stream consumed bytes
+    var consumed = deflate_bytes_consumed();
+    var trailer = src + offset + consumed;
+    if (offset + consumed + 8 > src_len) { return 0 - ERR_CORRUPT_DATA; }
+
+    crc32_init_table();
+    var stored_crc = load8(trailer) | (load8(trailer + 1) << 8) |
+                     (load8(trailer + 2) << 16) | (load8(trailer + 3) << 24);
+    var computed_crc = crc32(dst, dlen);
+    if (stored_crc != computed_crc) { return 0 - ERR_CHECKSUM_MISMATCH; }
+
+    # Verify ISIZE (original size mod 2^32)
+    var stored_size = load8(trailer + 4) | (load8(trailer + 5) << 8) |
+                      (load8(trailer + 6) << 16) | (load8(trailer + 7) << 24);
+    if (stored_size != (dlen & 4294967295)) { return 0 - ERR_CHECKSUM_MISMATCH; }
+
+    _gzip_member_end = offset + consumed + 8;
+    return dlen;
+}
+
+# Decompress a gzip stream (supports concatenated members per RFC 1952).
+fn gzip_decompress(src, src_len, dst, dst_cap) {
+    var total = 0;
+    var pos = 0;
+
+    while (pos < src_len) {
+        # Check for another gzip member (magic bytes)
+        if (pos + 2 > src_len) { break; }
+        if (load8(src + pos) != 31 || load8(src + pos + 1) != 139) { break; }
+
+        var dlen = _gzip_decompress_member(src + pos, src_len - pos,
+                                            dst + total, dst_cap - total);
+        if (dlen < 0) { return dlen; }
+        total = total + dlen;
+        pos = pos + _gzip_member_end;
+    }
+
+    if (total == 0 && pos == 0) { return 0 - ERR_INVALID_INPUT; }
+    return total;
+}
+
+# Compress data into a gzip stream.
+fn gzip_compress(src, src_len, dst, dst_cap) {
+    return gzip_compress_level(src, src_len, dst, dst_cap, 6);
+}
+
+# Compress data into a gzip stream with explicit compression level.
+fn gzip_compress_level(src, src_len, dst, dst_cap, level) {
+    # Need: 10-byte header + DEFLATE + 8-byte trailer
+    if (dst_cap < 18) { return 0 - ERR_BUFFER_TOO_SMALL; }
+
+    # Write header
+    store8(dst + 0, 31);   # ID1
+    store8(dst + 1, 139);  # ID2
+    store8(dst + 2, 8);    # CM = deflate
+    store8(dst + 3, 0);    # FLG = no extras
+    store8(dst + 4, 0);    # MTIME (4 bytes, all zero)
+    store8(dst + 5, 0);
+    store8(dst + 6, 0);
+    store8(dst + 7, 0);
+    store8(dst + 8, 0);    # XFL
+    store8(dst + 9, 255);  # OS = unknown
+
+    # Compress DEFLATE into dst+10
+    var clen = deflate_compress_level(src, src_len, dst + 10, dst_cap - 18, level);
+    if (clen < 0) { return clen; }
+
+    # Write trailer: CRC-32 (little-endian) + ISIZE (little-endian)
+    crc32_init_table();
+    var c = crc32(src, src_len);
+    var pos = 10 + clen;
+    store8(dst + pos, c & 255);
+    store8(dst + pos + 1, (c >> 8) & 255);
+    store8(dst + pos + 2, (c >> 16) & 255);
+    store8(dst + pos + 3, (c >> 24) & 255);
+
+    var isize = src_len & 4294967295;
+    store8(dst + pos + 4, isize & 255);
+    store8(dst + pos + 5, (isize >> 8) & 255);
+    store8(dst + pos + 6, (isize >> 16) & 255);
+    store8(dst + pos + 7, (isize >> 24) & 255);
+
+    return pos + 8;
+}
+
+# --- lib.cyr ---
+
+# sankoch — lossless compression library
+# Sanskrit: संकोच — contraction, compression
+#
+# Phase 1: LZ4 block compression
+# Phase 2-3: DEFLATE decompression + compression (RFC 1951)
+# Phase 4: zlib (RFC 1950) + gzip (RFC 1952) wrappers
+#
+# Thread-safe via mutex on global compression/decompression state.
+
+# Public API
+#
+# compress(format, src, src_len, dst, dst_cap) -> compressed_len or negative error
+# compress_level(format, src, src_len, dst, dst_cap, level) -> same, with level 1-9
+# decompress(format, src, src_len, dst, dst_cap) -> decompressed_len or negative error
+# detect_format(src, src_len) -> Format enum value or ERR_UNSUPPORTED_FORMAT
+
+# Global mutex protecting all mutable compression/decompression state
+# (bitreader, bitwriter, hash tables, Huffman tables, symbol buffers).
+# Initialized lazily on first use.
+var _sankoch_mtx = 0;
+
+fn _sankoch_lock() {
+    if (_sankoch_mtx == 0) {
+        _sankoch_mtx = mutex_new();
+    }
+    mutex_lock(_sankoch_mtx);
+    return 0;
+}
+
+fn _sankoch_unlock() {
+    mutex_unlock(_sankoch_mtx);
+    return 0;
+}
+
+# Compress data using the specified format at default level (6).
+fn compress(format, src, src_len, dst, dst_cap) {
+    return compress_level(format, src, src_len, dst, dst_cap, 6);
+}
+
+# Compress with explicit level (1=fast, 6=default, 9=best).
+# Level only affects DEFLATE-based formats (DEFLATE, zlib, gzip).
+# LZ4 ignores the level parameter.
+fn compress_level(format, src, src_len, dst, dst_cap, level) {
+    if (src_len < 0 || dst_cap < 0) { return 0 - ERR_INVALID_INPUT; }
+    _sankoch_lock();
+    var result = _compress_inner(format, src, src_len, dst, dst_cap, level);
+    _sankoch_unlock();
+    return result;
+}
+
+fn _compress_inner(format, src, src_len, dst, dst_cap, level) {
+    if (format == FORMAT_LZ4) {
+        return lz4_compress(src, src_len, dst, dst_cap);
+    }
+    if (format == FORMAT_DEFLATE) {
+        return deflate_compress_level(src, src_len, dst, dst_cap, level);
+    }
+    if (format == FORMAT_ZLIB) {
+        return zlib_compress_level(src, src_len, dst, dst_cap, level);
+    }
+    if (format == FORMAT_GZIP) {
+        return gzip_compress_level(src, src_len, dst, dst_cap, level);
+    }
+    return 0 - ERR_UNSUPPORTED_FORMAT;
+}
+
+# Decompress data using the specified format.
+fn decompress(format, src, src_len, dst, dst_cap) {
+    if (src_len < 0 || dst_cap < 0) { return 0 - ERR_INVALID_INPUT; }
+    _sankoch_lock();
+    var result = _decompress_inner(format, src, src_len, dst, dst_cap);
+    _sankoch_unlock();
+    return result;
+}
+
+fn _decompress_inner(format, src, src_len, dst, dst_cap) {
+    if (format == FORMAT_LZ4) {
+        return lz4_decompress(src, src_len, dst, dst_cap);
+    }
+    if (format == FORMAT_DEFLATE) {
+        return deflate_decompress(src, src_len, dst, dst_cap);
+    }
+    if (format == FORMAT_ZLIB) {
+        return zlib_decompress(src, src_len, dst, dst_cap);
+    }
+    if (format == FORMAT_GZIP) {
+        return gzip_decompress(src, src_len, dst, dst_cap);
+    }
+    return 0 - ERR_UNSUPPORTED_FORMAT;
+}
+
+# Detect compression format from magic bytes. Returns FORMAT_* or negative error.
+fn detect_format(src, src_len) {
+    if (src_len < 2) {
+        return 0 - ERR_INVALID_INPUT;
+    }
+    var b0 = load8(src);
+    var b1 = load8(src + 1);
+
+    # gzip: 0x1f 0x8b
+    if (b0 == GZIP_MAGIC_0) {
+        if (b1 == GZIP_MAGIC_1) {
+            return FORMAT_GZIP;
+        }
+    }
+
+    # zlib: first byte CMF where CM=8 (deflate), second byte flags
+    # CMF & 0x0F == 8 and (CMF*256 + FLG) % 31 == 0
+    if ((b0 & 15) == 8) {
+        var check = b0 * 256 + b1;
+        if ((check % 31) == 0) {
+            return FORMAT_ZLIB;
+        }
+    }
+
+    # LZ4 and raw DEFLATE have no magic bytes — caller must know the format
+    return 0 - ERR_UNSUPPORTED_FORMAT;
+}
+
+# --- stream.cyr ---
+
+# sankoch — streaming compression/decompression API
+#
+# For data larger than a single buffer, or when input arrives incrementally.
+#
+# Usage:
+#   var ctx = stream_compress_init(FORMAT_ZLIB, level)
+#   stream_compress_write(ctx, chunk1, len1)
+#   stream_compress_write(ctx, chunk2, len2)
+#   var result_len = stream_compress_finish(ctx, out_buf, out_cap)
+#
+#   var ctx = stream_decompress_init(FORMAT_ZLIB)
+#   stream_decompress_write(ctx, compressed_data, compressed_len)
+#   var result_len = stream_decompress_finish(ctx, out_buf, out_cap)
+#
+# Internally, the stream context accumulates input in a resizable buffer,
+# then compresses/decompresses in one shot on finish(). This is a buffered
+# streaming API — true incremental block-by-block is future work.
+
+# Context layout (48 bytes):
+#   +0:  format
+#   +8:  level (compress only)
+#   +16: input buffer pointer
+#   +24: input buffer capacity
+#   +32: input bytes written
+#   +40: mode (0=compress, 1=decompress)
+
+enum Stream {
+    STREAM_COMPRESS = 0;
+    STREAM_DECOMPRESS = 1;
+    STREAM_INIT_CAP = 65536;  # 64KB initial buffer
+}
+
+fn _stream_grow(ctx) {
+    var buf = load64(ctx + 16);
+    var cap = load64(ctx + 24);
+    var new_cap = cap * 2;
+    var new_buf = alloc(new_cap);
+    # Copy old data
+    var len = load64(ctx + 32);
+    var i = 0;
+    while (i < len) {
+        store8(new_buf + i, load8(buf + i));
+        i = i + 1;
+    }
+    store64(ctx + 16, new_buf);
+    store64(ctx + 24, new_cap);
+    return 0;
+}
+
+# Initialize a streaming compression context.
+fn stream_compress_init(format, level) {
+    var ctx = alloc(48);
+    store64(ctx, format);
+    store64(ctx + 8, level);
+    store64(ctx + 16, alloc(STREAM_INIT_CAP));
+    store64(ctx + 24, STREAM_INIT_CAP);
+    store64(ctx + 32, 0);
+    store64(ctx + 40, STREAM_COMPRESS);
+    return ctx;
+}
+
+# Initialize a streaming decompression context.
+fn stream_decompress_init(format) {
+    var ctx = alloc(48);
+    store64(ctx, format);
+    store64(ctx + 8, 0);
+    store64(ctx + 16, alloc(STREAM_INIT_CAP));
+    store64(ctx + 24, STREAM_INIT_CAP);
+    store64(ctx + 32, 0);
+    store64(ctx + 40, STREAM_DECOMPRESS);
+    return ctx;
+}
+
+# Append data to the stream buffer.
+fn stream_write(ctx, data, len) {
+    if (len <= 0) { return 0; }
+    var written = load64(ctx + 32);
+    var cap = load64(ctx + 24);
+
+    # Grow buffer if needed
+    while (written + len > cap) {
+        _stream_grow(ctx);
+        cap = load64(ctx + 24);
+    }
+
+    var buf = load64(ctx + 16);
+    var i = 0;
+    while (i < len) {
+        store8(buf + written + i, load8(data + i));
+        i = i + 1;
+    }
+    store64(ctx + 32, written + len);
+    return len;
+}
+
+# Finish compression: compress all buffered input into dst.
+# Returns compressed length, or negative error.
+fn stream_compress_finish(ctx, dst, dst_cap) {
+    var format = load64(ctx);
+    var level = load64(ctx + 8);
+    var buf = load64(ctx + 16);
+    var len = load64(ctx + 32);
+    return compress_level(format, buf, len, dst, dst_cap, level);
+}
+
+# Finish decompression: decompress all buffered input into dst.
+# Returns decompressed length, or negative error.
+fn stream_decompress_finish(ctx, dst, dst_cap) {
+    var format = load64(ctx);
+    var buf = load64(ctx + 16);
+    var len = load64(ctx + 32);
+    return decompress(format, buf, len, dst, dst_cap);
+}
+
+# Return the number of bytes currently buffered.
+fn stream_buffered(ctx) {
+    return load64(ctx + 32);
+}
+
+# Reset the stream context (reuse buffer, clear data).
+fn stream_reset(ctx) {
+    store64(ctx + 32, 0);
+    return 0;
+}

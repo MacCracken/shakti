@@ -1,0 +1,167 @@
+# api.tcyr — tests for src/api.cyr
+# Mirrors rust-old/src/api.rs #[test] cases. Tests use AuthMode::Skip
+# so they don't depend on the test host's timestamp state.
+
+include "src/lib.cyr"
+
+fn _sample_policy() {
+    return parse_policy(
+        "[defaults]\ntimestamp_ttl = 300\nrequire_auth = true\n[[rules]]\nuser = \"admin\"\nrun_as = \"root\"\ncommands = []\nrequire_auth = true\ndescription = \"Admin\"\n[[rules]]\nuser = \"deploy\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\", \"/usr/bin/docker\"]\nrequire_auth = false\ndescription = \"Deploy NOPASSWD\"\n[[rules]]\nuser = \"*\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\"]\nrequire_auth = true\n",
+        strlen("[defaults]\ntimestamp_ttl = 300\nrequire_auth = true\n[[rules]]\nuser = \"admin\"\nrun_as = \"root\"\ncommands = []\nrequire_auth = true\ndescription = \"Admin\"\n[[rules]]\nuser = \"deploy\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\", \"/usr/bin/docker\"]\nrequire_auth = false\ndescription = \"Deploy NOPASSWD\"\n[[rules]]\nuser = \"*\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\"]\nrequire_auth = true\n"));
+}
+
+fn _skip_config() {
+    var c = shakti_config_new();
+    cfg_set_auth_mode(c, AUTH_SKIP);
+    return c;
+}
+
+fn _argv1(a) { var v = vec_new(); vec_push(v, a); return v; }
+
+fn _groups_empty() { return vec_new(); }
+
+fn t_config_defaults() {
+    var c = shakti_config_new();
+    assert_eq(streq(cfg_policy_path(c), "/etc/agnos/sudoers.toml"), 1, "default policy path");
+    assert_eq(streq(cfg_target_user(c), "root"), 1, "default target root");
+    assert_eq(cfg_auth_mode(c), AUTH_INTERACTIVE, "default interactive");
+}
+
+fn t_config_custom() {
+    var c = shakti_config_new();
+    cfg_set_policy_path(c, "/etc/custom.toml");
+    cfg_set_target_user(c, "postgres");
+    cfg_set_auth_mode(c, AUTH_TIMESTAMP_ONLY);
+    assert_eq(streq(cfg_policy_path(c), "/etc/custom.toml"), 1, "custom path");
+    assert_eq(streq(cfg_target_user(c), "postgres"), 1, "custom target");
+    assert_eq(cfg_auth_mode(c), AUTH_TIMESTAMP_ONLY, "TimestampOnly");
+}
+
+fn t_evaluate_nopasswd() {
+    # Deploy rule has require_auth=false; with AuthMode::Skip and Skip
+    # respecting rule_ra in require_auth field but effective_ra=0
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "deploy", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    # rule require_auth = false
+    assert_eq(eval_require_auth(eval), 0, "require_auth=0 (NOPASSWD)");
+    assert_eq(streq(eval_resolved_command(eval), "/usr/bin/env"), 1, "resolved cmd");
+}
+
+fn t_evaluate_authorized_with_auth() {
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "anybody", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    assert_eq(eval_require_auth(eval), 1, "policy says require_auth");
+}
+
+fn t_evaluate_denied() {
+    var cfg = _skip_config();
+    # /usr/bin/docker is not in the * rule's allowlist, so unknown user fails.
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "unknown", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/docker"));
+    assert_eq(eval_authorized(eval), 0, "unknown user denied");
+    assert_eq(eval_error_code(eval), SHK_ERR_DENIED, "error is DENIED");
+}
+
+fn t_evaluate_invalid_username() {
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "../evil", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 0, "invalid username fails");
+    assert_eq(eval_error_code(eval), SHK_ERR_PATH_TRAVERSAL, "path traversal");
+}
+
+fn t_evaluate_invalid_command() {
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "admin", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/ls;rm"));
+    assert_eq(eval_authorized(eval), 0, "metachar rejected");
+    assert_eq(eval_error_code(eval), SHK_ERR_METACHAR, "metachar code");
+}
+
+fn t_evaluate_timestamp_only_no_timestamp() {
+    var cfg = shakti_config_new();
+    cfg_set_auth_mode(cfg, AUTH_TIMESTAMP_ONLY);
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "admin", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "admin is authorized");
+    # Rule requires auth, no ts → should set error
+    assert_eq(eval_error_code(eval), SHK_ERR_TIMESTAMP_EXPIRED, "timestamp expired");
+}
+
+fn t_evaluate_timestamp_only_nopasswd_succeeds() {
+    var cfg = shakti_config_new();
+    cfg_set_auth_mode(cfg, AUTH_TIMESTAMP_ONLY);
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "deploy", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "deploy ok");
+    assert_eq(eval_require_auth(eval), 0, "NOPASSWD");
+    assert_eq(eval_error_code(eval), SHK_OK, "no error");
+}
+
+fn _find_env_key(env_vec, key) {
+    var n = vec_len(env_vec);
+    var i = 0;
+    while (i < n) {
+        var entry = vec_get(env_vec, i);
+        var k = _env_key(entry);
+        if (k != 0) {
+            if (streq(k, key) == 1) { return entry; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn t_evaluate_environment_has_target_user() {
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "admin", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    var env = eval_environment(eval);
+    assert_neq(env, 0, "env built");
+    assert_neq(_find_env_key(env, "USER"), 0, "USER present");
+    assert_neq(_find_env_key(env, "SUDO_USER"), 0, "SUDO_USER present");
+}
+
+fn t_evaluate_custom_max_cmd_len() {
+    var pol = parse_policy(
+        "[defaults]\nmax_command_len = 20\n[[rules]]\nuser = \"admin\"\ncommands = []\n",
+        strlen("[defaults]\nmax_command_len = 20\n[[rules]]\nuser = \"admin\"\ncommands = []\n"));
+    var cfg = _skip_config();
+    # Short should pass (but /usr/bin/env is 12 chars + 1 sep = 13 ≤ 20)
+    var ok = evaluate_with_policy(cfg, pol, "admin", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(ok), 1, "short cmd ok");
+    # Long should fail
+    var bad = evaluate_with_policy(cfg, pol, "admin", 1000, 1000,
+        _groups_empty(), _argv1("/usr/bin/very_long_command_name_exceeds_limit"));
+    assert_eq(eval_authorized(bad), 0, "long cmd fails");
+    assert_eq(eval_error_code(bad), SHK_ERR_CMD_TOO_LONG, "too long code");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("ShaktiConfig");
+    t_config_defaults();
+    t_config_custom();
+
+    test_group("evaluate_with_policy");
+    t_evaluate_nopasswd();
+    t_evaluate_authorized_with_auth();
+    t_evaluate_denied();
+    t_evaluate_invalid_username();
+    t_evaluate_invalid_command();
+    t_evaluate_timestamp_only_no_timestamp();
+    t_evaluate_timestamp_only_nopasswd_succeeds();
+    t_evaluate_environment_has_target_user();
+    t_evaluate_custom_max_cmd_len();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

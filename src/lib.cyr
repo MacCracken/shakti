@@ -1,0 +1,82 @@
+# lib.cyr — shakti shared library (constants, error codes, modules)
+#
+# Included by src/main.cyr (the binary entry point) and by every
+# tests/tcyr/*.tcyr file. Contains everything EXCEPT the binary's
+# main() / exit call, so tests can define their own main() without
+# the stub exiting first.
+
+# ── Shared error codes ────────────────────
+# Integer return convention: 0 = SHK_OK on success; positive = domain error.
+# resolve_command() negates the code so callers can distinguish a returned
+# length (positive) from an error (negative).
+
+enum ShkErr {
+    SHK_OK = 0;
+    SHK_ERR_EMPTY_USER = 1;
+    SHK_ERR_PATH_TRAVERSAL = 2;
+    SHK_ERR_NULL_BYTE = 3;
+    SHK_ERR_EMPTY_CMD = 4;
+    SHK_ERR_CMD_TOO_LONG = 5;
+    SHK_ERR_METACHAR = 6;
+    SHK_ERR_NOT_FOUND = 7;
+    SHK_ERR_NOT_EXECUTABLE = 8;
+    SHK_ERR_RELATIVE_PATH = 9;
+    SHK_ERR_NON_UTF8 = 10;
+    SHK_ERR_PARSE = 11;
+    SHK_ERR_IO = 12;
+    SHK_ERR_DENIED = 13;
+    SHK_ERR_AUTH_FAILED = 14;
+    SHK_ERR_POLICY = 15;
+    SHK_ERR_OWNER = 16;
+    SHK_ERR_WORLD_WRITABLE = 17;
+    SHK_ERR_SYMLINK = 18;
+    SHK_ERR_TIMESTAMP_EXPIRED = 19;
+    SHK_ERR_PAM_UNAVAILABLE = 20;
+    SHK_ERR_EXEC = 21;
+}
+
+fn shk_err_msg(code) {
+    if (code == SHK_OK) { return "ok"; }
+    if (code == SHK_ERR_EMPTY_USER) { return "empty username"; }
+    if (code == SHK_ERR_PATH_TRAVERSAL) { return "username contains path traversal"; }
+    if (code == SHK_ERR_NULL_BYTE) { return "argument contains null byte"; }
+    if (code == SHK_ERR_EMPTY_CMD) { return "no command specified"; }
+    if (code == SHK_ERR_CMD_TOO_LONG) { return "command too long"; }
+    if (code == SHK_ERR_METACHAR) { return "command name contains shell metacharacter"; }
+    if (code == SHK_ERR_NOT_FOUND) { return "command not found"; }
+    if (code == SHK_ERR_NOT_EXECUTABLE) { return "command not executable"; }
+    if (code == SHK_ERR_RELATIVE_PATH) { return "relative paths not allowed"; }
+    if (code == SHK_ERR_NON_UTF8) { return "path is not valid UTF-8"; }
+    if (code == SHK_ERR_PARSE) { return "parse error"; }
+    if (code == SHK_ERR_IO) { return "I/O error"; }
+    if (code == SHK_ERR_DENIED) { return "permission denied"; }
+    if (code == SHK_ERR_AUTH_FAILED) { return "authentication failed"; }
+    if (code == SHK_ERR_POLICY) { return "policy error"; }
+    if (code == SHK_ERR_OWNER) { return "file not owned by root"; }
+    if (code == SHK_ERR_WORLD_WRITABLE) { return "file is world-writable"; }
+    if (code == SHK_ERR_SYMLINK) { return "path is a symlink"; }
+    if (code == SHK_ERR_TIMESTAMP_EXPIRED) { return "timestamp expired"; }
+    if (code == SHK_ERR_PAM_UNAVAILABLE) { return "PAM unavailable"; }
+    if (code == SHK_ERR_EXEC) { return "exec failed"; }
+    return "unknown error";
+}
+
+# ── Shared constants ────────────────────
+
+var MAX_AUTH_ATTEMPTS = 3;
+var MAX_COMMAND_LEN_DEFAULT = 4096;
+var DEFAULT_TIMESTAMP_TTL_SECS = 300;
+
+fn default_policy_path() { return "/etc/agnos/sudoers.toml"; }
+fn default_timestamp_dir() { return "/var/run/agnos/sudo"; }
+
+# ── Module includes (leaves first) ──
+# Stdlib is auto-prepended from cyrius.cyml [deps].
+
+include "src/validate.cyr"
+include "src/env.cyr"
+include "src/timestamp.cyr"
+include "src/audit.cyr"
+include "src/auth.cyr"
+include "src/policy.cyr"
+include "src/api.cyr"

@@ -1,0 +1,41 @@
+# auth.tcyr — tests for src/auth.cyr
+# Real authentication requires a running system with known credentials
+# and PAM config, so we cover only the API surface here. The integration
+# path (authenticate → PAM → su fallback) is exercised by tests that
+# require root in a CI job, not by this unit test harness.
+
+include "src/lib.cyr"
+
+fn t_pam_service_name() {
+    assert_eq(streq(pam_service_name(), "shakti"), 1, "service name is 'shakti'");
+}
+
+fn t_pam_authenticate_reports_unavailable() {
+    # PAM is stubbed in this port — must signal unavailability so the
+    # authenticate() wrapper falls through to su.
+    var r = pam_authenticate("root", "any");
+    assert_eq(r, 0 - SHK_ERR_PAM_UNAVAILABLE, "pam_authenticate reports unavailable");
+}
+
+fn t_authenticate_falls_through() {
+    # With PAM stubbed, authenticate() must delegate to su_authenticate.
+    # As non-root with an obviously wrong password, su should fail
+    # (return 0 or negative), never panic.
+    var r = authenticate("root", "surely_not_root_password_xyz");
+    assert_eq(r >= 0, 1, "authenticate returns a defined value, not an error propagation");
+    assert_eq(r == 1, 0, "bogus password does not authenticate");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("auth API");
+    t_pam_service_name();
+    t_pam_authenticate_reports_unavailable();
+    t_authenticate_falls_through();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

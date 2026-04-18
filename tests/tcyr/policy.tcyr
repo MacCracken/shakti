@@ -1,0 +1,294 @@
+# policy.tcyr — tests for src/policy.cyr
+# Mirrors rust-old/src/policy.rs #[test] cases.
+
+include "src/lib.cyr"
+
+# ── Sample policy ────────────────────
+
+fn _sample_policy_text() {
+    return "[defaults]\ntimestamp_ttl = 300\nrequire_auth = true\naudit_log = true\nenv_keep = [\"EDITOR\", \"VISUAL\"]\nmax_command_len = 4096\n\n[[rules]]\nuser = \"admin\"\nrun_as = \"root\"\ncommands = []\nrequire_auth = true\ndescription = \"Admin has full access\"\n\n[[rules]]\ngroup = \"wheel\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/systemctl\", \"/usr/bin/journalctl\"]\nrequire_auth = true\ndescription = \"Wheel group\"\n\n[[rules]]\nuser = \"deploy\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/systemctl restart *\", \"/usr/bin/docker\"]\ndeny_commands = [\"/usr/bin/systemctl stop firewall\"]\nrequire_auth = false\ndescription = \"Deploy user NOPASSWD\"\n\n[[rules]]\nuser = \"*\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/passwd\"]\nrequire_auth = true\ndescription = \"Anyone changes passwords\"\n";
+}
+
+fn _parse_src(s) {
+    return parse_policy(s, strlen(s));
+}
+
+fn _sample_policy() {
+    return _parse_src(_sample_policy_text());
+}
+
+# ── parse_policy ────────────────────
+
+fn t_parse_defaults() {
+    var p = _sample_policy();
+    var d = policy_defaults(p);
+    assert_eq(def_ttl(d), 300, "timestamp_ttl = 300");
+    assert_eq(def_require_auth(d), 1, "require_auth = true");
+    assert_eq(def_audit_log(d), 1, "audit_log = true");
+    assert_eq(def_max_cmd_len(d), 4096, "max_command_len = 4096");
+    var ek = def_env_keep(d);
+    assert_eq(vec_len(ek), 2, "env_keep has 2 entries");
+    assert_eq(streq(vec_get(ek, 0), "EDITOR"), 1, "env_keep[0] = EDITOR");
+    assert_eq(streq(vec_get(ek, 1), "VISUAL"), 1, "env_keep[1] = VISUAL");
+}
+
+fn t_parse_rule_count() {
+    var p = _sample_policy();
+    assert_eq(vec_len(policy_rules(p)), 4, "4 rules parsed");
+}
+
+fn t_parse_minimal_rule() {
+    var p = _parse_src("[[rules]]\nuser = \"bob\"\n");
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(streq(rule_user(r), "bob"), 1, "user = bob");
+    assert_eq(streq(rule_run_as(r), "root"), 1, "run_as defaults to root");
+    assert_eq(vec_len(rule_commands(r)), 0, "commands empty");
+    assert_eq(rule_require_auth(r), 1, "require_auth defaults to true");
+}
+
+fn t_parse_empty() {
+    var p = _parse_src("");
+    var d = policy_defaults(p);
+    assert_eq(def_ttl(d), DEFAULT_TIMESTAMP_TTL_SECS, "ttl default");
+    assert_eq(def_require_auth(d), 1, "require_auth default true");
+    assert_eq(vec_len(policy_rules(p)), 0, "no rules");
+}
+
+fn t_parse_include_dir() {
+    var p = _parse_src("[defaults]\ninclude_dir = \"/etc/agnos/sudoers.d\"\n[[rules]]\nuser = \"a\"\n");
+    var d = policy_defaults(p);
+    var inc = def_include_dir(d);
+    assert_neq(inc, 0, "include_dir set");
+    assert_eq(streq(inc, "/etc/agnos/sudoers.d"), 1, "include_dir value");
+}
+
+# ── Authorization ────────────────────
+
+fn _groups_empty() { return vec_new(); }
+fn _groups(a) { var v = vec_new(); vec_push(v, a); return v; }
+fn _groups2(a, b) { var v = vec_new(); vec_push(v, a); vec_push(v, b); return v; }
+
+fn t_authz_admin_full_access() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "admin", _groups_empty(), "root", "/usr/bin/anything");
+    assert_eq(authz_status(r), AZ_ALLOWED, "allowed");
+    assert_eq(authz_aux(r), 1, "require_auth = 1");
+}
+
+fn t_authz_wheel_group_allowed() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "jdoe", _groups("wheel"), "root", "/usr/bin/systemctl");
+    assert_eq(authz_status(r), AZ_ALLOWED, "wheel + systemctl allowed");
+}
+
+fn t_authz_wheel_denied_cmd() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "jdoe", _groups("wheel"), "root", "/usr/bin/rm");
+    assert_eq(authz_status(r), AZ_DENIED, "wheel can't rm");
+}
+
+fn t_authz_deploy_nopasswd() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "deploy", _groups_empty(), "root", "/usr/bin/docker");
+    assert_eq(authz_status(r), AZ_ALLOWED, "deploy allowed");
+    assert_eq(authz_aux(r), 0, "require_auth = 0 (NOPASSWD)");
+}
+
+fn t_authz_deploy_denied() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "deploy", _groups_empty(), "root",
+        "/usr/bin/systemctl stop firewall");
+    assert_eq(authz_status(r), AZ_DENIED, "deploy can't stop firewall");
+}
+
+fn t_authz_deploy_allow_with_arg_wildcard() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "deploy", _groups_empty(), "root",
+        "/usr/bin/systemctl restart nginx");
+    assert_eq(authz_status(r), AZ_ALLOWED, "deploy can restart *");
+    assert_eq(authz_aux(r), 0, "still NOPASSWD");
+}
+
+fn t_authz_wildcard_user() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "anybody", _groups_empty(), "root", "/usr/bin/passwd");
+    assert_eq(authz_status(r), AZ_ALLOWED, "* user + passwd allowed");
+}
+
+fn t_authz_unknown_user_denied() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "unknown", _groups_empty(), "root", "/usr/bin/dangerous");
+    assert_eq(authz_status(r), AZ_DENIED, "unknown user denied");
+}
+
+fn t_authz_wrong_target() {
+    var p = _sample_policy();
+    var r = check_authorization(p, "admin", _groups_empty(), "postgres", "/usr/bin/anything");
+    assert_eq(authz_status(r), AZ_DENIED, "admin can't run_as postgres");
+}
+
+fn t_authz_run_as_wildcard() {
+    var p = _parse_src("[[rules]]\nuser = \"admin\"\nrun_as = \"*\"\ncommands = []\n");
+    var r = check_authorization(p, "admin", _groups_empty(), "postgres", "/usr/bin/psql");
+    assert_eq(authz_status(r), AZ_ALLOWED, "run_as * allows any target");
+}
+
+fn t_authz_no_rules() {
+    var p = _parse_src("");
+    var r = check_authorization(p, "admin", _groups_empty(), "root", "/usr/bin/ls");
+    assert_eq(authz_status(r), AZ_DENIED, "no rules denies");
+}
+
+fn t_authz_group_only_rule() {
+    var p = _parse_src("[[rules]]\ngroup = \"devops\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/docker\"]\n");
+    var r1 = check_authorization(p, "alice", _groups_empty(), "root", "/usr/bin/docker");
+    assert_eq(authz_status(r1), AZ_DENIED, "no group match");
+    var r2 = check_authorization(p, "alice", _groups("devops"), "root", "/usr/bin/docker");
+    assert_eq(authz_status(r2), AZ_ALLOWED, "devops allows docker");
+}
+
+fn t_authz_global_require_auth_false() {
+    var p = _parse_src("[defaults]\nrequire_auth = false\n[[rules]]\nuser = \"admin\"\n");
+    var r = check_authorization(p, "admin", _groups_empty(), "root", "/usr/bin/ls");
+    assert_eq(authz_status(r), AZ_ALLOWED, "allowed");
+    assert_eq(authz_aux(r), 0, "global override → NOPASSWD");
+}
+
+fn t_authz_deny_precedence_over_all() {
+    var p = _parse_src("[[rules]]\nuser = \"admin\"\ncommands = [\"ALL\"]\ndeny_commands = [\"/usr/bin/rm\"]\n");
+    var r1 = check_authorization(p, "admin", _groups_empty(), "root", "/usr/bin/rm");
+    assert_eq(authz_status(r1), AZ_DENIED, "deny precedence");
+    var r2 = check_authorization(p, "admin", _groups_empty(), "root", "/usr/bin/ls");
+    assert_eq(authz_status(r2), AZ_ALLOWED, "non-denied still allowed");
+}
+
+fn t_authz_multiple_groups() {
+    var p = _parse_src("[[rules]]\ngroup = \"docker\"\ncommands = [\"/usr/bin/docker\"]\n\n[[rules]]\ngroup = \"admin\"\ncommands = [\"ALL\"]\n");
+    var g = _groups2("docker", "admin");
+    var r1 = check_authorization(p, "bob", g, "root", "/usr/bin/docker");
+    assert_eq(authz_status(r1), AZ_ALLOWED, "docker group matches");
+    var r2 = check_authorization(p, "bob", g, "root", "/usr/bin/ls");
+    assert_eq(authz_status(r2), AZ_ALLOWED, "admin group ALL");
+}
+
+fn t_authz_deny_does_not_bleed() {
+    # rule 0 denies /usr/bin/rm for admin; rule 1 allows /usr/bin/rm for root-ops
+    var p = _parse_src("[[rules]]\nuser = \"admin\"\ncommands = [\"ALL\"]\ndeny_commands = [\"/usr/bin/rm\"]\n\n[[rules]]\ngroup = \"root-ops\"\ncommands = [\"/usr/bin/rm\"]\n");
+    var r = check_authorization(p, "operator", _groups("root-ops"), "root", "/usr/bin/rm");
+    assert_eq(authz_status(r), AZ_ALLOWED, "root-ops allows despite admin deny");
+}
+
+fn t_authz_deny_wildcard() {
+    var p = _parse_src("[[rules]]\nuser = \"deploy\"\ncommands = [\"/usr/bin/systemctl *\"]\ndeny_commands = [\"/usr/bin/systemctl stop *\"]\n");
+    var allow = check_authorization(p, "deploy", _groups_empty(), "root", "/usr/bin/systemctl restart nginx");
+    assert_eq(authz_status(allow), AZ_ALLOWED, "restart allowed");
+    var deny = check_authorization(p, "deploy", _groups_empty(), "root", "/usr/bin/systemctl stop nginx");
+    assert_eq(authz_status(deny), AZ_DENIED, "stop * denied");
+}
+
+# ── Lint ────────────────────
+
+fn _has_warn_containing(warns, needle) {
+    var n = vec_len(warns);
+    var i = 0;
+    while (i < n) {
+        var w = vec_get(warns, i);
+        var msg = warn_message(w);
+        var ml = strlen(msg);
+        var nl = strlen(needle);
+        if (nl <= ml) {
+            var j = 0;
+            while (j + nl <= ml) {
+                if (memeq(msg + j, needle, nl) == 1) { return 1; }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn t_lint_empty_policy() {
+    var warns = lint_policy(_parse_src(""));
+    assert_eq(_has_warn_containing(warns, "no rules"), 1, "empty policy warning");
+}
+
+fn t_lint_no_user_no_group() {
+    var warns = lint_policy(_parse_src("[[rules]]\ncommands = [\"/usr/bin/ls\"]\n"));
+    assert_eq(_has_warn_containing(warns, "neither"), 1, "neither user nor group");
+}
+
+fn t_lint_wildcard_nopasswd_all() {
+    var warns = lint_policy(_parse_src("[[rules]]\nuser = \"*\"\ncommands = []\nrequire_auth = false\n"));
+    assert_eq(_has_warn_containing(warns, "ALL commands"), 1, "ALL to all users error");
+}
+
+fn t_lint_global_nopasswd() {
+    var warns = lint_policy(_parse_src("[defaults]\nrequire_auth = false\n[[rules]]\nuser = \"admin\"\n"));
+    assert_eq(_has_warn_containing(warns, "Global require_auth is false"), 1, "global nopasswd");
+}
+
+fn t_lint_ttl_zero() {
+    var warns = lint_policy(_parse_src("[defaults]\ntimestamp_ttl = 0\nrequire_auth = true\n[[rules]]\nuser = \"admin\"\n"));
+    assert_eq(_has_warn_containing(warns, "timestamp_ttl is 0"), 1, "zero ttl");
+}
+
+fn t_lint_run_as_wildcard_all_cmds() {
+    var warns = lint_policy(_parse_src("[[rules]]\nuser = \"admin\"\nrun_as = \"*\"\ncommands = []\n"));
+    assert_eq(_has_warn_containing(warns, "any user"), 1, "run_as * + ALL");
+}
+
+fn t_lint_duplicate_rules() {
+    var warns = lint_policy(_parse_src("[[rules]]\nuser = \"admin\"\ncommands = [\"/usr/bin/ls\"]\n[[rules]]\nuser = \"admin\"\ncommands = [\"/usr/bin/rm\"]\n"));
+    assert_eq(_has_warn_containing(warns, "duplicate"), 1, "duplicate rules");
+}
+
+fn t_lint_unreachable_deny() {
+    var warns = lint_policy(_parse_src("[[rules]]\nuser = \"admin\"\ncommands = [\"/usr/bin/ls\"]\ndeny_commands = [\"/usr/bin/rm\"]\n"));
+    assert_eq(_has_warn_containing(warns, "unreachable"), 1, "unreachable deny");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("parse_policy");
+    t_parse_defaults();
+    t_parse_rule_count();
+    t_parse_minimal_rule();
+    t_parse_empty();
+    t_parse_include_dir();
+
+    test_group("check_authorization");
+    t_authz_admin_full_access();
+    t_authz_wheel_group_allowed();
+    t_authz_wheel_denied_cmd();
+    t_authz_deploy_nopasswd();
+    t_authz_deploy_denied();
+    t_authz_deploy_allow_with_arg_wildcard();
+    t_authz_wildcard_user();
+    t_authz_unknown_user_denied();
+    t_authz_wrong_target();
+    t_authz_run_as_wildcard();
+    t_authz_no_rules();
+    t_authz_group_only_rule();
+    t_authz_global_require_auth_false();
+    t_authz_deny_precedence_over_all();
+    t_authz_multiple_groups();
+    t_authz_deny_does_not_bleed();
+    t_authz_deny_wildcard();
+
+    test_group("lint_policy");
+    t_lint_empty_policy();
+    t_lint_no_user_no_group();
+    t_lint_wildcard_nopasswd_all();
+    t_lint_global_nopasswd();
+    t_lint_ttl_zero();
+    t_lint_run_as_wildcard_all_cmds();
+    t_lint_duplicate_rules();
+    t_lint_unreachable_deny();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

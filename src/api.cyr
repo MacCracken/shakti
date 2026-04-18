@@ -1,0 +1,299 @@
+# api.cyr — consumer API
+#
+# Port of rust-old/src/api.rs. Provides the high-level evaluate()
+# entry point used by the three shakti consumers:
+#   - argonaut (init):   AuthMode::Skip — already authenticated at boot
+#   - agnoshi (shell):   AuthMode::Interactive — full sudo experience
+#   - daimon (agent):    AuthMode::TimestampOnly — no terminal
+#
+# Unlike the Rust version we use plain structs + integer auth modes
+# rather than a builder; the binary-CLI and library callers assemble
+# a ShaktiConfig directly.
+
+# ── AuthMode codes ────────────────────
+enum AuthMode {
+    AUTH_INTERACTIVE = 0;
+    AUTH_TIMESTAMP_ONLY = 1;
+    AUTH_SKIP = 2;
+}
+
+# ── ShaktiConfig struct ────────────────────
+enum CfgOff {
+    CFG_POLICY_PATH = 0;
+    CFG_TARGET_USER = 8;
+    CFG_AUTH_MODE = 16;
+    CFG_SZ = 24;
+}
+
+fn shakti_config_new() {
+    var c = alloc(CFG_SZ);
+    store64(c + CFG_POLICY_PATH, default_policy_path());
+    store64(c + CFG_TARGET_USER, "root");
+    store64(c + CFG_AUTH_MODE, AUTH_INTERACTIVE);
+    return c;
+}
+
+fn cfg_policy_path(c) { return load64(c + CFG_POLICY_PATH); }
+fn cfg_target_user(c) { return load64(c + CFG_TARGET_USER); }
+fn cfg_auth_mode(c) { return load64(c + CFG_AUTH_MODE); }
+
+fn cfg_set_policy_path(c, p) { store64(c + CFG_POLICY_PATH, p); return 0; }
+fn cfg_set_target_user(c, u) { store64(c + CFG_TARGET_USER, u); return 0; }
+fn cfg_set_auth_mode(c, m) { store64(c + CFG_AUTH_MODE, m); return 0; }
+
+# ── Evaluation struct ────────────────────
+# Fields: authorized; require_auth; timestamp_valid; resolved_command;
+#         environment; policy; error_code; error_msg
+enum EvalOff {
+    EV_AUTHORIZED = 0;
+    EV_REQUIRE_AUTH = 8;
+    EV_TIMESTAMP_VALID = 16;
+    EV_RESOLVED_CMD = 24;
+    EV_ENV = 32;
+    EV_POLICY = 40;
+    EV_ERROR_CODE = 48;
+    EV_ERROR_MSG = 56;
+    EV_SZ = 64;
+}
+
+fn eval_new() {
+    var e = alloc(EV_SZ);
+    store64(e + EV_AUTHORIZED, 0);
+    store64(e + EV_REQUIRE_AUTH, 0);
+    store64(e + EV_TIMESTAMP_VALID, 0);
+    store64(e + EV_RESOLVED_CMD, 0);
+    store64(e + EV_ENV, 0);
+    store64(e + EV_POLICY, 0);
+    store64(e + EV_ERROR_CODE, SHK_OK);
+    store64(e + EV_ERROR_MSG, "");
+    return e;
+}
+
+fn eval_authorized(e) { return load64(e + EV_AUTHORIZED); }
+fn eval_require_auth(e) { return load64(e + EV_REQUIRE_AUTH); }
+fn eval_timestamp_valid(e) { return load64(e + EV_TIMESTAMP_VALID); }
+fn eval_resolved_command(e) { return load64(e + EV_RESOLVED_CMD); }
+fn eval_environment(e) { return load64(e + EV_ENV); }
+fn eval_policy(e) { return load64(e + EV_POLICY); }
+fn eval_error_code(e) { return load64(e + EV_ERROR_CODE); }
+fn eval_error_msg(e) { return load64(e + EV_ERROR_MSG); }
+
+# Build a joined "command args..." cstr from an argv vec.
+fn _shk_join_command(argv) {
+    var sb = str_builder_new();
+    var n = vec_len(argv);
+    var i = 0;
+    while (i < n) {
+        if (i > 0) { str_builder_add_cstr(sb, " "); }
+        str_builder_add_cstr(sb, vec_get(argv, i));
+        i = i + 1;
+    }
+    var s = str_builder_build(sb);
+    # Return a null-terminated cstr copy
+    var len = str_len(s);
+    var out = alloc(len + 1);
+    memcpy(out, str_data(s), len);
+    store8(out + len, 0);
+    return out;
+}
+
+# Attach error state to an evaluation without clobbering authorized/require_auth.
+# Callers decide whether authorized remains set (e.g., timestamp expired after
+# a policy match is still "authorized" — the failure is in the auth mode).
+fn _eval_fail(e, code, msg) {
+    store64(e + EV_ERROR_CODE, code);
+    store64(e + EV_ERROR_MSG, msg);
+    return e;
+}
+
+# Look up target home via /etc/passwd (line-based scan). Falls back to
+# /root for root, /home/<user> otherwise. NSS integration would require
+# libc/dlopen which is out of scope for this port.
+fn _target_home(username) {
+    if (streq(username, "root") == 1) { return "/root"; }
+
+    var buf = alloc(65536);
+    var n = file_read_all("/etc/passwd", buf, 65536);
+    if (n > 0) {
+        var ulen = strlen(username);
+        var pos = 0;
+        while (pos < n) {
+            # Line: user:pw:uid:gid:gecos:home:shell
+            if (pos + ulen < n) {
+                if (memeq(buf + pos, username, ulen) == 1) {
+                    if (load8(buf + pos + ulen) == 58) {  # ':'
+                        # Skip 5 ':' to reach home
+                        var colons = 0;
+                        var p = pos;
+                        while (p < n) {
+                            if (load8(buf + p) == 58) { colons = colons + 1; }
+                            if (colons == 5) { p = p + 1; break; }
+                            p = p + 1;
+                        }
+                        # home field runs until next ':'
+                        var hstart = p;
+                        while (p < n) {
+                            if (load8(buf + p) == 58) { break; }
+                            if (load8(buf + p) == 10) { break; }
+                            p = p + 1;
+                        }
+                        var hlen = p - hstart;
+                        var out = alloc(hlen + 1);
+                        memcpy(out, buf + hstart, hlen);
+                        store8(out + hlen, 0);
+                        return out;
+                    }
+                }
+            }
+            # Skip to next line
+            while (pos < n) {
+                if (load8(buf + pos) == 10) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+        }
+    }
+
+    # Fallback /home/<user>
+    var ul = strlen(username);
+    var fb = alloc(6 + ul + 1);
+    memcpy(fb, "/home/", 6);
+    memcpy(fb + 6, username, ul);
+    store8(fb + 6 + ul, 0);
+    return fb;
+}
+
+fn _target_shell(username) {
+    var buf = alloc(65536);
+    var n = file_read_all("/etc/passwd", buf, 65536);
+    if (n > 0) {
+        var ulen = strlen(username);
+        var pos = 0;
+        while (pos < n) {
+            if (pos + ulen < n) {
+                if (memeq(buf + pos, username, ulen) == 1) {
+                    if (load8(buf + pos + ulen) == 58) {
+                        var colons = 0;
+                        var p = pos;
+                        while (p < n) {
+                            if (load8(buf + p) == 58) { colons = colons + 1; }
+                            if (colons == 6) { p = p + 1; break; }
+                            p = p + 1;
+                        }
+                        var sstart = p;
+                        while (p < n) {
+                            if (load8(buf + p) == 10) { break; }
+                            p = p + 1;
+                        }
+                        var slen = p - sstart;
+                        var out = alloc(slen + 1);
+                        memcpy(out, buf + sstart, slen);
+                        store8(out + slen, 0);
+                        return out;
+                    }
+                }
+            }
+            while (pos < n) {
+                if (load8(buf + pos) == 10) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+        }
+    }
+    return "/bin/sh";
+}
+
+# ── evaluate_with_policy ────────────────────
+#
+# Inputs:
+#   config        — ShaktiConfig ptr
+#   policy        — parsed Policy ptr
+#   caller        — cstr (invoking user)
+#   caller_uid    — integer uid
+#   caller_gid    — integer gid
+#   groups        — vec<cstr> of the caller's groups (may be 0 or empty)
+#   command_argv  — vec<cstr> [cmd, arg1, arg2, ...]
+#
+# Returns an Evaluation. On success, eval_authorized == 1 and resolved_command
+# / environment are set. On failure, error_code / error_msg describe why.
+fn evaluate_with_policy(config, policy, caller, caller_uid, caller_gid,
+                       groups, command_argv) {
+    var e = eval_new();
+    store64(e + EV_POLICY, policy);
+
+    # Validate caller
+    var vu = validate_username(caller);
+    if (vu != SHK_OK) { return _eval_fail(e, vu, shk_err_msg(vu)); }
+
+    var defaults = policy_defaults(policy);
+    var max_len = def_max_cmd_len(defaults);
+    var vc = validate_command(command_argv, max_len);
+    if (vc != SHK_OK) { return _eval_fail(e, vc, shk_err_msg(vc)); }
+
+    # Resolve command to absolute path
+    var path_buf = alloc(4096);
+    var rl = resolve_command(vec_get(command_argv, 0), path_buf, 4096);
+    if (rl < 0) {
+        var code = 0 - rl;
+        return _eval_fail(e, code, shk_err_msg(code));
+    }
+    store64(e + EV_RESOLVED_CMD, path_buf);
+
+    # Replace argv[0] with resolved absolute path for authz + environment
+    vec_set(command_argv, 0, path_buf);
+    var full_cmd = _shk_join_command(command_argv);
+
+    # Authorization check
+    var target = cfg_target_user(config);
+    var authz = check_authorization(policy, caller, groups, target, full_cmd);
+    if (authz_status(authz) != AZ_ALLOWED) {
+        store64(e + EV_ERROR_CODE, SHK_ERR_DENIED);
+        store64(e + EV_ERROR_MSG, authz_aux(authz));
+        return e;
+    }
+
+    var rule_ra = authz_aux(authz);
+    store64(e + EV_AUTHORIZED, 1);
+    store64(e + EV_REQUIRE_AUTH, rule_ra);
+
+    # Effective require-auth accounts for AuthMode::Skip
+    var mode = cfg_auth_mode(config);
+    var effective_ra = rule_ra;
+    if (mode == AUTH_SKIP) { effective_ra = 0; }
+
+    # Timestamp check
+    var ts_valid = 0;
+    if (effective_ra == 1) {
+        if (check_timestamp(caller, def_ttl(defaults)) == 1) { ts_valid = 1; }
+    }
+    store64(e + EV_TIMESTAMP_VALID, ts_valid);
+
+    # TimestampOnly fails closed if auth is needed but timestamp is missing
+    if (mode == AUTH_TIMESTAMP_ONLY) {
+        if (effective_ra == 1) {
+            if (ts_valid == 0) {
+                return _eval_fail(e, SHK_ERR_TIMESTAMP_EXPIRED,
+                    "timestamp expired — non-interactive mode cannot re-auth");
+            }
+        }
+    }
+
+    # Build sanitized environment
+    var target_home = _target_home(target);
+    var target_shell = _target_shell(target);
+    var env = sanitize_environment(def_env_keep(defaults), caller,
+        caller_uid, caller_gid, target, target_home, target_shell);
+    store64(e + EV_ENV, env);
+
+    return e;
+}
+
+# ── evaluate ────────────────────
+# Convenience that loads the policy from config.policy_path first.
+fn evaluate(config, caller, caller_uid, caller_gid, groups, command_argv) {
+    var policy = load_policy(cfg_policy_path(config));
+    if (policy == 0) {
+        var e = eval_new();
+        return _eval_fail(e, SHK_ERR_POLICY, "failed to load policy");
+    }
+    return evaluate_with_policy(config, policy, caller,
+        caller_uid, caller_gid, groups, command_argv);
+}
