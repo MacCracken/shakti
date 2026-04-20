@@ -1,0 +1,234 @@
+# cli.tcyr — unit tests for the CLI parser (src/cli.cyr).
+#
+# Previously only exercised indirectly via tests/integration/cli.sh
+# (subprocess spawn + exit-code check). Direct unit coverage gives
+# precise assertions on the parsed CLI struct for each flag shape,
+# option combination, error path, and argv-passthrough case.
+
+include "src/lib.cyr"
+include "src/cli.cyr"
+
+# Build a vec<cstr> from a variadic-style list. Cyrius has no
+# variadic fns at the call site, so helpers take fixed argcs and the
+# tests use whichever matches the case.
+
+fn _v0() { return vec_new(); }
+fn _v1(a) { var v = vec_new(); vec_push(v, a); return v; }
+fn _v2(a, b) { var v = vec_new(); vec_push(v, a); vec_push(v, b); return v; }
+fn _v3(a, b, c) { var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c); return v; }
+fn _v4(a, b, c, d) { var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c); vec_push(v, d); return v; }
+fn _v5(a, b, c, d, e) { var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c); vec_push(v, d); vec_push(v, e); return v; }
+fn _v6(a, b, c, d, e, f) { var v = vec_new(); vec_push(v, a); vec_push(v, b); vec_push(v, c); vec_push(v, d); vec_push(v, e); vec_push(v, f); return v; }
+
+# ── Default / no-arg invocation ────────────────────
+
+fn t_defaults_empty_argv() {
+    # argv = ["shakti"] only — nothing to parse after argv[0].
+    var cli = _parse_cli_from(_v1("shakti"));
+    assert_nonnull(cli, "empty argv parses to a valid CLI struct");
+    assert_streq(load64(cli + CLI_TARGET), "root", "default target = root");
+    assert_streq(load64(cli + CLI_POLICY), default_policy_path(), "default policy path");
+    assert_eq(load64(cli + CLI_INVALIDATE), 0, "invalidate flag off");
+    assert_eq(load64(cli + CLI_LIST), 0, "list flag off");
+    assert_eq(load64(cli + CLI_CHECK), 0, "check flag off");
+    assert_eq(load64(cli + CLI_HELP), 0, "help flag off");
+    assert_eq(load64(cli + CLI_VERSION), 0, "version flag off");
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 0, "argv empty (no command)");
+}
+
+# ── Version / help flags (short + long) ────────────────────
+
+fn t_version_long() {
+    var cli = _parse_cli_from(_v2("shakti", "--version"));
+    assert_nonnull(cli, "--version parses");
+    assert_eq(load64(cli + CLI_VERSION), 1, "--version sets VERSION flag");
+}
+
+fn t_version_short() {
+    var cli = _parse_cli_from(_v2("shakti", "-V"));
+    assert_eq(load64(cli + CLI_VERSION), 1, "-V sets VERSION flag");
+}
+
+fn t_help_long() {
+    var cli = _parse_cli_from(_v2("shakti", "--help"));
+    assert_eq(load64(cli + CLI_HELP), 1, "--help sets HELP flag");
+}
+
+fn t_help_short() {
+    var cli = _parse_cli_from(_v2("shakti", "-h"));
+    assert_eq(load64(cli + CLI_HELP), 1, "-h sets HELP flag");
+}
+
+# ── -u / --user (takes argument) ────────────────────
+
+fn t_user_short() {
+    var cli = _parse_cli_from(_v4("shakti", "-u", "bob", "/bin/ls"));
+    assert_nonnull(cli, "-u bob parses");
+    assert_streq(load64(cli + CLI_TARGET), "bob", "-u sets target to bob");
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 1, "command captured");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 0), "/bin/ls", "command = /bin/ls");
+}
+
+fn t_user_long() {
+    var cli = _parse_cli_from(_v4("shakti", "--user", "alice", "/bin/id"));
+    assert_streq(load64(cli + CLI_TARGET), "alice", "--user sets target");
+}
+
+fn t_user_missing_arg_errors() {
+    # `shakti -u` with no following arg is a parse failure.
+    var cli = _parse_cli_from(_v2("shakti", "-u"));
+    assert_eq(cli, 0, "-u without arg returns 0");
+}
+
+fn t_user_long_missing_arg_errors() {
+    var cli = _parse_cli_from(_v2("shakti", "--user"));
+    assert_eq(cli, 0, "--user without arg returns 0");
+}
+
+# ── -p / --policy (takes argument) ────────────────────
+
+fn t_policy_short() {
+    var cli = _parse_cli_from(_v4("shakti", "-p", "/tmp/test.toml", "/bin/ls"));
+    assert_streq(load64(cli + CLI_POLICY), "/tmp/test.toml", "-p sets policy path");
+}
+
+fn t_policy_long() {
+    var cli = _parse_cli_from(_v4("shakti", "--policy", "/etc/alt.toml", "/bin/id"));
+    assert_streq(load64(cli + CLI_POLICY), "/etc/alt.toml", "--policy sets policy path");
+}
+
+fn t_policy_missing_arg_errors() {
+    var cli = _parse_cli_from(_v2("shakti", "-p"));
+    assert_eq(cli, 0, "-p without arg returns 0");
+}
+
+# ── Flag shorthands ────────────────────
+
+fn t_invalidate() {
+    var cli = _parse_cli_from(_v2("shakti", "-k"));
+    assert_eq(load64(cli + CLI_INVALIDATE), 1, "-k sets INVALIDATE flag");
+}
+
+fn t_invalidate_long() {
+    var cli = _parse_cli_from(_v2("shakti", "--invalidate"));
+    assert_eq(load64(cli + CLI_INVALIDATE), 1, "--invalidate sets INVALIDATE flag");
+}
+
+fn t_list() {
+    var cli = _parse_cli_from(_v2("shakti", "-l"));
+    assert_eq(load64(cli + CLI_LIST), 1, "-l sets LIST flag");
+}
+
+fn t_check() {
+    var cli = _parse_cli_from(_v2("shakti", "-c"));
+    assert_eq(load64(cli + CLI_CHECK), 1, "-c sets CHECK flag");
+}
+
+# ── -- delimiter ────────────────────
+
+fn t_double_dash_allows_option_looking_positional() {
+    # Without --, "-foo" would trip the unknown-option branch and
+    # parse would return 0. With --, everything after is positional.
+    var cli = _parse_cli_from(_v3("shakti", "--", "-foo"));
+    assert_nonnull(cli, "-- protects -foo from option parsing");
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 1, "argv has 1 entry");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 0), "-foo", "argv[0] = -foo");
+}
+
+fn t_double_dash_with_multiple_args() {
+    var cli = _parse_cli_from(_v5("shakti", "--", "/bin/cmd", "-x", "arg"));
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 3, "argv captures 3 entries");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 0), "/bin/cmd", "argv[0]");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 1), "-x", "argv[1] is -x, not an unknown option");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 2), "arg", "argv[2]");
+}
+
+# ── Unknown option ────────────────────
+
+fn t_unknown_option_returns_zero() {
+    var cli = _parse_cli_from(_v2("shakti", "--nonesuch"));
+    assert_eq(cli, 0, "unknown --nonesuch returns 0");
+}
+
+fn t_unknown_short_option_returns_zero() {
+    var cli = _parse_cli_from(_v2("shakti", "-z"));
+    assert_eq(cli, 0, "unknown -z returns 0");
+}
+
+# ── First positional captures rest (current behaviour) ────────────────────
+
+fn t_first_positional_captures_all_trailing() {
+    # Per src/cli.cyr: once a positional is seen, the while loop
+    # pushes the rest of argv into CLI_ARGV without further option
+    # parsing. This is the "shakti cmd arg1 arg2 -flag-that-is-arg"
+    # semantic — flags after the command are args, not shakti flags.
+    var cli = _parse_cli_from(_v5("shakti", "/bin/cmd", "arg1", "-x", "arg2"));
+    assert_nonnull(cli, "positional-first parse succeeds");
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 4, "all 4 entries captured");
+    assert_streq(vec_get(load64(cli + CLI_ARGV), 2), "-x", "-x is captured as arg, not parsed as flag");
+}
+
+# ── Flag ordering / combinations ────────────────────
+
+fn t_user_before_flag() {
+    var cli = _parse_cli_from(_v5("shakti", "-u", "alice", "-k", "/bin/id"));
+    assert_streq(load64(cli + CLI_TARGET), "alice", "user = alice");
+    assert_eq(load64(cli + CLI_INVALIDATE), 1, "invalidate set");
+    assert_eq(vec_len(load64(cli + CLI_ARGV)), 1, "command present");
+}
+
+fn t_flag_before_user() {
+    var cli = _parse_cli_from(_v5("shakti", "-k", "-u", "alice", "/bin/id"));
+    assert_streq(load64(cli + CLI_TARGET), "alice", "user = alice even after -k");
+    assert_eq(load64(cli + CLI_INVALIDATE), 1, "invalidate still set");
+}
+
+fn t_multiple_flags() {
+    # -l + -c together doesn't have special semantics; both flags set,
+    # main.cyr's run() picks one based on priority (check first, then list).
+    var cli = _parse_cli_from(_v3("shakti", "-l", "-c"));
+    assert_eq(load64(cli + CLI_LIST), 1, "-l set");
+    assert_eq(load64(cli + CLI_CHECK), 1, "-c set");
+}
+
+# ── Runner ────────────────────
+
+fn main() {
+    alloc_init();
+    test_group("defaults");
+    t_defaults_empty_argv();
+    test_group("version + help");
+    t_version_long();
+    t_version_short();
+    t_help_long();
+    t_help_short();
+    test_group("-u / --user");
+    t_user_short();
+    t_user_long();
+    t_user_missing_arg_errors();
+    t_user_long_missing_arg_errors();
+    test_group("-p / --policy");
+    t_policy_short();
+    t_policy_long();
+    t_policy_missing_arg_errors();
+    test_group("flag shorthands");
+    t_invalidate();
+    t_invalidate_long();
+    t_list();
+    t_check();
+    test_group("-- delimiter");
+    t_double_dash_allows_option_looking_positional();
+    t_double_dash_with_multiple_args();
+    test_group("unknown option");
+    t_unknown_option_returns_zero();
+    t_unknown_short_option_returns_zero();
+    test_group("positional + combinations");
+    t_first_positional_captures_all_trailing();
+    t_user_before_flag();
+    t_flag_before_user();
+    t_multiple_flags();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

@@ -1,15 +1,43 @@
 # fnptr.cyr — function pointer support via indirect call
 # Usage: include "lib/fnptr.cyr"
 #
-# Call a function through a pointer stored in a variable.
-# The fncallN functions set up args, call through the pointer,
-# and return the result.
+# Call a function through a pointer stored in a variable. The fncallN
+# functions load args, call through the pointer, return the result.
+# fncall0..fncall8 are available (ceiling lifted from 6 to 8 at v5.4.13).
 #
-# Two arch-specific bodies: x86_64 System V ABI uses rdi/rsi/rdx/rcx/r8/r9
-# for the first six args; aarch64 AAPCS64 uses x0..x5. Cyrius lays params
-# out at [rbp-(i+1)*8] / [x29,#-(i+1)*8] on both arches, so we load each
-# arg from its local slot into the ABI register, load fp into a scratch
-# (rax / x9), indirect-call, and store rax / x0 back into the result slot.
+# Calling convention (both arches — cyrius's own, NOT AAPCS64's x0..x7):
+#   - Args 1-6 in registers: rdi/rsi/rdx/rcx/r8/r9 (x86_64 SysV) or
+#     x0..x5 (aarch64 — cyrius uses only 6 arg registers to stay
+#     symmetric with x86_64 SysV; see src/backend/aarch64/emit.cyr).
+#   - Args 7+ on the stack. x86_64: single stack slot per arg at
+#     [rsp+N*8]. aarch64: 16 bytes per arg (preserves SP alignment),
+#     pushed in pidx order via `str xN, [sp, #-16]!`.
+#   - fp loaded into rax (x86) / x9 (aarch64) for the indirect call.
+#   - Result comes back in rax / x0 and is stored to the result slot.
+#   - Cyrius pads the local frame to 16 bytes (parse.cyr:1505
+#     `fsz = (flc*8 + 15) & ~15`), so RSP is 16-byte aligned in the
+#     body of every fncallN.
+#
+# Limitations — when NOT to use fncallN directly (use a C shim instead):
+#   * struct-by-value args — SysV/AAPCS64 aggregate classification
+#     (SysV §3.2.3, AAPCS64 §B.4) splits these into register pairs
+#     or stack-home. fncallN loads args into integer registers only.
+#   * float / double args — SysV puts them in xmm0..xmm7, AAPCS64 in
+#     v0..v7. fncallN doesn't touch SSE / FP registers.
+#   * variadic callees — SysV variadic requires AL = number of SSE
+#     regs used; fncallN doesn't set AL. On aarch64 variadic uses x8
+#     as the indirect result register, which fncallN also doesn't
+#     set up.
+#   * C functions with >6 args on aarch64 — cyrius's 6-register
+#     convention diverges from AAPCS64's 8-register convention.
+#     fncall7/fncall8 are cyrius-to-cyrius-safe but NOT AAPCS64-
+#     compatible for args 7-8.
+#
+# For any of the above, write a C shim that accepts a packed-args
+# struct by pointer and unpacks on the C side. See mabda's
+# `deps/wgpu_main.c` (`wgpu_shim_buffer_map`, `wgpu_shim_copy_*`)
+# for the canonical pattern; full policy + worked examples in
+# `docs/ffi/struct-packing.md` and `docs/ffi/fncall-abi.md`.
 
 # Call function pointer fp with zero arguments
 fn fncall0(fp) {
@@ -188,6 +216,107 @@ fn fncall6(fp, a, b, c, d, e, f) {
         0xA9; 0x83; 0x5F; 0xF8;    # ldur x9, [x29, #-8]   (fp)
         0x20; 0x01; 0x3F; 0xD6;    # blr x9
         0xA0; 0x03; 0x1C; 0xF8;    # stur x0, [x29, #-64]  (result)
+    }
+    #endif
+    return result;
+}
+
+# Call function pointer fp with seven arguments (v5.4.13).
+#
+# Both arches follow cyrius's calling convention (x0..x5 / rdi..r9 for
+# args 1-6, stack for args 7+). On aarch64 this matches cyrius's own
+# caller pattern in src/backend/aarch64/emit.cyr (ECALLPOPS) — NOT
+# AAPCS64's x0..x7 register-passing convention. When calling a C
+# function with ≥7 args on aarch64 directly via fncall7/8, the ABI
+# mismatch will cause garbage for args 7-8: use a C shim that takes
+# a struct pointer instead (see docs/ffi/struct-packing.md).
+#
+# x86_64: cyrius pads the local frame to 16 bytes (parse.cyr:1505:
+# `fsz = (flc*8 + 15) & ~15`), so RSP ≡ 0 mod 16 in the body.
+# Reserving 16 bytes via `sub rsp, 16` keeps SysV at-call alignment
+# while providing room for the single 8-byte stack arg plus 8 bytes
+# of padding.
+# aarch64: push args 7+ with `str x9, [sp, #-16]!` (16 bytes per
+# arg to preserve alignment), restore via `add sp, sp, #N*16`.
+fn fncall7(fp, a, b, c, d, e, f, g) {
+    var result = 0;
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x83; 0xEC; 0x10;         # sub rsp, 16       (reserve stack-arg slot + padding)
+        0x48; 0x8B; 0x45; 0xC0;         # mov rax, [rbp-64] (g)
+        0x48; 0x89; 0x04; 0x24;         # mov [rsp], rax    (stack arg 7)
+        0x4C; 0x8B; 0x4D; 0xC8;         # mov r9,  [rbp-56] (f)
+        0x4C; 0x8B; 0x45; 0xD0;         # mov r8,  [rbp-48] (e)
+        0x48; 0x8B; 0x4D; 0xD8;         # mov rcx, [rbp-40] (d)
+        0x48; 0x8B; 0x55; 0xE0;         # mov rdx, [rbp-32] (c)
+        0x48; 0x8B; 0x75; 0xE8;         # mov rsi, [rbp-24] (b)
+        0x48; 0x8B; 0x7D; 0xF0;         # mov rdi, [rbp-16] (a)
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x10;         # add rsp, 16       (restore)
+        0x48; 0x89; 0x45; 0xB8;         # mov [rbp-72], rax (result)
+    }
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    asm {
+        0xA9; 0x03; 0x5C; 0xF8;    # ldur x9, [x29, #-64]  (g)
+        0xE9; 0x0F; 0x1F; 0xF8;    # str x9, [sp, #-16]!   (push g — stack arg 7)
+        0xA5; 0x83; 0x5C; 0xF8;    # ldur x5, [x29, #-56]  (f)
+        0xA4; 0x03; 0x5D; 0xF8;    # ldur x4, [x29, #-48]  (e)
+        0xA3; 0x83; 0x5D; 0xF8;    # ldur x3, [x29, #-40]  (d)
+        0xA2; 0x03; 0x5E; 0xF8;    # ldur x2, [x29, #-32]  (c)
+        0xA1; 0x83; 0x5E; 0xF8;    # ldur x1, [x29, #-24]  (b)
+        0xA0; 0x03; 0x5F; 0xF8;    # ldur x0, [x29, #-16]  (a)
+        0xA9; 0x83; 0x5F; 0xF8;    # ldur x9, [x29, #-8]   (fp)
+        0x20; 0x01; 0x3F; 0xD6;    # blr x9
+        0xFF; 0x43; 0x00; 0x91;    # add sp, sp, #16       (restore)
+        0xA0; 0x83; 0x1B; 0xF8;    # stur x0, [x29, #-72]  (result)
+    }
+    #endif
+    return result;
+}
+
+# Call function pointer fp with eight arguments (v5.4.13).
+# Push order on aarch64: g (arg 7) FIRST, then h (arg 8), so at `blr`
+# time [sp+0] = h and [sp+16] = g — matches cyrius caller's
+# ECALLPOPS step 3 (`str x10, [sp, #-16]!; str x9, [sp, #-16]!`).
+fn fncall8(fp, a, b, c, d, e, f, g, h) {
+    var result = 0;
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x83; 0xEC; 0x10;         # sub rsp, 16         (room for args 7+8)
+        0x48; 0x8B; 0x45; 0xC0;         # mov rax, [rbp-64]   (g)
+        0x48; 0x89; 0x04; 0x24;         # mov [rsp], rax      (stack arg 7)
+        0x48; 0x8B; 0x45; 0xB8;         # mov rax, [rbp-72]   (h)
+        0x48; 0x89; 0x44; 0x24; 0x08;   # mov [rsp+8], rax    (stack arg 8)
+        0x4C; 0x8B; 0x4D; 0xC8;         # mov r9,  [rbp-56]   (f)
+        0x4C; 0x8B; 0x45; 0xD0;         # mov r8,  [rbp-48]   (e)
+        0x48; 0x8B; 0x4D; 0xD8;         # mov rcx, [rbp-40]   (d)
+        0x48; 0x8B; 0x55; 0xE0;         # mov rdx, [rbp-32]   (c)
+        0x48; 0x8B; 0x75; 0xE8;         # mov rsi, [rbp-24]   (b)
+        0x48; 0x8B; 0x7D; 0xF0;         # mov rdi, [rbp-16]   (a)
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]    (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x10;         # add rsp, 16
+        0x48; 0x89; 0x45; 0xB0;         # mov [rbp-80], rax   (result)
+    }
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    asm {
+        0xA9; 0x03; 0x5C; 0xF8;    # ldur x9, [x29, #-64]  (g = arg 7)
+        0xE9; 0x0F; 0x1F; 0xF8;    # str x9, [sp, #-16]!   (push g first)
+        0xA9; 0x83; 0x5B; 0xF8;    # ldur x9, [x29, #-72]  (h = arg 8)
+        0xE9; 0x0F; 0x1F; 0xF8;    # str x9, [sp, #-16]!   (push h; [sp+0]=h, [sp+16]=g)
+        0xA5; 0x83; 0x5C; 0xF8;    # ldur x5, [x29, #-56]  (f)
+        0xA4; 0x03; 0x5D; 0xF8;    # ldur x4, [x29, #-48]  (e)
+        0xA3; 0x83; 0x5D; 0xF8;    # ldur x3, [x29, #-40]  (d)
+        0xA2; 0x03; 0x5E; 0xF8;    # ldur x2, [x29, #-32]  (c)
+        0xA1; 0x83; 0x5E; 0xF8;    # ldur x1, [x29, #-24]  (b)
+        0xA0; 0x03; 0x5F; 0xF8;    # ldur x0, [x29, #-16]  (a)
+        0xA9; 0x83; 0x5F; 0xF8;    # ldur x9, [x29, #-8]   (fp)
+        0x20; 0x01; 0x3F; 0xD6;    # blr x9
+        0xFF; 0x83; 0x00; 0x91;    # add sp, sp, #32       (restore 2 × 16 bytes)
+        0xA0; 0x03; 0x1B; 0xF8;    # stur x0, [x29, #-80]  (result)
     }
     #endif
     return result;

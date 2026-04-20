@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.4.11"
+cyrius = "5.4.17"
 repository = "https://github.com/MacCracken/shakti"
 
 [build]

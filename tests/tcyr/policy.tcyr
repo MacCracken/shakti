@@ -37,6 +37,45 @@ fn t_parse_rule_count() {
     assert_eq(vec_len(policy_rules(p)), 4, "4 rules parsed");
 }
 
+# Regression: multi-line array values used to truncate at the first
+# newline after `[`, silently dropping every entry. Fixed by porting
+# the cyrius v5.4.17 `lib/toml.cyr` bracket/quote state machine into
+# parse_policy's value-extract block. See
+# docs/development/issues/2026-04-19-mini-toml-parser-limits.md.
+fn t_multiline_array_parses() {
+    var s = "[defaults]\ntimestamp_ttl = 600\n\n[[rules]]\nuser = \"alice\"\ncommands = [\n    \"/usr/bin/id\",\n    \"/usr/bin/whoami\",\n    \"/usr/bin/systemctl restart *\",\n]\nrequire_auth = true\n";
+    var p = _parse_src(s);
+    assert_nonnull(p, "multi-line policy parses");
+    assert_eq(def_ttl(policy_defaults(p)), 600, "defaults parsed despite multi-line array below");
+    var rules = policy_rules(p);
+    assert_eq(vec_len(rules), 1, "1 rule parsed");
+    var r = vec_get(rules, 0);
+    var cmds = rule_commands(r);
+    assert_eq(vec_len(cmds), 3, "multi-line array captured all 3 entries");
+    assert_streq(vec_get(cmds, 0), "/usr/bin/id", "first entry");
+    assert_streq(vec_get(cmds, 1), "/usr/bin/whoami", "second entry");
+    assert_streq(vec_get(cmds, 2), "/usr/bin/systemctl restart *", "third entry with inner spaces");
+    assert_eq(rule_require_auth(r), 1, "key after multi-line array still parses");
+}
+
+fn t_multiline_array_empty() {
+    var s = "[[rules]]\nuser = \"alice\"\ncommands = [\n]\n";
+    var p = _parse_src(s);
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(vec_len(rule_commands(r)), 0, "empty multi-line array parses as empty vec");
+}
+
+fn t_multiline_array_with_deny() {
+    # Both commands and deny_commands on multiple lines, interleaved
+    # with other keys — exercises the scan resuming cleanly after ']'.
+    var s = "[[rules]]\nuser = \"ops\"\ncommands = [\n    \"/usr/bin/journalctl\",\n    \"/usr/sbin/*\",\n]\ndeny_commands = [\n    \"/usr/bin/systemctl stop sshd\",\n]\nrequire_auth = true\n";
+    var p = _parse_src(s);
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(vec_len(rule_commands(r)), 2, "commands = 2 entries");
+    assert_eq(vec_len(rule_deny_commands(r)), 1, "deny_commands = 1 entry");
+    assert_eq(rule_require_auth(r), 1, "require_auth parses after both arrays");
+}
+
 fn t_parse_minimal_rule() {
     var p = _parse_src("[[rules]]\nuser = \"bob\"\n");
     var r = vec_get(policy_rules(p), 0);
@@ -254,6 +293,9 @@ fn main() {
     test_group("parse_policy");
     t_parse_defaults();
     t_parse_rule_count();
+    t_multiline_array_parses();
+    t_multiline_array_empty();
+    t_multiline_array_with_deny();
     t_parse_minimal_rule();
     t_parse_empty();
     t_parse_include_dir();

@@ -24,17 +24,32 @@ the original Rust implementation preserved in `rust-old/`.
 
 ```sh
 cyrius build src/main.cyr build/shakti
+cyrius distlib                  # regenerate dist/shakti.cyr bundle
 ```
 
-Requires [Cyrius 5.2.1](https://github.com/MacCracken/cyrius) or later.
+Requires [Cyrius 5.4.11](https://github.com/MacCracken/cyrius) or later.
 Stdlib is vendored under `lib/` for reproducible builds.
+
+## Install
+
+```sh
+sudo ./scripts/install.sh --with-example-policy
+```
+
+Installs `build/shakti` setuid-root to `/usr/bin/shakti`, creates
+`/etc/agnos/` with example policy + `sudoers.d/` fragment directory,
+sets up `/var/run/agnos/sudo` (0700), drops the `tmpfiles.d` snippet,
+and installs the PAM service config. Idempotent — safe to re-run
+after rebuilding. See `scripts/install.sh --help` for path overrides
+and flag options.
 
 ## Test / bench
 
 ```sh
-cyrius test                   # auto-discovers tests/tcyr/*.tcyr (219 tests)
+cyrius test                          # auto-discovers tests/tcyr/*.tcyr
 cyrius bench tests/bcyr/core.bcyr
-./scripts/bench-history.sh    # appends to benchmarks/history.csv
+./scripts/bench-history.sh           # appends to benchmarks/history.csv
+sh tests/integration/cli.sh          # CLI + consumer-bundle probe
 ```
 
 ## Architecture

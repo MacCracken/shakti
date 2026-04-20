@@ -1,0 +1,119 @@
+# cli.cyr — CLI argument parsing for the shakti binary.
+#
+# Extracted from src/main.cyr so tests can exercise the parser
+# without pulling main.cyr's top-level `syscall(SYS_EXIT, rc)`.
+#
+# NOT included in src/lib.cyr (not part of the consumer bundle):
+# consumers of the library API don't need shakti's specific CLI
+# surface — they build their own entry points on top of
+# `evaluate_with_policy` / `ShaktiConfig`. Include path:
+#     src/main.cyr          → explicit `include "src/cli.cyr"`
+#     tests/tcyr/cli.tcyr   → explicit `include "src/cli.cyr"`
+# Both must include "src/lib.cyr" first for SHK_* constants +
+# default_policy_path().
+
+# CliArgs struct (heap-allocated, 64 bytes):
+#   target_user (cstr), policy_path (cstr), invalidate (0/1),
+#   list (0/1), check (0/1), help (0/1), version (0/1),
+#   argv (vec<cstr> — command + args)
+enum CliOff {
+    CLI_TARGET = 0;
+    CLI_POLICY = 8;
+    CLI_INVALIDATE = 16;
+    CLI_LIST = 24;
+    CLI_CHECK = 32;
+    CLI_HELP = 40;
+    CLI_VERSION = 48;
+    CLI_ARGV = 56;
+    CLI_SZ = 64;
+}
+
+fn _cli_new() {
+    var c = alloc(CLI_SZ);
+    store64(c + CLI_TARGET, "root");
+    store64(c + CLI_POLICY, default_policy_path());
+    store64(c + CLI_INVALIDATE, 0);
+    store64(c + CLI_LIST, 0);
+    store64(c + CLI_CHECK, 0);
+    store64(c + CLI_HELP, 0);
+    store64(c + CLI_VERSION, 0);
+    store64(c + CLI_ARGV, vec_new());
+    return c;
+}
+
+# Parse a caller-supplied vec<cstr> into a CLI struct. args_vec must
+# include the program name at index 0 (argv[0]), matching the
+# conventional argv shape. Returns the CLI struct on success or 0 on
+# parse failure (missing flag argument, unknown option).
+#
+# Unknown-option error message is written to stderr. Other failures
+# are silent — the caller decides how to report them.
+fn _parse_cli_from(args_vec) {
+    var cli = _cli_new();
+    var n = vec_len(args_vec);
+    var i = 1;                       # skip argv[0] (program name)
+    var saw_dd = 0;
+    while (i < n) {
+        var a = vec_get(args_vec, i);
+        if (saw_dd == 1) {
+            vec_push(load64(cli + CLI_ARGV), a);
+            i = i + 1;
+        } elif (streq(a, "-u") == 1 || streq(a, "--user") == 1) {
+            i = i + 1;
+            if (i >= n) { return 0; }
+            store64(cli + CLI_TARGET, vec_get(args_vec, i));
+            i = i + 1;
+        } elif (streq(a, "-p") == 1 || streq(a, "--policy") == 1) {
+            i = i + 1;
+            if (i >= n) { return 0; }
+            store64(cli + CLI_POLICY, vec_get(args_vec, i));
+            i = i + 1;
+        } elif (streq(a, "-k") == 1 || streq(a, "--invalidate") == 1) {
+            store64(cli + CLI_INVALIDATE, 1);
+            i = i + 1;
+        } elif (streq(a, "-l") == 1 || streq(a, "--list") == 1) {
+            store64(cli + CLI_LIST, 1);
+            i = i + 1;
+        } elif (streq(a, "-c") == 1 || streq(a, "--check") == 1) {
+            store64(cli + CLI_CHECK, 1);
+            i = i + 1;
+        } elif (streq(a, "-h") == 1 || streq(a, "--help") == 1) {
+            store64(cli + CLI_HELP, 1);
+            i = i + 1;
+        } elif (streq(a, "-V") == 1 || streq(a, "--version") == 1) {
+            store64(cli + CLI_VERSION, 1);
+            i = i + 1;
+        } elif (streq(a, "--") == 1) {
+            saw_dd = 1;
+            i = i + 1;
+        } elif (load8(a) == 45) {
+            # Unknown option. `-` is a valid first-char for positional
+            # args ONLY after `--`; we handle that case above via saw_dd.
+            file_write(2, "shakti: unknown option: ", 24);
+            file_write(2, a, strlen(a));
+            file_write(2, "\n", 1);
+            return 0;
+        } else {
+            # First positional — the rest of args_vec is command + args.
+            while (i < n) {
+                vec_push(load64(cli + CLI_ARGV), vec_get(args_vec, i));
+                i = i + 1;
+            }
+        }
+    }
+    return cli;
+}
+
+# Convenience wrapper: collects the real argv via argc()/argv() into
+# a vec<cstr> and delegates to _parse_cli_from. Used by src/main.cyr's
+# run() entry point.
+fn _parse_cli() {
+    var args = vec_new();
+    var n = argc();
+    var i = 0;
+    while (i < n) {
+        vec_push(args, argv(i));
+        i = i + 1;
+    }
+    return _parse_cli_from(args);
+}

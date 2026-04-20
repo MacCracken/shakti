@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-20
+
+### Changed
+
+- **Cyrius toolchain pin 5.4.11 → 5.4.17**. Released specifically to
+  unblock shakti's mini-TOML multi-line array work — `lib/toml.cyr`
+  gained the canonical bracket/quote state-machine algorithm shakti
+  ports in this release. Also inherits v5.4.12-1 (toolchain cleanup),
+  v5.4.13 (`fncall7`/`fncall8`), v5.4.14 (dep-tag fix), v5.4.15
+  (`lib/keccak.cyr`), v5.4.16 (keccak rotl64 inlining) — none
+  load-bearing for shakti today.
+
+### Fixed
+
+- **Multi-line arrays in policy files now parse correctly.**
+  Previously, any `commands = [` followed by a newline silently
+  truncated to an empty array — operators writing reviewable
+  one-entry-per-line policies got the fail-closed path (no commands
+  matched) instead of the intended policy. Ported cyrius v5.4.17's
+  `lib/toml.cyr:elif (vc == 91)` algorithm into `src/policy.cyr:
+  parse_policy`: detect `[` as first non-space char after `=`, walk
+  forward tracking quote state (quoted `]` inside a string doesn't
+  close the outer bracket) and bracket depth (nested `[` bumps
+  depth). Closes
+  `docs/development/issues/2026-04-19-mini-toml-parser-limits.md`.
+- **`_shk_parse_str_array` defensive advance-guard.** Unexpected
+  characters inside array bodies (notably `#` — inline array
+  comments remain out of scope) used to stall both inner loops with
+  `pos` unchanged, infinite-looping the parser. Outer loop now
+  records `loop_start` and force-advances 1 byte if the iteration
+  didn't progress. Silent-drop of the malformed entry rather than
+  hanging.
+
+### Added
+
+- **`tests/tcyr/policy.tcyr:t_multiline_array_parses` +
+  `t_multiline_array_empty` + `t_multiline_array_with_deny`** —
+  three new positive-assertion tests encoding the fixed behaviour
+  (62 cases total in `policy.tcyr`, up from 50). Closes the
+  resolution doc's acceptance gate 2.
+- **`docs/examples/sudoers.toml` + `fragments/10-deploy.toml` +
+  `fragments/20-ops.toml` un-squished** back to multi-line arrays
+  for reviewability. Smoke-test at `tests/tcyr/examples_smoke.tcyr`
+  still passes all 17 cases against the new shape.
+- **`docs/examples/README.md` "Formatting limits" updated**: case 1
+  (multi-line arrays) removed; case 2 (inline `#` in array body)
+  documented with two workarounds (out-of-array comment, whole-rule
+  comment); case 3 (triple-quoted strings) marked out of scope.
+
+
+
 ### Changed
 
 - **Cyrius toolchain pin 5.2.1 → 5.4.11** (`cyrius.cyml`). Brings in
@@ -134,6 +185,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   harness.
 - Test count: **252 `.tcyr` unit assertions** (up from 239) +
   **20,101 fuzz assertions** + 18 integration + bench harness.
+
+### Install
+
+- **`scripts/install.sh`** — idempotent system installer. Installs
+  `build/shakti` setuid-root to `/usr/bin/shakti` (mode 4755),
+  creates `/etc/agnos/` with `sudoers.d/` fragment directory,
+  provisions `/var/run/agnos/sudo` (mode 0700), drops the
+  `tmpfiles.d` snippet, installs the PAM service config. Flags:
+  `--with-example-policy` copies the annotated example in as the
+  starting policy; `--no-pam` / `--no-tmpfiles` skip those steps;
+  `PREFIX` / `SYSCONFDIR` / `RUNDIR` / `TMPFILESDIR` env
+  overrides for non-standard layouts. Refuses to run non-root.
+- **`etc/tmpfiles.d/shakti.conf`** — systemd-tmpfiles entry that
+  recreates `/var/run/agnos/sudo` (0700 root:root) at every boot,
+  since `/var/run` is tmpfs. Avoids first-invocation mkdir races
+  between concurrent shakti calls.
+- **README** — added Install section. Test-command list updated with
+  integration script + cyrius version floor bumped to 5.4.11.
+
+### CLI parser refactor + direct unit coverage
+
+- **`src/cli.cyr`** (new) — CLI parsing extracted from `src/main.cyr`
+  so tests can include it without triggering main's top-level
+  `syscall(SYS_EXIT, rc)`. Not added to the consumer bundle —
+  library consumers build their own entry points on
+  `evaluate_with_policy`; shakti's CLI surface is binary-specific.
+  `_parse_cli()` is now a thin wrapper over `_parse_cli_from(args_vec)`
+  that collects the real argv from `argc()` / `argv()`.
+- **`tests/tcyr/cli.tcyr`** — **47 direct unit assertions** across
+  defaults, `--version`/`-V`, `--help`/`-h`, `-u`/`--user`,
+  `-p`/`--policy` (including missing-arg error paths),
+  `-k`/`-l`/`-c` flag shorthands, `--` delimiter handling,
+  unknown-option rejection, first-positional-captures-rest
+  semantics, and flag-ordering combinations. Previously only
+  exercised via subprocess integration tests; now every branch
+  in the parser has a targeted assertion.
 
 ### Known limitations
 

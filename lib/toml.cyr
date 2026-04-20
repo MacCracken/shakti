@@ -186,6 +186,29 @@ fn toml_parse(src) {
                         value = _toml_parse_str(data, pos, slen);
                         pos = _toml_str_end(data, pos, slen);
                     }
+                    # Array "[ ... ]" — may span multiple lines (v5.4.17).
+                    # Walk forward tracking quote state and bracket depth so
+                    # `\n` inside the array body doesn't terminate the value.
+                    # Nested arrays bump depth defensively; quoted `]` inside
+                    # a string doesn't close the outer bracket.
+                    elif (vc == 91) {
+                        var astart = pos;
+                        var depth = 1;
+                        var in_quote = 0;
+                        pos = pos + 1;
+                        while (pos < slen && depth > 0) {
+                            var ch = load8(data + pos);
+                            if (in_quote == 1) {
+                                if (ch == 34) { in_quote = 0; }
+                            } else {
+                                if (ch == 34) { in_quote = 1; }
+                                elif (ch == 91) { depth = depth + 1; }
+                                elif (ch == 93) { depth = depth - 1; }
+                            }
+                            pos = pos + 1;
+                        }
+                        value = str_new(data + astart, pos - astart);
+                    }
                     # Unquoted value (number, boolean, etc) — read to end of line
                     else {
                         var vstart = pos;

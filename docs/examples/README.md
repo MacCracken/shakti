@@ -40,26 +40,47 @@ integration tests cover the defense gates at
 
 ## Formatting limits
 
-**Arrays must be on a single line.** The cyrius-port's mini-TOML
-parser (`src/policy.cyr:_shk_parse_str_array`) does not support
-multi-line array values:
+Multi-line arrays are supported (shakti 0.2.1+ — ported from the
+canonical cyrius v5.4.17 `lib/toml.cyr` algorithm). Both styles
+parse identically:
 
 ```toml
-# OK
+# Single line
 commands = ["/usr/bin/systemctl restart *", "/usr/bin/docker"]
 
-# NOT OK — will parse the first element only and silently drop the rest
+# Multi-line (recommended for reviewability)
 commands = [
     "/usr/bin/systemctl restart *",
     "/usr/bin/docker",
 ]
 ```
 
-Inline comments (`# text`) are stripped up to `\n`. Mixed `"`/`'`
-quoting works. Full TOML (datetimes, inline tables, multi-line
-strings) is not supported — the parser is deliberately minimal.
-Multi-line array support is tracked as a future enhancement; for now
-operators write one `commands = [...]` per line per rule.
+Still **not supported** by shakti's local parser:
+
+- **`#` comments inside array bodies.** An unquoted `#` between `[`
+  and `]` is treated as content and will confuse
+  `_shk_parse_str_array` — the defensive advance-guard prevents
+  infinite loops, but the entry is silently dropped. To disable a
+  command temporarily, move the `#` to a line outside the array:
+
+  ```toml
+  # disabled pending security review:
+  # "/usr/bin/risky-tool",
+  commands = [
+      "/usr/bin/foo",
+      "/usr/bin/baz",
+  ]
+  ```
+
+  Or comment out the entire `[[rules]]` table.
+
+- **Triple-quoted strings (`"""..."""`)**, datetimes, inline tables,
+  heterogeneous arrays, dotted keys. The parser is deliberately
+  minimal — shakti's sudoers schema uses scalar strings / ints /
+  bools, `[defaults]` + `[[rules]]` sections, and string arrays.
+
+Inline comments (`# text`) on scalar key-value lines are stripped
+up to `\n`. Mixed `"`/`'` string quoting works.
 
 ## File permissions
 

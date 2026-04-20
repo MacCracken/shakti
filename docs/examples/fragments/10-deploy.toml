@@ -5,19 +5,31 @@
 # file per team or role, permissions-reviewable by the security
 # team independently of the base policy.
 
-# Arrays must be single-line — cyrius-port parser limitation.
 [[rules]]
 user = "deploy"
 run_as = "root"
-commands = ["/usr/bin/systemctl restart *", "/usr/bin/systemctl reload *", "/usr/bin/journalctl -u *"]
-deny_commands = ["/usr/bin/systemctl stop firewalld", "/usr/bin/systemctl stop sshd"]
+commands = [
+    "/usr/bin/systemctl restart *",
+    "/usr/bin/systemctl reload *",
+    "/usr/bin/journalctl -u *",
+]
+deny_commands = [
+    "/usr/bin/systemctl stop firewalld",
+    "/usr/bin/systemctl stop sshd",
+]
 require_auth = false
 description = "CI deploy — service restart only, NOPASSWD"
 
 [[rules]]
 user = "build-bot"
 run_as = "root"
-commands = ["/usr/bin/apt-get update", "/usr/bin/apt-get install -y *"]
-deny_commands = ["/usr/bin/apt-get remove *", "/usr/bin/apt-get purge *"]
+commands = [
+    "/usr/bin/apt-get update",
+    "/usr/bin/apt-get install -y *",
+]
+deny_commands = [
+    "/usr/bin/apt-get remove *",
+    "/usr/bin/apt-get purge *",
+]
 require_auth = false
 description = "build bot — install only"
