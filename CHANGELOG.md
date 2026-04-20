@@ -135,6 +135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test count: **252 `.tcyr` unit assertions** (up from 239) +
   **20,101 fuzz assertions** + 18 integration + bench harness.
 
+### Documentation expansion
+
+- **`docs/architecture/overview.md`** — added "Library boundary and
+  distribution" section covering the binary/library split, the
+  `cyrius distlib` mechanics, the 9-file bundle-order map with
+  cross-module dependencies annotated, the publish flow
+  (edit → test → distlib → integration probe → commit), and the
+  cyrius-toolchain floor for consumers. Module Structure table now
+  has an "In library bundle" column marking `main.cyr` as binary-
+  only.
+
 ### Documentation audit
 
 - **`docs/architecture/overview.md`** — purged Rust-era claims:

@@ -129,15 +129,92 @@ Files in `include_dir` (e.g., `/etc/agnos/sudoers.d/*.toml`) are loaded in lexic
 
 ## Module Structure
 
-| Module | Responsibility |
-|--------|---------------|
-| `policy` | TOML parsing, fragment loading, authorization engine, policy linting |
-| `validate` | Command validation, command matching, command resolution, username validation |
-| `env` | Environment sanitization (unsafe var lists, LD_* prefix blocking) |
-| `timestamp` | Credential caching with per-TTY isolation and tamper detection |
-| `auth` | PAM and su authentication backends |
-| `audit` | Structured journald logging and file-based audit trail |
-| `api` | Consumer library API (`ShaktiConfig`, `Evaluation`, `evaluate()`) |
+| Module | In library bundle | Responsibility |
+|---|:-:|---|
+| `lib.cyr` | ✓ | Error codes (`SHK_ERR_*`), cross-module constants, version string, default paths. Required first in include order. |
+| `validate.cyr` | ✓ | Command validation, command matching, command resolution, username validation |
+| `env.cyr` | ✓ | Environment sanitization (unsafe var hashmap, `LD_*` / `BASH_FUNC_*` prefix blocking) |
+| `identity.cyr` | ✓ | `/etc/passwd` / `/etc/group` lookups (uid → name, name → uid, group membership, supplementary GID vector) |
+| `timestamp.cyr` | ✓ | Credential caching with per-TTY isolation and tamper detection |
+| `audit.cyr` | ✓ | Structured journald logging and file-based audit trail |
+| `auth.cyr` | ✓ | `/usr/bin/su` shim; PAM stub reserved for cyrius-5.5.x libpam binding |
+| `policy.cyr` | ✓ | TOML parsing, fragment loading (`include_dir`), authorization engine, policy linter |
+| `api.cyr` | ✓ | High-level consumer API (`ShaktiConfig`, `Evaluation`, `evaluate`, `evaluate_with_policy`) |
+| `main.cyr` | ✗ | CLI entry — argument parsing, interactive password prompt, exec drop, `syscall(SYS_EXIT, rc)`. Binary-only; excluded from the bundle. |
+
+## Library boundary and distribution
+
+Shakti ships two artefacts from one source tree:
+
+```
+src/main.cyr ─┐
+              ├──► cyrius build ────► build/shakti     (CLI binary)
+src/*.cyr ────┤
+              └──► cyrius distlib ──► dist/shakti.cyr  (library bundle)
+```
+
+### The split
+
+`src/lib.cyr` is the **development-time glue**: it declares the
+shared constants and then `include`s every other `src/*.cyr`. Both
+the binary (`src/main.cyr` includes `src/lib.cyr`) and the in-tree
+test harnesses (`tests/tcyr/*.tcyr`) use it.
+
+`src/main.cyr` is **CLI-only**: argument parsing, the interactive
+password prompt with `secret var pbuf[1024]`, signal masking, fd
+sanitisation, `execve`, and the top-level `syscall(SYS_EXIT, rc)`.
+None of it is consumable as a library — its top-level exit call
+would fire inside a consumer's `main()`.
+
+`dist/shakti.cyr` is the **consumer bundle**. `cyrius distlib` reads
+`[build] modules` from `cyrius.cyml`, concatenates each listed file
+in order, strips every `include` directive, and writes the result.
+Consumers `include "dist/shakti.cyr"` and supply their own stdlib
+surface via `[deps] stdlib = [...]`.
+
+### Bundle contents
+
+The 9-file bundle order (defined in `cyrius.cyml [build] modules`)
+is the same order `src/lib.cyr` `include`s them, because cyrius is
+single-pass — every symbol must be defined before it's referenced:
+
+```
+src/lib.cyr   →  SHK_ERR_* enum, constants, default paths
+src/validate.cyr   ←  uses SHK_ERR_*
+src/env.cyr        ←  stdlib only
+src/identity.cyr   ←  uses SHK_ERR_IO
+src/timestamp.cyr  ←  uses validate_username + default_timestamp_dir
+src/audit.cyr      ←  stdlib only
+src/auth.cyr       ←  stdlib only
+src/policy.cyr     ←  uses command_matches + MAX_COMMAND_LEN_DEFAULT + STAT_*
+src/api.cyr        ←  uses everything above
+```
+
+### Publish flow
+
+1. Edit `src/*.cyr`.
+2. `cyrius test` — unit + property-fuzz suites must pass.
+3. `cyrius distlib` — regenerate `dist/shakti.cyr`.
+4. `sh tests/integration/cli.sh` — the consumer-probe step compiles
+   `tests/integration/consumer_probe.cyr` against the fresh bundle;
+   if it fails, the bundle is out of sync with `src/`.
+5. `git add dist/shakti.cyr` and commit.
+
+Bundle drift (source edit without regenerate) is a commit blocker —
+the integration script catches it locally, and any consumer pulling
+the git tag would otherwise compile against stale symbols.
+
+### Version compatibility
+
+The bundle is not versioned separately from the source — shakti's
+`VERSION` file drives everything. Consumers pin the git tag (e.g.
+`tag = "0.2.0"`), which is cut from the same commit that carries
+the matching `dist/shakti.cyr`.
+
+Cyrius toolchain floor for consumers of 0.2.x: **5.4.11+**
+(`secret var` from v5.3.5, arch-dispatched `Stat` enum from v5.4.11,
+hashmap stdlib from v5.1.x, `${file:VERSION}` cyml expansion from
+v5.1.13).
 
 ## Consumer API
 
