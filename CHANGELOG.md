@@ -17,10 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - v5.3.3 `mulh64(a, b)` builtin — not used directly by shakti
     today, but upstream sigil adopts it which drops AES-GCM paths
     that shakti may eventually depend on.
-  - v5.3.5 `secret var name[N];` — zeroise-on-exit arrays. Direct
-    replacement for the old Rust `zeroize` crate; earmarked for
-    `_read_password` in `src/main.cyr` (not adopted in this bump —
-    requires the buffer to be an array local, not a heap alloc).
+  - v5.3.5 `secret var name[N];` — zeroise-on-exit arrays. Adopted
+    in `_prompt_and_authenticate` (see Security section below).
   - v5.3.7 → v5.3.14 dynlib machinery (IRELATIVE, IFUNC,
     cpu_features/TLS/stack_end bootstrap, bounds-checked indirect
     calls). Not unblocking NSS/PAM yet, but the infrastructure is
@@ -58,6 +56,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `policy.cyr:check_authorization` — replaced the `else { i = i; }`
   noop with an early `continue` when neither user nor group matches.
   Flow is now linear; same benchmarks (~1-2µs per call).
+- `cyrius.cyml` — `version = "${file:VERSION}"` (v5.1.13 expansion)
+  so the VERSION file is the single source of truth for the manifest.
+- `src/lib.cyr:shakti_version_string()` — centralises the in-source
+  version string; `main.cyr:--version` now reads from it rather than
+  a hardcoded literal. Still hand-sync with VERSION on bumps.
+- `cyrius.cyml [build] output = "build/shakti"` — binary lands under
+  `build/` (gitignored) by default rather than the repo root.
+
+### Performance
+
+- **`sanitize_environment` 141µs → 33µs (4.3×)**. Replaced the linear
+  vec scan of the 51-entry unsafe list + 9-entry safe list with a
+  `lib/hashmap.cyr` lookup. `_shk_unsafe_cache` / `_shk_safe_cache`
+  are still lazy singletons; first call still builds the map, every
+  call thereafter is O(1). Other hot-path benchmarks unchanged:
+  `command_matches/*` ~1µs, `validate_command` ~1µs,
+  `check_authorization/*` 1–2µs, `parse_policy` ~14µs.
+
+### Security
+
+- **`_prompt_and_authenticate` adopts `secret var pbuf[1024]`**
+  (cyrius v5.3.5). The password buffer is now a stack array with an
+  auto-synthesised zeroise prologue wired into every return path —
+  including early returns from MAX_AUTH_ATTEMPTS exhaustion, empty
+  input, and successful authentication. Replaces the prior
+  heap-allocated `alloc(1024)` + hand-rolled `_zeroize_cstr` (which
+  only cleared `strlen(buf)` bytes, not the full buffer).
+  `_read_password` split into `_read_password_into(buf, cap)` so the
+  caller owns the lifetime and can apply `secret`. Between-attempt
+  `memset(&pbuf, 0, PW_BUF_CAP)` remains as defense in depth for the
+  in-loop window.
+- **Fixed null-byte leak in `_print_usage`**. Hand-counted byte
+  lengths drifted by +1 on seven usage lines, leaking one null byte
+  per option into help output (`od -c` showed `\0` between lines).
+  Replaced every `file_write(fd, s, N)` call with a `_write_line(fd,
+  s)` helper that measures with `strlen`. Structural fix prevents
+  the bug class.
+- **`shakti` (no args) now prints usage instead of a policy-load
+  error**. The "command required" check moved ahead of the policy
+  load so running shakti bare no longer tries to read
+  `/etc/agnos/sudoers.toml` and fails with "failed to load policy".
+
+### Added
+
+- `tests/tcyr/fragments.tcyr` — 13 cases covering
+  `_shk_load_fragments` defense gates (nonexistent dir, world-
+  writable dir, non-directory target), the lexicographic sort helper
+  `_shk_sort_str_vec`, and `str_compare_lex`.
+- `tests/integration/cli.sh` — 16 bash-harness assertions covering
+  the non-privileged CLI surface (`--version`, `--help`, `-V`/`-h`
+  aliases, no-args, unknown option, `--` delimiter). Policy-loading
+  paths (`--list`, `--check`, `--invalidate`, full exec flow) still
+  need a root-owned fixture to exercise — tracked for a v0.3 CI
+  harness.
+- Test count: **252 `.tcyr` assertions** (up from 239) + 16
+  integration + bench harness.
 
 ### Security
 

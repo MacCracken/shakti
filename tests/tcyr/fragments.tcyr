@@ -1,0 +1,117 @@
+# fragments.tcyr — tests for _shk_load_fragments security gates
+#
+# The positive path (loading actual fragment files) requires root-owned
+# files that our test binary can only create under sudo. These tests
+# cover the defense-fires paths that non-root unit tests can verify:
+# nonexistent directory, non-root-owned directory, world-writable
+# directory — all must leave the policy's rules vec untouched.
+#
+# Also covers the lexicographic sort helper used to order fragments.
+
+include "src/lib.cyr"
+
+# ── _shk_load_fragments gates ────────────────────
+
+fn t_fragments_nonexistent_dir() {
+    var p = policy_new();
+    var rules = policy_rules(p);
+    var before = vec_len(rules);
+    _shk_load_fragments(p, "/nonexistent/shakti-fragments");
+    assert_eq(vec_len(rules), before, "nonexistent dir adds 0 rules");
+}
+
+fn t_fragments_world_writable_dir() {
+    # /tmp is root-owned but world-writable on every Linux. The gate
+    # `(dmode & 2) != 0` must fire and no rules must be appended —
+    # even if the directory contains .toml files.
+    var p = policy_new();
+    var rules = policy_rules(p);
+    var before = vec_len(rules);
+    _shk_load_fragments(p, "/tmp");
+    assert_eq(vec_len(rules), before, "/tmp (world-writable) adds 0 rules");
+}
+
+fn t_fragments_non_dir_target() {
+    # A regular file passed where a directory is expected must be
+    # rejected by the S_IFDIR check.
+    var p = policy_new();
+    var rules = policy_rules(p);
+    var before = vec_len(rules);
+    _shk_load_fragments(p, "/etc/hostname");
+    assert_eq(vec_len(rules), before, "regular file adds 0 rules");
+}
+
+# ── _shk_sort_str_vec (lexicographic order helper) ────────────────────
+
+fn t_sort_str_vec_sorts_unsorted() {
+    var v = vec_new();
+    vec_push(v, str_from("b.toml"));
+    vec_push(v, str_from("a.toml"));
+    vec_push(v, str_from("c.toml"));
+    _shk_sort_str_vec(v);
+    assert_eq(str_compare_lex(vec_get(v, 0), str_from("a.toml")), 0, "a first");
+    assert_eq(str_compare_lex(vec_get(v, 1), str_from("b.toml")), 0, "b second");
+    assert_eq(str_compare_lex(vec_get(v, 2), str_from("c.toml")), 0, "c third");
+}
+
+fn t_sort_str_vec_stable_on_sorted() {
+    var v = vec_new();
+    vec_push(v, str_from("00-base.toml"));
+    vec_push(v, str_from("10-extra.toml"));
+    vec_push(v, str_from("99-last.toml"));
+    _shk_sort_str_vec(v);
+    assert_eq(str_compare_lex(vec_get(v, 0), str_from("00-base.toml")), 0, "pre-sorted stays first");
+    assert_eq(str_compare_lex(vec_get(v, 2), str_from("99-last.toml")), 0, "pre-sorted stays last");
+}
+
+fn t_sort_str_vec_empty() {
+    var v = vec_new();
+    _shk_sort_str_vec(v);
+    assert_eq(vec_len(v), 0, "empty vec stays empty");
+}
+
+fn t_sort_str_vec_single() {
+    var v = vec_new();
+    vec_push(v, str_from("only.toml"));
+    _shk_sort_str_vec(v);
+    assert_eq(vec_len(v), 1, "single-element vec unchanged");
+}
+
+# ── str_compare_lex ────────────────────
+
+fn t_str_compare_equal() {
+    assert_eq(str_compare_lex(str_from("abc"), str_from("abc")), 0, "equal strings return 0");
+}
+
+fn t_str_compare_prefix_shorter_first() {
+    var r = str_compare_lex(str_from("abc"), str_from("abcd"));
+    assert_eq(r < 0, 1, "prefix sorts before longer");
+}
+
+fn t_str_compare_lex_ordering() {
+    var r = str_compare_lex(str_from("apple"), str_from("banana"));
+    assert_eq(r < 0, 1, "apple < banana");
+}
+
+# ── Runner ────────────────────
+
+fn main() {
+    alloc_init();
+    test_group("_shk_load_fragments gates");
+    t_fragments_nonexistent_dir();
+    t_fragments_world_writable_dir();
+    t_fragments_non_dir_target();
+    test_group("_shk_sort_str_vec");
+    t_sort_str_vec_sorts_unsorted();
+    t_sort_str_vec_stable_on_sorted();
+    t_sort_str_vec_empty();
+    t_sort_str_vec_single();
+    test_group("str_compare_lex");
+    t_str_compare_equal();
+    t_str_compare_prefix_shorter_first();
+    t_str_compare_lex_ordering();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

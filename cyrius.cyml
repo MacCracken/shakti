@@ -1,6 +1,6 @@
 [package]
 name = "shakti"
-version = "0.2.0"
+version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"

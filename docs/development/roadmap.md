@@ -70,21 +70,15 @@ the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.4.9.
 
 ## Future (v0.3+)
 
-- Session logging / I/O recording
-- Capability-based privilege (CAP_* instead of full root)
-- SELinux/AppArmor context transitions
-- Remote policy fetch (for fleet management)
-- Adopt `secret var` (cyrius v5.3.5) for the password buffer in
-  `_read_password` / `_prompt_and_authenticate` — gives exit-time
-  zeroise on every return path automatically, replacing the current
-  `_zeroize_cstr` call that only clears `strlen(buf)` bytes. Requires
-  restructuring the buffer from a heap `alloc(1024)` to a stack
-  `secret var pbuf[1024];` in the caller.
-- `sanitize_environment` perf: hot path currently O(n·m) where n is
-  env var count and m is the 51-entry unsafe list. A `hashmap`
-  lookup would drop the ~141µs baseline. Defer until a consumer
-  complains — env sanitization runs once per invocation, and the
-  exec overhead dominates end-to-end latency anyway.
+Larger features deferred past the 0.2.x line while NSS/PAM remain
+blocked on cyrius. Pick up in the order consumers demand them.
+
+- Session logging / I/O recording (openpty-based).
+- Capability-based privilege (CAP_* instead of full root) — drop to a
+  per-rule capability set at exec instead of uid=0.
+- SELinux / AppArmor context transitions
+  (`/proc/self/attr/exec`, feature-gated by distro).
+- Remote policy fetch (for fleet management).
 
 ## v1.0 Criteria
 
