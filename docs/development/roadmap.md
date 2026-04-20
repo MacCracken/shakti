@@ -44,7 +44,7 @@
 
 Tracked here to keep them visible against the v1.0 criteria below.
 Each is a feature present in the Rust 0.1.x build that did not survive
-the port to Cyrius 5.2.1 in 0.2.0.
+the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.4.9.
 
 - [x] `initgroups` parity — populate target user's supplementary
       groups before privilege drop instead of `setgroups(0, NULL)`
@@ -53,16 +53,20 @@ the port to Cyrius 5.2.1 in 0.2.0.
       LDAP/sssd support; replaces the `/etc/group` parsing path
       in `identity_lookup_groups` / `identity_lookup_gids` behind
       the same API).
-      **Blocked on cyrius v5.3.1** — `dynlib_open` resolves libc
-      symbols but calling NSS-using functions SIGSEGVs because
-      `lib/dynlib.cyr` skips IRELATIVE relocations and init arrays
-      (the CPU-features struct + libc constructors aren't run).
-      Tracked in cyrius `docs/development/roadmap.md` under v5.3.1.
-      Probe verified: `getpid` works, `getgrouplist` segfaults.
+      **Blocked on cyrius NSS dispatch bootstrap** — as of v5.4.9,
+      `lib/dynlib.cyr` handles IRELATIVE + IFUNC + DT_INIT +
+      cpu_features / TLS / stack_end bootstrap (v5.3.7 → v5.3.14),
+      so simple libc calls (`getpid`, `strlen`, `strcmp`, `memcmp`)
+      work end-to-end. `getgrouplist` / `getpwent` / `getaddrinfo`
+      still crash inside nsswitch.conf parsing and NSS-module
+      dlopen because locale init, malloc arena setup, and the NSS
+      module table are not yet populated. Cyrius tracks this as an
+      open follow-up in its roadmap ("needs a dedicated session").
 - [ ] Real PAM authentication via `dlopen("libpam.so.0")` and a
       conversation callback (replaces the `/usr/bin/su` fallback
       currently used unconditionally in `src/auth.cyr`).
-      **Blocked on cyrius v5.3.1** — same dynlib limitation as NSS.
+      **Blocked on the same cyrius NSS dispatch bootstrap** — PAM
+      loads NSS modules transitively for user lookups.
 
 ## Future (v0.3+)
 
@@ -70,6 +74,17 @@ the port to Cyrius 5.2.1 in 0.2.0.
 - Capability-based privilege (CAP_* instead of full root)
 - SELinux/AppArmor context transitions
 - Remote policy fetch (for fleet management)
+- Adopt `secret var` (cyrius v5.3.5) for the password buffer in
+  `_read_password` / `_prompt_and_authenticate` — gives exit-time
+  zeroise on every return path automatically, replacing the current
+  `_zeroize_cstr` call that only clears `strlen(buf)` bytes. Requires
+  restructuring the buffer from a heap `alloc(1024)` to a stack
+  `secret var pbuf[1024];` in the caller.
+- `sanitize_environment` perf: hot path currently O(n·m) where n is
+  env var count and m is the 51-entry unsafe list. A `hashmap`
+  lookup would drop the ~141µs baseline. Defer until a consumer
+  complains — env sanitization runs once per invocation, and the
+  exec overhead dominates end-to-end latency anyway.
 
 ## v1.0 Criteria
 

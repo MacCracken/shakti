@@ -1,10 +1,13 @@
 # auth.cyr — authentication backends
 #
 # Port of rust-old/src/auth.rs. The Rust version used the `pam` crate
-# (feature-gated) with an `/usr/bin/su` fallback. Cyrius 5.2.1 has no
+# (feature-gated) with an `/usr/bin/su` fallback. Cyrius 5.4.9 has no
 # PAM binding in stdlib, so this port uses the su fallback
 # unconditionally and leaves pam_authenticate() as a seam that
-# future work can fill in via dynlib.cyr (dlopen libpam).
+# future work will fill in via dynlib.cyr (dlopen libpam). The
+# dynlib machinery can reach libpam's entry points today, but PAM's
+# transitive NSS module dlopen is still blocked on cyrius's NSS
+# dispatch bootstrap — see docs/development/roadmap.md.
 
 fn pam_service_name() { return "shakti"; }
 

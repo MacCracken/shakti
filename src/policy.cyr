@@ -114,13 +114,6 @@ fn _shk_copy_trim(buf, start, len) {
     var e = start + len;
     while (s < e) {
         var c = load8(buf + s);
-        if (c == 32 || c == 9 || c == 13 || c == 10) { s = s + 1; }
-        else { s = e + 1; e = e; s = s - 1; break; }
-    }
-    # Restart cleanly (the idiom above is to exit the trim-left loop)
-    s = start;
-    while (s < e) {
-        var c = load8(buf + s);
         if (c != 32) {
             if (c != 9) { if (c != 13) { if (c != 10) { break; } } }
         }
@@ -572,8 +565,7 @@ fn check_authorization(policy, caller, groups, target, command) {
         }
 
         if (user_matches == 0) {
-            if (group_matches == 0) { i = i + 1; }
-            else { i = i; }  # noop
+            if (group_matches == 0) { i = i + 1; continue; }
         }
 
         if (user_matches == 1 || group_matches == 1) {

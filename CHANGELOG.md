@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cyrius toolchain pin 5.2.1 → 5.4.9** (`cyrius.cyml`). Brings in
+  three-and-a-half months of upstream work; relevant inheritance for
+  shakti (all on the x86_64 Linux static target):
+  - v5.2.1 `cyrius deps --lock` / `--verify` — supply-chain hash
+    verification (SHA256 lockfile) available for CI.
+  - v5.3.3 `mulh64(a, b)` builtin — not used directly by shakti
+    today, but upstream sigil adopts it which drops AES-GCM paths
+    that shakti may eventually depend on.
+  - v5.3.5 `secret var name[N];` — zeroise-on-exit arrays. Direct
+    replacement for the old Rust `zeroize` crate; earmarked for
+    `_read_password` in `src/main.cyr` (not adopted in this bump —
+    requires the buffer to be an array local, not a heap alloc).
+  - v5.3.7 → v5.3.14 dynlib machinery (IRELATIVE, IFUNC,
+    cpu_features/TLS/stack_end bootstrap, bounds-checked indirect
+    calls). Not unblocking NSS/PAM yet, but the infrastructure is
+    in place and simple libc calls via `dynlib` work today.
+  - v5.3.14 `lib/args.cyr` — empty-string args no longer silently
+    dropped; argv/argc correctness fix inherited.
+  - v5.4.9 ships sigil 2.8.4 (AES-GCM fix + hardening pass) in the
+    toolchain dep graph.
+- Test suite: 239 cases across 9 `.tcyr` files + bench harness; all
+  pass against the v5.4.9 toolchain with no source changes required.
+
 ### Added
 
 - `src/identity.cyr` — local-files identity backend extracted from
@@ -18,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/tcyr/identity.tcyr` — 12 cases covering uid/name lookup,
   missing-user fallthrough, substring-safety on colon-anchored
   matches, primary-gid-first ordering, and primary-vs-supp dedup.
+- `docs/adr/005-identity-backend-port-to-cyrius.md` — captures the
+  decision to use local-files parsing in `src/identity.cyr` for the
+  0.2.x line, along with the cyrius dependency chain that gates
+  restoring NSS backend parity. Replaces the stale "blocked on
+  cyrius 5.3.1" note in the roadmap.
+
+### Changed (P(-1) review cleanups)
+
+- `policy.cyr:_shk_copy_trim` — removed the vestigial first trim-left
+  loop (commented "Restart cleanly (the idiom above is to exit the
+  trim-left loop)"). The second loop was the real trim-left; the
+  first was broken and dead. No behaviour change; ~11 lines deleted.
+- `policy.cyr:check_authorization` — replaced the `else { i = i; }`
+  noop with an early `continue` when neither user nor group matches.
+  Flow is now linear; same benchmarks (~1-2µs per call).
 
 ### Security
 
