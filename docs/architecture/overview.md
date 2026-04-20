@@ -4,6 +4,12 @@
 
 Shakti is a privilege escalation tool for AGNOS, the equivalent of `sudo` in traditional Linux distributions. It allows authorized users to execute commands as other users (typically root) after authentication and policy evaluation.
 
+> **Security reviewers**: the structured threat model
+> ([`threat-model.md`](threat-model.md)) is the intended entry
+> point — attacker classes, assumption register, per-threat
+> mitigations. This overview focuses on the design and module
+> structure.
+
 ## Security Model
 
 Shakti follows the principle of **defense in depth** — multiple independent security layers must all pass before a command executes with elevated privileges.

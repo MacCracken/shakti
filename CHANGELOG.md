@@ -144,7 +144,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (edit → test → distlib → integration probe → commit), and the
   cyrius-toolchain floor for consumers. Module Structure table now
   has an "In library bundle" column marking `main.cyr` as binary-
-  only.
+  only. Pointer note at the top directing security reviewers to the
+  threat-model doc.
+- **`docs/architecture/threat-model.md`** — new. Structured for an
+  external security reviewer: five in-scope attacker classes
+  (A1 local unpriv, A2 compromised authorised, A3 co-located
+  process, A4 filesystem, A5 hostile policy author) and three
+  out-of-scope (A6 kernel, A7 physical, A8 supply chain); trust
+  boundary diagram + table; a ten-entry assumption register
+  (S1–S10) documenting what must hold for mitigations to work;
+  ten threat entries (T1 shell injection through T10 co-located
+  setuid) each with attack description, mitigation, residual risk,
+  and test coverage references; non-goals; open gaps table cross-
+  referencing the port-regressions list.
+- **`SECURITY.md`** — 0.1.x → 0.2.x version row swap; security
+  properties list updated to reflect cyrius-era implementation
+  (`secret var`, per-TTY timestamp, hashmap-backed env blocklist);
+  new "Threat Model" section links the threat-model doc +
+  architecture overview.
 
 ### Documentation audit
 
