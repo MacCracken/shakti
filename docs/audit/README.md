@@ -17,7 +17,8 @@ cross-reference.
 
 | Date | File | Type | Summary |
 |---|---|---|---|
-| 2026-04-20 | [2026-04-20-external-cve-review.md](2026-04-20-external-cve-review.md) | Pre-audit internal survey | ~30 known CVEs + attack classes (sudo, doas, su, PAM, NSS, LD_PRELOAD, TTY, timestamp, systemd) mapped against shakti 0.2.1. Status per entry: Mitigated / N/A / Blocked-on-cyrius-5.5.x / Open / Review. Surfaced **T11 (TIOCSTI)** — added to the threat model. |
+| 2026-04-20 | [2026-04-20-external-cve-review.md](2026-04-20-external-cve-review.md) | Pre-audit known-CVE survey | ~30 known CVEs + attack classes (sudo, doas, su, PAM, NSS, LD_PRELOAD, TTY, timestamp, systemd) mapped against shakti's current implementation. Status per entry: Mitigated / N/A / Blocked-on-cyrius-5.5.x / Open / Review. Surfaced **T11 (TIOCSTI)** — added to the threat model. |
+| 2026-04-20 | [2026-04-20-internal-review.md](2026-04-20-internal-review.md) | Internal adversarial self-review | File-by-file probe of each security-critical `src/*.cyr` against the T1–T11 / S1–S10 registers. Findings H-1 (privilege-drop return checks), H-2 (integer overflow in numeric parsers), M-1 (LSTAT on timestamp dir), M-2 (empty-name entries), I-1 (empty-envp comment) shipped in shakti 0.2.2. L-1 / L-2 / L-3 deferred. |
 
 ## Expected future entries
 

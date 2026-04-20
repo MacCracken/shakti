@@ -65,6 +65,21 @@ fn t_multiline_array_empty() {
     assert_eq(vec_len(rule_commands(r)), 0, "empty multi-line array parses as empty vec");
 }
 
+# ── _shk_parse_int overflow guard (H-2) ────────────────────
+# A timestamp_ttl value past UINT_MAX used to wrap silently. Fixed
+# defensively; the parse rejects overflow and the default TTL stays
+# applied.
+
+fn t_timestamp_ttl_overflow_rejected() {
+    # 99999999999999999999 parses to -1 (overflow); _shk_def_set's
+    # `if (v >= 0)` guard then leaves the TTL at its default.
+    var s = "[defaults]\ntimestamp_ttl = 99999999999999999999\n";
+    var p = _parse_src(s);
+    # Default TTL is DEFAULT_TIMESTAMP_TTL_SECS = 300.
+    assert_eq(def_ttl(policy_defaults(p)), 300,
+        "overflow-wrapping TTL rejected, default preserved");
+}
+
 fn t_multiline_array_with_deny() {
     # Both commands and deny_commands on multiple lines, interleaved
     # with other keys — exercises the scan resuming cleanly after ']'.
@@ -296,6 +311,7 @@ fn main() {
     t_multiline_array_parses();
     t_multiline_array_empty();
     t_multiline_array_with_deny();
+    t_timestamp_ttl_overflow_rejected();
     t_parse_minimal_rule();
     t_parse_empty();
     t_parse_include_dir();

@@ -155,17 +155,23 @@ fn _shk_unquote(s) {
 }
 
 # Parse an integer from a cstr. Accepts digits only (positive).
-# Returns -1 on parse error.
+# Returns -1 on parse error OR on overflow past UINT_MAX.
+# Overflow guard matches identity.cyr:_identity_parse_uint — defence
+# in depth against a malformed policy field that would otherwise
+# wrap to a small misleading value.
 fn _shk_parse_int(s) {
     var n = strlen(s);
     if (n == 0) { return 0 - 1; }
     var v = 0;
     var i = 0;
+    var cap = 4294967295;   # UINT_MAX — matches the identity parser
     while (i < n) {
         var c = load8(s + i);
         if (c < 48) { return 0 - 1; }
         if (c > 57) { return 0 - 1; }
-        v = v * 10 + (c - 48);
+        var digit = c - 48;
+        if (v > (cap - digit) / 10) { return 0 - 1; }
+        v = v * 10 + digit;
         i = i + 1;
     }
     return v;

@@ -62,6 +62,11 @@ fn su_authenticate(username, password) {
         store64(argv + 24, username);
         store64(argv + 32, 0);
 
+        # Empty envp is intentional. su needs nothing but stdin for
+        # the password check; passing no env eliminates every
+        # injection vector (PATH override, LD_*, interpreter vars)
+        # for this auth-only step. Both bash and dash provide `true`
+        # as a builtin so the `-c true` body runs without PATH.
         var envp = alloc(8);
         store64(envp, 0);
 

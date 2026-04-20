@@ -110,7 +110,14 @@ fn timestamp_path(user) {
 fn _shk_ensure_ts_dir() {
     var dir = default_timestamp_dir();
     var stbuf = alloc(STAT_BUFSZ);
-    var r = syscall(SYS_STAT, dir, stbuf);
+    # LSTAT (not STAT) so a symlink at the directory path fails
+    # closed rather than silently redirecting timestamp writes to
+    # whatever the symlink target happens to be. `check_timestamp`
+    # already uses LSTAT for the timestamp file itself; same rule
+    # applies to the enclosing directory. Kernel-enforced via
+    # SYS_LSTAT — no TOCTOU between check and use for the link
+    # bit because the reject happens before any write.
+    var r = syscall(SYS_LSTAT, dir, stbuf);
     if (r < 0) {
         # mkdir -p (parent assumed to exist; for /var/run it will)
         var mr = sys_mkdir(dir, 448);  # 0o700
@@ -120,6 +127,7 @@ fn _shk_ensure_ts_dir() {
 
     # Exists — verify safety
     var mode = load32(stbuf + STAT_MODE);
+    if ((mode & S_IFMT) == S_IFLNK) { return SHK_ERR_SYMLINK; }
     if ((mode & S_IFMT) != S_IFDIR) { return SHK_ERR_IO; }
     var uid = load32(stbuf + STAT_UID);
     if (uid != 0) { return SHK_ERR_OWNER; }

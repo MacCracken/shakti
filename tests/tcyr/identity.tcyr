@@ -123,6 +123,54 @@ fn t_lookup_gids_missing_user_just_primary() {
     assert_eq(load32(buf), 99, "primary gid stored correctly");
 }
 
+# ── Overflow guard on numeric field parser (H-2 regression) ────────
+# _identity_parse_uint is internal; test via a synthetic buffer that
+# simulates an /etc/passwd line with a huge numeric uid field. The
+# parser should reject the overflow rather than wrap.
+
+fn _make_buf(s) {
+    var n = strlen(s);
+    var buf = alloc(n + 1);
+    memcpy(buf, s, n);
+    store8(buf + n, 0);
+    return buf;
+}
+
+fn t_parse_uint_overflow_rejected() {
+    # Buffer: "99999999999999999999" (20 digits — well past UINT_MAX).
+    # Returns -1 on overflow rather than wrapping to a small value.
+    var s = "99999999999999999999";
+    var buf = _make_buf(s);
+    var r = _identity_parse_uint(buf, 0, strlen(s));
+    assert_eq(r, 0 - 1, "overflow past UINT_MAX rejected with -1");
+}
+
+fn t_parse_uint_at_uint_max_accepted() {
+    # UINT_MAX = 4294967295 (10 digits) — exactly at the cap.
+    var s = "4294967295";
+    var buf = _make_buf(s);
+    var r = _identity_parse_uint(buf, 0, strlen(s));
+    assert_eq(r, 4294967295, "UINT_MAX exactly accepted");
+}
+
+fn t_parse_uint_just_over_uint_max_rejected() {
+    # 4294967296 = UINT_MAX + 1.
+    var s = "4294967296";
+    var buf = _make_buf(s);
+    var r = _identity_parse_uint(buf, 0, strlen(s));
+    assert_eq(r, 0 - 1, "UINT_MAX + 1 rejected");
+}
+
+fn t_parse_uint_normal_values() {
+    # Sanity: normal uids still parse.
+    var s = "1000";
+    var buf = _make_buf(s);
+    assert_eq(_identity_parse_uint(buf, 0, strlen(s)), 1000, "1000 parses");
+    s = "0";
+    buf = _make_buf(s);
+    assert_eq(_identity_parse_uint(buf, 0, strlen(s)), 0, "0 parses");
+}
+
 fn main() {
     alloc_init();
 
@@ -139,6 +187,12 @@ fn main() {
     t_lookup_gids_dedup_primary();
     t_lookup_gids_zero_max();
     t_lookup_gids_missing_user_just_primary();
+
+    test_group("parse_uint overflow guard (H-2)");
+    t_parse_uint_overflow_rejected();
+    t_parse_uint_at_uint_max_accepted();
+    t_parse_uint_just_over_uint_max_rejected();
+    t_parse_uint_normal_values();
 
     return assert_summary();
 }

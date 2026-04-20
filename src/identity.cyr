@@ -15,14 +15,25 @@
 var IDENTITY_BUF_MAX = 65536;
 
 # ── Internal: parse a decimal integer from buf[start..end) ──
-# Returns -1 on any non-digit byte. Empty range returns 0.
+# Returns -1 on any non-digit byte OR on overflow past UINT_MAX
+# (Linux uid/gid ceiling = 2^32 − 1 = 4294967295). The overflow
+# guard is defence-in-depth against a partially-corrupted
+# /etc/passwd or /etc/group that would otherwise wrap a huge
+# numeric field to a small value like 0 (= root). Gated by
+# assumption S1 in the threat model, but hygiene matters for
+# setuid-context parsers.
+# Empty range returns 0.
 fn _identity_parse_uint(buf, start, end) {
     var v = 0;
     var p = start;
+    var cap = 4294967295;   # UINT_MAX — Linux uid/gid max
     while (p < end) {
         var c = load8(buf + p);
         if (c < 48 || c > 57) { return 0 - 1; }
-        v = v * 10 + (c - 48);
+        var digit = c - 48;
+        # v * 10 + digit > cap  →  v > (cap - digit) / 10
+        if (v > (cap - digit) / 10) { return 0 - 1; }
+        v = v * 10 + digit;
         p = p + 1;
     }
     return v;
@@ -79,11 +90,19 @@ fn identity_lookup_uid(uid, out_name_ptr, out_gid_ptr) {
         if (c3 == line_end) { pos = line_end + 1; continue; }
 
         var parsed_uid = _identity_parse_uint(buf, c2 + 1, c3);
-        if (parsed_uid == uid) {
+        # Guard: parsed_uid < 0 means parse/overflow error. Don't
+        # match against a negative sentinel even if caller passed
+        # uid = -1 accidentally (e.g. through integer narrowing).
+        if (parsed_uid >= 0 && parsed_uid == uid) {
             var c4 = _identity_find_byte(buf, c3 + 1, line_end, 58);
             var parsed_gid = _identity_parse_uint(buf, c3 + 1, c4);
             if (parsed_gid < 0) { return 0; }
             var nlen = c1 - pos;
+            # Skip malformed entries with empty name field. Under
+            # assumption S1 these don't occur in normal /etc/passwd,
+            # but defence in depth: an empty cstr would confuse
+            # downstream policy matching.
+            if (nlen == 0) { pos = line_end + 1; continue; }
             var name = alloc(nlen + 1);
             memcpy(name, buf + pos, nlen);
             store8(name + nlen, 0);
@@ -159,10 +178,13 @@ fn identity_lookup_groups(username) {
 
         if (_identity_member_match(buf, c3 + 1, line_end, username, ulen) == 1) {
             var nlen = c1 - pos;
-            var gname = alloc(nlen + 1);
-            memcpy(gname, buf + pos, nlen);
-            store8(gname + nlen, 0);
-            vec_push(groups, gname);
+            # Skip empty-name entries — same rationale as identity_lookup_uid.
+            if (nlen > 0) {
+                var gname = alloc(nlen + 1);
+                memcpy(gname, buf + pos, nlen);
+                store8(gname + nlen, 0);
+                vec_push(groups, gname);
+            }
         }
         pos = line_end + 1;
     }

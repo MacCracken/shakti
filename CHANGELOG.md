@@ -7,31 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [Unreleased]
+## [0.2.2] - 2026-04-20
 
-### Documentation
+Audit-driven patch release. Pairs an internal adversarial self-
+review with an external-CVE-surface survey; ships five hardening
+fixes surfaced by the internal pass plus the two audit artefacts.
 
-- **`docs/audit/2026-04-20-external-cve-review.md`** — new, pre-
-  external-audit handoff artefact. First entry under the new
-  `docs/audit/` tree (dated `YYYY-MM-DD-…` so incoming third-party
-  audit reports drop into the same directory post-release). Surveys ~30 known CVEs + attack classes
-  across sudo (6 CVEs), OpenDoas (2), util-linux su/runuser (3),
-  Linux-PAM (5 — all gated on cyrius 5.5.x PAM re-enablement),
-  glibc NSS (3), LD_PRELOAD / env (3), TTY (3), timestamp (4),
-  systemd-adjacent (2). Each entry mapped against shakti's current
-  implementation with status marker: ✅ Mitigated, ➖ N/A, ⏳ Blocked
-  on cyrius 5.5.x, ⚠️ Open, 🔍 Review. Summary: zero Open CVE classes
-  that are not TIOCSTI-family; two Partial (timestamp TTL window,
-  clock rollback); everything else N/A by design or properly
-  mitigated with ADR + test coverage.
+### Security
+
+- **H-1 — privilege-drop return values now checked.**
+  `src/main.cyr:_exec_target` previously ignored return values from
+  `sys_setgroups` / `sys_setgid` / `sys_setuid`. A silent failure
+  (SELinux/AppArmor denial, seccomp, `NO_NEW_PRIVS`, exotic
+  capability state) would have let the process continue to
+  `sys_execve` with its pre-drop uid — exactly the outcome the
+  drop was meant to prevent. All three calls now abort with exit
+  code 1 on negative return, and the post-condition is verified
+  via `sys_getuid()` / `sys_getgid()` before exec. Matches the
+  "check every drop return" pattern sudo adopted after historical
+  setresuid incidents.
+- **H-2 — integer-overflow guard on numeric field parsers.**
+  `_identity_parse_uint` (`src/identity.cyr`) and `_shk_parse_int`
+  (`src/policy.cyr`) now cap valid range at `UINT_MAX`
+  (4,294,967,295 = Linux uid/gid ceiling). Inputs past the cap
+  return the existing `-1` parse-error sentinel rather than
+  wrapping silently. Gated on assumption S1 (root-writable
+  `/etc/passwd` / policy files) so not an in-scope exploit path,
+  but matches setuid-context parsing hygiene.
+- **M-1 — timestamp-directory symlink check.**
+  `_shk_ensure_ts_dir` now uses `SYS_LSTAT` (not `SYS_STAT`) and
+  rejects `S_IFLNK` explicitly. Symmetric with `check_timestamp`
+  which already used LSTAT. Defence in depth: a symlink at
+  `/var/run/agnos/sudo` pointing at any other root-owned directory
+  no longer silently redirects timestamp writes.
+- **M-2 — empty-name `/etc/passwd` / `/etc/group` entries now
+  skipped.** `identity_lookup_uid` and `identity_lookup_groups`
+  previously allocated zero-length name cstrs for malformed
+  entries starting with `:`. Downstream code fail-closed via
+  `validate_username`, but emitting empty names was noise. Now
+  those entries are skipped cleanly.
+- **I-1 — clarifying comment** on empty-envp intent in
+  `su_authenticate`. Documents that no-env is the injection-surface
+  reduction, not an oversight.
+
+### Added
+
+- **`docs/audit/2026-04-20-internal-review.md`** — internal
+  adversarial self-review. Findings H-1, H-2, M-1, M-2, I-1 (shipped
+  in 0.2.2) plus L-1 / L-2 / L-3 deferred to v0.3 polish work.
+  Severity rubric, method notes, review cadence.
+- **`docs/audit/2026-04-20-external-cve-review.md`** — known-CVE
+  surface survey. ~30 entries across sudo (6), OpenDoas (2),
+  util-linux su/runuser (3), Linux-PAM (5 — all ⏳ gated on cyrius
+  5.5.x PAM re-enablement), glibc NSS (3), LD_PRELOAD / env (3),
+  TTY (3), timestamp (4), systemd-adjacent (2). Each mapped against
+  shakti's implementation with status marker: ✅ Mitigated, ➖ N/A,
+  ⏳ Blocked-on-future, ⚠️ Open, 🔍 Review. Zero Open CVE classes
+  outside the TIOCSTI family. Handoff artefact for the post-release
+  third-party audit.
+- **`docs/audit/README.md`** — dated-report convention for the
+  `docs/audit/` tree. Table of current entries, expected future
+  entries, "don't edit, supersede" rule.
+- **`tests/tcyr/identity.tcyr:parse_uint overflow guard`** — 5 new
+  assertions covering the overflow-rejected path, the exactly-at-
+  `UINT_MAX` boundary, `UINT_MAX + 1` rejection, and normal-value
+  parsing as control.
+- **`tests/tcyr/policy.tcyr:t_timestamp_ttl_overflow_rejected`**
+  — policy parser rejects a ttl of `99999999999999999999`; default
+  TTL (300) is preserved rather than silently accepting a wrapped
+  value.
+
+### Threat model
+
 - **`docs/architecture/threat-model.md`** — added **T11 (TIOCSTI
   terminal-input injection)** surfaced by the CVE review. Lateral
   uid moves (caller → non-root target) share the caller's tty;
   mitigation today is partial (kernel-level `legacy_tiocsti` sysctl
-  advisory); full PTY-allocation fix tracked in v0.3+ roadmap. Also
-  added a "Related documents" section cross-linking the CVE review.
+  advisory); full PTY-allocation fix tracked in v0.3+ roadmap.
+  "Related documents" section cross-links the CVE review.
 - **`SECURITY.md`** — "Threat Model + CVE review" section now links
-  both documents; T-count updated to 11.
+  both audit documents; T-count updated to 11.
+
+### Test totals (post-0.2.2)
+
+- **334 unit** assertions (up from 328) across 14 `.tcyr` files.
+- **20,101 property-fuzz** assertions (unchanged).
+- **18 integration** assertions (unchanged).
 
 ## [0.2.1] - 2026-04-20
 

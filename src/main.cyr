@@ -295,10 +295,37 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
     var supp_gids[1024];
     var ngids = identity_lookup_gids(target_user, target_gid, &supp_gids, 256);
 
-    # setgroups → setgid → setuid (must be in this order)
-    sys_setgroups(ngids, &supp_gids);
-    sys_setgid(target_gid);
-    sys_setuid(target_uid);
+    # setgroups → setgid → setuid (must be in this order).
+    # Every drop is return-checked: any failure (SELinux/AppArmor/
+    # seccomp/NO_NEW_PRIVS denial, exotic capability state) means
+    # the process retains its pre-drop uid. If we proceeded to
+    # execve, the target would run with elevated privileges — the
+    # exact outcome the drop was supposed to prevent. Abort with a
+    # hard exit on any negative return from the drop syscalls, and
+    # verify the post-condition via getuid/getgid after setuid
+    # nominally succeeds.
+    if (sys_setgroups(ngids, &supp_gids) < 0) {
+        _write_line(2, "shakti: setgroups failed; aborting to avoid privilege leak\n");
+        sys_exit(1);
+    }
+    if (sys_setgid(target_gid) < 0) {
+        _write_line(2, "shakti: setgid failed; aborting to avoid privilege leak\n");
+        sys_exit(1);
+    }
+    if (sys_setuid(target_uid) < 0) {
+        _write_line(2, "shakti: setuid failed; aborting to avoid privilege leak\n");
+        sys_exit(1);
+    }
+    # Post-condition verify — defence against kernel states where
+    # the drop returns 0 but the uid/gid didn't actually change.
+    if (sys_getuid() != target_uid) {
+        _write_line(2, "shakti: getuid post-check != target; aborting\n");
+        sys_exit(1);
+    }
+    if (sys_getgid() != target_gid) {
+        _write_line(2, "shakti: getgid post-check != target; aborting\n");
+        sys_exit(1);
+    }
 
     # Build null-terminated argv array
     var ac = vec_len(argv_vec);
