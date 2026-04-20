@@ -4,7 +4,7 @@
 
 **Shakti** (Sanskrit: power/energy) — AGNOS privilege escalation tool
 
-- **Type**: Binary crate
+- **Type**: Cyrius binary + library (ships `build/shakti` CLI + `dist/shakti.cyr` consumer bundle)
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
 - **Version**: SemVer 0.1.0
@@ -19,11 +19,28 @@ argonaut (init system), agnoshi (shell `sudo` equivalent), daimon (agent privile
 
 ## Development Process
 
+### Cleanliness check (cyrius port)
+
+Run after every work phase and after every review phase:
+
+```
+cyrius test                                   # unit + property-fuzz suites
+sh tests/integration/cli.sh                   # CLI + consumer-bundle probe
+cyrfmt --check src/*.cyr tests/tcyr/*.tcyr    # format (silent = clean)
+for f in src/*.cyr; do cyrlint "$f"; done     # lint (must be "0 warnings")
+cyrius build src/main.cyr build/shakti        # must end with OK
+cyrius distlib                                # regenerate dist/shakti.cyr
+```
+
+`dist/shakti.cyr` drift is a commit-blocker — regenerate and restage
+after any `src/*.cyr` edit. The integration script's consumer probe
+catches this locally.
+
 ### P(-1): Scaffold Hardening (before any new features)
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
+2. Cleanliness check (see above)
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review — gaps, optimizations, security, logging/errors, docs
 5. External research — domain completeness, missing capabilities, best practices, world-class accuracy
@@ -36,7 +53,7 @@ argonaut (init system), agnoshi (shell `sudo` equivalent), daimon (agent privile
 ### Work Loop / Working Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
+2. Cleanliness check (see above)
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Internal review — performance, memory, security, throughput, correctness
@@ -44,8 +61,8 @@ argonaut (init system), agnoshi (shell `sudo` equivalent), daimon (agent privile
 7. Deeper tests/benchmarks from review observations
 8. Run benchmarks again — prove the wins
 9. If review heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
+10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, guides and examples for new API surface, verify recipe version in zugot
+11. Version check — VERSION, cyrius.cyml (via `${file:VERSION}`), `shakti_version_string()` in `src/lib.cyr`, recipe (in zugot) all in sync
 12. Return to step 1
 
 ### Task Sizing

@@ -18,3 +18,11 @@ Replace the check-then-write pattern with a single `open()` call using `O_NOFOLL
 - **Positive**: Fewer syscalls (one open vs stat + write + chmod).
 - **Negative**: Requires the `fs` feature flag for the `nix` crate (minimal dependency increase).
 - **Negative**: Non-Linux platforms fall back to the original `fs::write` behavior (no `O_NOFOLLOW` equivalent in std). This is acceptable since Shakti targets Linux.
+
+## Post-port note (2026-04-19)
+
+The cyrius port (0.2.0) preserves the decision verbatim. The `nix`
+crate dependency is gone — `src/timestamp.cyr:update_timestamp` now
+calls `syscall(SYS_OPEN, path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600)`
+directly. Same atomic kernel-level symlink rejection; no Rust
+feature-flag surface.

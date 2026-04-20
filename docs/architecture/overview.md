@@ -23,7 +23,7 @@ User space (untrusted)
 [Authorization engine]     -- per-user/group/command rules with deny-first eval
   |
   v
-[Authentication]           -- PAM or su fallback, rate-limited to 3 attempts
+[Authentication]           -- /usr/bin/su shim, rate-limited to 3 attempts (real PAM blocked on cyrius NSS bootstrap, tracked for cyrius 5.5.x)
   |
   v
 [Timestamp cache]          -- per-TTY, root-owned, symlink-resistant, O_NOFOLLOW
@@ -48,34 +48,37 @@ As a setuid-root binary, Shakti is a high-value attack target. The security desi
 | Cross-session credential reuse | Per-TTY timestamp isolation |
 | fd leaking to child process | Close all fds > stderr before exec |
 | Signal interruption during auth | SIGINT/SIGTSTP/SIGQUIT masked during authentication |
-| Password exposure in memory | `zeroize` crate clears password buffers |
-| Password echo on terminal | termios ECHO disabled with RAII drop guard |
-| Path traversal in usernames | `/`, `..`, null byte rejection in `validate_username` |
-| Policy file tampering | Root ownership required, world-writable rejected |
-| Group membership spoofing | `getgrouplist(3)` via NSS for accurate group resolution |
+| Password exposure in memory | `secret var pbuf[1024]` (cyrius v5.3.5) — compiler-synthesised zeroise on every return path of `_prompt_and_authenticate`, plus explicit `memset` between attempts |
+| Password echo on terminal | termios `ECHO` bit cleared via `TCSETS`, original saved and restored |
+| Path traversal in usernames | `/`, `..`, null byte, empty rejection in `validate_username` |
+| Policy file tampering | Root-ownership check (stat uid == 0), world-writable mode bit rejected |
+| Group membership resolution | `/etc/group` parsing in `src/identity.cyr` (local-files only for 0.2.x). LDAP / sssd support via `getgrouplist(3)` is tracked for cyrius 5.5.x when the NSS dispatch bootstrap lands. |
 
 ## Authentication Flow
 
 ```
 1. Parse CLI args
 2. Get caller identity (real UID, not effective)
-3. Resolve caller's groups via getgrouplist(3)
+3. Resolve caller's groups by parsing `/etc/group` (`src/identity.cyr`)
 4. Load and validate policy file
 5. Check authorization (deny rules first, then allow rules)
 6. If auth required and no valid timestamp:
    a. Mask SIGINT/SIGTSTP/SIGQUIT
-   b. Prompt for password (echo disabled)
-   c. Try PAM authentication (service: "shakti")
-   d. If PAM unavailable, fall back to /usr/bin/su
-   e. Zeroize password buffer
-   f. Restore signal mask
-   g. On success: update timestamp
-   h. On failure (3 attempts): audit log, exit
+   b. Prompt for password (termios ECHO cleared)
+   c. `authenticate(user, password)` — `pam_authenticate` returns
+      `SHK_ERR_PAM_UNAVAILABLE` (stub), caller falls through to
+      `su_authenticate`, which pipes password to `/usr/bin/su -c true`
+   d. `memset(&pbuf, 0, PW_BUF_CAP)` between attempts;
+      `secret var` zeroise fires on every function-return path
+   e. Restore signal mask
+   f. On success: update timestamp
+   g. On failure (3 attempts): audit log, exit
 7. Audit log the authorized command
 8. Build sanitized environment
-9. initgroups(3) + setgid + setuid for target user
-10. Close leaked fds
-11. exec() the command (replaces process)
+9. `identity_lookup_gids(target, primary_gid, &supp_gids, 256)` →
+   `setgroups(ngids, &supp_gids)` → `setgid` → `setuid`
+10. `close_range(3, -1, 0)` to drop inherited fds > stderr
+11. `execve()` the command (replaces process)
 ```
 
 ## Policy Format
@@ -138,20 +141,42 @@ Files in `include_dir` (e.g., `/etc/agnos/sudoers.d/*.toml`) are loaded in lexic
 
 ## Consumer API
 
-Shakti exposes a library API for three AGNOS consumers:
+Shakti exposes a cyrius library API for AGNOS consumers. See
+[`docs/guides/integration.md`](../guides/integration.md) for the full
+consumer guide (manifest layout, public surface table, bundle vs
+piecemeal module pickup, default paths, cyrius version floor).
 
-- **argonaut** (init system): Uses `AuthMode::Skip` — already authenticated at boot
-- **agnoshi** (shell): Uses `AuthMode::Interactive` — full sudo experience
-- **daimon** (agent): Uses `AuthMode::TimestampOnly` — no terminal available
+Consumers and their auth mode:
 
-```rust
-let config = ShaktiConfig::builder()
-    .target_user("root")
-    .auth_mode(AuthMode::TimestampOnly)
-    .build();
+- **argonaut** (init system): `AUTH_SKIP` — already authenticated at boot
+- **agnoshi** (shell): `AUTH_INTERACTIVE` — full sudo experience
+- **daimon** (agent): `AUTH_TIMESTAMP_ONLY` — no terminal available
+- **ark** (package manager): `AUTH_TIMESTAMP_ONLY` for privileged ops
 
-let eval = evaluate(&config, "deploy", &groups, &command_args)?;
-if eval.authorized && (!eval.require_auth || eval.timestamp_valid) {
-    // exec with eval.resolved_command and eval.environment
+### Minimal consumer example
+
+```cyrius
+include "dist/shakti.cyr"
+
+fn run_privileged(caller, command_argv) {
+    var policy = load_policy(default_policy_path());
+    if (policy == 0) { return SHK_ERR_POLICY; }
+
+    var groups = identity_lookup_groups(caller);
+    var config = shakti_config_new();
+    cfg_set_target_user(config, "root");
+    cfg_set_auth_mode(config, AUTH_TIMESTAMP_ONLY);
+
+    var eval = evaluate_with_policy(config, policy, caller,
+        sys_getuid(), sys_getgid(), groups, command_argv);
+    if (eval_authorized(eval) == 0) { return SHK_ERR_DENIED; }
+    if (eval_require_auth(eval) == 1) {
+        if (eval_timestamp_valid(eval) == 0) { return SHK_ERR_AUTH_FAILED; }
+    }
+    # exec with eval_resolved_command(eval) + eval_environment(eval)
+    return SHK_OK;
 }
 ```
+
+See `tests/integration/consumer_probe.cyr` for a working build that
+exercises the bundle end-to-end.
