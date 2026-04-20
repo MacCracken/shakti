@@ -29,13 +29,22 @@ Please report security issues privately via GitHub Security Advisories or email 
 - Password buffer zeroised on every return path
   (`secret var` — cyrius v5.3.5)
 
-## Threat Model
+## Threat Model + CVE review
 
 Structured for an external reviewer:
-[`docs/architecture/threat-model.md`](docs/architecture/threat-model.md).
-Covers attacker classes (A1–A5 in scope, A6–A8 out of scope), trust
-boundaries, an assumption register (S1–S10), ten threat vectors with
-mitigations and residual risk, non-goals, and open gaps.
+
+- [`docs/architecture/threat-model.md`](docs/architecture/threat-model.md)
+  — attacker classes (A1–A5 in scope, A6–A8 out of scope), trust
+  boundaries, an assumption register (S1–S10), **11** threat vectors
+  (T1–T11) with mitigations and residual risk, non-goals, and open
+  gaps.
+- [`docs/audit/2026-04-20-external-cve-review.md`](docs/audit/2026-04-20-external-cve-review.md)
+  — known CVE-by-CVE coverage against shakti's implementation: sudo,
+  OpenDoas, util-linux, Linux-PAM, glibc NSS, systemd, plus
+  LD_PRELOAD / TTY / timestamp / race attack classes. Each entry
+  marked Mitigated / N/A / Blocked-on-future / Open / Review.
+  Dated for external-reviewer traceability; new audit reports land
+  under `docs/audit/YYYY-MM-DD-…`.
 
 For the architectural view, see
 [`docs/architecture/overview.md`](docs/architecture/overview.md).

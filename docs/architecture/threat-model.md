@@ -294,6 +294,39 @@ system-level hardening (remove unnecessary setuid bits, audit all
 setuid binaries). Part of AGNOS's broader minimum-setuid policy,
 not shakti's responsibility.
 
+### T11 — TIOCSTI terminal-input injection (A2, lateral uid move)
+
+**Attack**: `shakti -u otheruser /bin/cmd` invokes the target as
+`otheruser` while inheriting the caller's tty. If `otheruser` is
+hostile, they can use the `TIOCSTI` ioctl against the shared tty
+(which they now have an open fd to, via inherited stdin) to inject
+synthetic keystrokes back into the caller's shell after shakti exits.
+Same class as OpenDoas CVE-2023-28339 and util-linux runuser
+CVE-2016-2779.
+
+**Mitigation today**: partial. Shakti does not currently allocate
+a new PTY for the target process. The caller-to-target uid
+direction (typical invocation: caller → root) is less severely
+exposed than the root→caller direction because the target is the
+elevated side; but lateral uid moves (developer → service-account)
+are real usage and do expose this.
+
+**Residual risk**:
+1. On Linux ≥ 6.2, operators can disable `TIOCSTI` system-wide via
+   the `legacy_tiocsti` sysctl or `LEGACY_TIOCSTI` build option.
+   Document this in the operations guide; rely on it as a kernel-
+   level backstop.
+2. Longer-term: allocate a new pty per invocation via `openpty` +
+   proxy I/O. Tracked under "Session logging / I/O recording" in
+   v0.3+ roadmap. PTY allocation naturally defeats TIOCSTI
+   injection because the parent never holds a writable fd against
+   the caller's original tty.
+
+**Test coverage**: none today (the CVE class has no unit-testable
+equivalent without pty setup). Absence-of-mitigation documented in
+[`audit/2026-04-20-external-cve-review.md`](../audit/2026-04-20-external-cve-review.md)
+OpenDoas CVE-2023-28339 row.
+
 ## Non-goals
 
 - **Rate limiting across invocations.** Each shakti invocation gets
@@ -319,6 +352,16 @@ not shakti's responsibility.
 | Real PAM via `dlopen("libpam.so.0")` | port-regressions + `src/auth.cyr` comment | Yes — revisit cyrius 5.5.x |
 | External security audit | roadmap v1.0 Criteria | Yes — this document is input |
 | Consumer integration (argonaut/agnoshi/daimon/ark) | roadmap v1.0 Criteria | Yes — consumer-side work |
+
+## Related documents
+
+- [`audit/2026-04-20-external-cve-review.md`](../audit/2026-04-20-external-cve-review.md)
+  — maps this threat model's classes against known CVEs in sudo /
+  doas / su / PAM / NSS. Every T-entry above has a companion section
+  there with the specific CVE references that exemplify the attack
+  class. Updated together.
+- [`overview.md`](overview.md) — architectural view of the same
+  surface (modules, auth flow, policy format).
 
 ## Review process
 

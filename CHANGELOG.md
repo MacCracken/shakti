@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Documentation
+
+- **`docs/audit/2026-04-20-external-cve-review.md`** — new, pre-
+  external-audit handoff artefact. First entry under the new
+  `docs/audit/` tree (dated `YYYY-MM-DD-…` so incoming third-party
+  audit reports drop into the same directory post-release). Surveys ~30 known CVEs + attack classes
+  across sudo (6 CVEs), OpenDoas (2), util-linux su/runuser (3),
+  Linux-PAM (5 — all gated on cyrius 5.5.x PAM re-enablement),
+  glibc NSS (3), LD_PRELOAD / env (3), TTY (3), timestamp (4),
+  systemd-adjacent (2). Each entry mapped against shakti's current
+  implementation with status marker: ✅ Mitigated, ➖ N/A, ⏳ Blocked
+  on cyrius 5.5.x, ⚠️ Open, 🔍 Review. Summary: zero Open CVE classes
+  that are not TIOCSTI-family; two Partial (timestamp TTL window,
+  clock rollback); everything else N/A by design or properly
+  mitigated with ADR + test coverage.
+- **`docs/architecture/threat-model.md`** — added **T11 (TIOCSTI
+  terminal-input injection)** surfaced by the CVE review. Lateral
+  uid moves (caller → non-root target) share the caller's tty;
+  mitigation today is partial (kernel-level `legacy_tiocsti` sysctl
+  advisory); full PTY-allocation fix tracked in v0.3+ roadmap. Also
+  added a "Related documents" section cross-linking the CVE review.
+- **`SECURITY.md`** — "Threat Model + CVE review" section now links
+  both documents; T-count updated to 11.
+
 ## [0.2.1] - 2026-04-20
 
 ### Changed
