@@ -1,0 +1,21 @@
+# 00-base.toml — baseline rules every system in the fleet gets.
+# Loaded first (lexicographic order) by `include_dir` from the main
+# sudoers.toml.
+#
+# Fragments only contribute [[rules]] — any [defaults] block here is
+# ignored. Permissions: root-owned, mode 0640 or 0644. Do NOT
+# world-write; the policy loader rejects world-writable fragments.
+
+[[rules]]
+group = "wheel"
+run_as = "root"
+commands = []
+require_auth = true
+description = "wheel members — full root"
+
+[[rules]]
+user = "*"
+run_as = "root"
+commands = ["/usr/bin/passwd"]
+require_auth = true
+description = "self-service password change"

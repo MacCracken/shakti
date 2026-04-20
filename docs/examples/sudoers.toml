@@ -1,0 +1,117 @@
+# Annotated shakti policy — covers the full feature surface.
+#
+# Install at /etc/agnos/sudoers.toml (root-owned, non-world-writable).
+# Validate before deploying:
+#     sudo shakti -c -p /etc/agnos/sudoers.toml
+#
+# The linter catches: empty rules, wildcard-NOPASSWD-ALL, duplicate
+# user/group/run_as combinations, and unreachable deny patterns.
+
+[defaults]
+# Credential cache lifetime in seconds. 0 = always re-prompt.
+timestamp_ttl = 300
+
+# Global authentication requirement. If false, every rule defaults to
+# NOPASSWD unless the rule explicitly overrides.
+require_auth = true
+
+# Write an audit log entry for each authorisation decision. Audit
+# infrastructure lives in src/audit.cyr (journald + file backend).
+audit_log = true
+
+# Additional env vars preserved on exec, on top of the default safe
+# list (TERM, COLORTERM, LANG, LANGUAGE, LC_ALL, LC_CTYPE, TZ,
+# DISPLAY, XAUTHORITY). The explicit blocklist still wins: variables
+# in LD_* / BASH_FUNC_* / the interpreter-injection list are blocked
+# even if named here.
+env_keep = ["EDITOR", "VISUAL", "PAGER"]   # single-line arrays only (see note on deploy rule)
+
+# Upper bound on the total command length (binary + args) passed to
+# exec. Default: 4096. Raise only if a legitimate consumer needs it.
+max_command_len = 4096
+
+# Optional fragment directory. Every *.toml here gets loaded in
+# lexicographic order after this file. Each fragment is security-
+# checked independently (root-owned, non-world-writable, not a
+# symlink). Only [[rules]] are read from fragments — [defaults]
+# entries are ignored. See fragments/ for an example.
+# include_dir = "/etc/agnos/sudoers.d"
+
+
+# ── Rules ───────────────────────────────────────────────────
+# Evaluated top-down; first match wins. `user` and `group` are OR'd
+# within a rule — either can grant access. `run_as` must match the
+# target (use `*` for any).
+
+# Full admin: wheel members can do anything as root, password required.
+[[rules]]
+group = "wheel"
+run_as = "root"
+commands = []                    # empty list = ALL commands permitted
+require_auth = true
+description = "wheel group has full root access"
+
+# Specific named admin — can become any user, no restrictions.
+[[rules]]
+user = "alice"
+run_as = "*"
+commands = []
+require_auth = true
+description = "alice is a full administrator"
+
+# Deploy role — narrow command set, NOPASSWD because it runs from CI.
+# Argument-level wildcard lets them restart/reload services but not
+# reconfigure systemd wholesale. The explicit deny entries take
+# precedence over the allow list *within this rule* (deny is
+# evaluated first inside a matching rule).
+#
+# Array values must be single-line — the cyrius-port's mini-TOML
+# parser doesn't support multi-line arrays. See README for the
+# formatting rule and the parser note in src/policy.cyr.
+[[rules]]
+user = "deploy"
+run_as = "root"
+commands = ["/usr/bin/systemctl restart *", "/usr/bin/systemctl reload *", "/usr/bin/systemctl status *", "/usr/bin/journalctl -u *", "/usr/bin/docker"]
+deny_commands = ["/usr/bin/systemctl stop firewalld", "/usr/bin/systemctl stop sshd", "/usr/bin/systemctl disable firewalld", "/usr/bin/systemctl mask firewalld"]
+require_auth = false
+description = "CI deploy user — limited service management, NOPASSWD"
+
+# Operations team (group) — can read logs and inspect state, with auth.
+# Pattern forms demonstrated:
+#   /usr/bin/journalctl        — exact binary match
+#   /usr/bin/journalctl *      — any args
+#   /usr/sbin/*                — directory glob (anything in /usr/sbin)
+#   tail                       — basename match (any `tail` in PATH)
+[[rules]]
+group = "ops"
+run_as = "root"
+commands = ["/usr/bin/journalctl", "/usr/bin/journalctl *", "/usr/sbin/*", "tail", "less", "/usr/bin/ss", "/usr/bin/lsof"]
+require_auth = true
+description = "ops group — diagnostic + log access"
+
+# Specific user + specific group combination is expressed as two
+# separate rules today (the first match wins). If both must be true
+# to grant access, that's a consumer-side composition, not a policy
+# primitive.
+
+# Password-change self-service — anyone can passwd, but only their
+# own (passwd enforces this internally) — and must authenticate
+# themselves first.
+[[rules]]
+user = "*"
+run_as = "root"
+commands = ["/usr/bin/passwd"]
+require_auth = true
+description = "users may change their own password"
+
+# Build-system account — absolutely no auth, only tightly scoped
+# commands. This rule pattern is common for CI agents running as a
+# dedicated unix user (daimon's AUTH_TIMESTAMP_ONLY consumer mode
+# is the library-level equivalent).
+[[rules]]
+user = "build-bot"
+run_as = "root"
+commands = ["/usr/bin/apt-get update", "/usr/bin/apt-get install -y *"]
+deny_commands = ["/usr/bin/apt-get remove *", "/usr/bin/apt-get purge *"]
+require_auth = false
+description = "CI build bot — install-only, NOPASSWD"

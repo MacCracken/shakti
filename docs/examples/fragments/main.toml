@@ -1,0 +1,17 @@
+# main.toml — the top-level policy when using fragments.
+# Points at this same directory (adjust `include_dir` to wherever
+# you ship the fragments in production — typically
+# /etc/agnos/sudoers.d).
+
+[defaults]
+timestamp_ttl = 300
+require_auth = true
+audit_log = true
+env_keep = ["EDITOR"]
+max_command_len = 4096
+include_dir = "/etc/agnos/sudoers.d"
+
+# No [[rules]] here — everything lives in fragments. This keeps the
+# main policy file auditable as a pure declaration of defaults, and
+# lets per-team config land in separate files with independent
+# review / permissions.

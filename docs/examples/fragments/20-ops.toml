@@ -1,0 +1,11 @@
+# 20-ops.toml — ops team diagnostic access.
+# Loaded last; can't override earlier rules (first match wins), so
+# order matters: put most-specific or most-restrictive rules earlier.
+
+# Single-line array (mini-TOML parser limit).
+[[rules]]
+group = "ops"
+run_as = "root"
+commands = ["/usr/bin/journalctl", "/usr/bin/journalctl *", "/usr/sbin/*", "tail", "less", "/usr/bin/ss", "/usr/bin/lsof", "/usr/bin/tcpdump"]
+require_auth = true
+description = "ops group — diagnostics + log access"

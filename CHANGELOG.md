@@ -135,6 +135,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test count: **252 `.tcyr` unit assertions** (up from 239) +
   **20,101 fuzz assertions** + 18 integration + bench harness.
 
+### Policy examples
+
+- **`docs/examples/sudoers.toml`** — fully annotated single-file
+  policy covering every rule type: wheel full-access, named
+  administrator, NOPASSWD CI deploy user with `deny_commands`
+  precedence demo, ops group diagnostics, wildcard-user
+  self-service passwd, dedicated build-bot account. Comments walk
+  through `[defaults]` options and each pattern form.
+- **`docs/examples/fragments/`** — four files demonstrating
+  `include_dir` deployment: `main.toml` declares defaults, the
+  numbered fragments (`00-base.toml`, `10-deploy.toml`,
+  `20-ops.toml`) carry team-scoped rules loaded in lexicographic
+  order.
+- **`docs/examples/README.md`** — index, deployment steps for both
+  single-file and fragment layouts (with correct `install -o root
+  -g root -m 0644` invocations), `--check` linter output guide,
+  rule-ordering + first-match-wins notes, and a dedicated
+  "Formatting limits" section documenting the mini-TOML parser's
+  single-line-array constraint.
+- **`tests/tcyr/examples_smoke.tcyr`** — **17 assertions** that
+  parse each shipped example through `parse_policy`, verify rule
+  counts, confirm the deploy rule carries its `deny_commands`
+  + NOPASSWD, and assert the annotated example produces zero
+  `LINT_ERROR` warnings. Guards against silent schema drift.
+
 ### Documentation expansion
 
 - **`docs/architecture/overview.md`** — added "Library boundary and

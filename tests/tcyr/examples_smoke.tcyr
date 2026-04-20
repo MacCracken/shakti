@@ -1,0 +1,117 @@
+# examples_smoke.tcyr — parse the docs/examples/ policies to catch
+# syntax regressions in the shipped examples. If the example files
+# drift from what `parse_policy` accepts, they mislead operators
+# copying them into production — so gate them in CI.
+#
+# Bypasses the filesystem security checks (root-ownership,
+# non-world-writable) by reading the file contents and handing them
+# to `parse_policy(buf, buflen)` directly. The security gates are
+# covered by fragments.tcyr + policy.tcyr separately.
+
+include "src/lib.cyr"
+
+var EX_BUF_CAP = 65536;
+
+# Read a policy file into an arena buffer and return the byte count.
+# Returns 0 if the file is missing or empty.
+fn _read_example(path, buf, cap) {
+    var n = file_read_all(path, buf, cap);
+    if (n < 0) { return 0; }
+    return n;
+}
+
+# ── docs/examples/sudoers.toml ────────────────────
+
+fn t_parse_annotated_example() {
+    var buf = alloc(EX_BUF_CAP);
+    var n = _read_example("docs/examples/sudoers.toml", buf, EX_BUF_CAP);
+    assert_gt(n, 0, "sudoers.toml readable");
+    var pol = parse_policy(buf, n);
+    assert_nonnull(pol, "sudoers.toml parses to a non-null policy");
+
+    var d = policy_defaults(pol);
+    assert_eq(def_ttl(d), 300, "sudoers.toml: timestamp_ttl = 300");
+    assert_eq(def_require_auth(d), 1, "sudoers.toml: require_auth = true");
+    assert_eq(def_max_cmd_len(d), 4096, "sudoers.toml: max_command_len = 4096");
+
+    var ek = def_env_keep(d);
+    assert_eq(vec_len(ek), 3, "sudoers.toml: env_keep has EDITOR/VISUAL/PAGER");
+
+    # Six rules: wheel, alice, deploy, ops, wildcard passwd, build-bot.
+    var rules = policy_rules(pol);
+    assert_eq(vec_len(rules), 6, "sudoers.toml: 6 rules");
+}
+
+fn t_annotated_deploy_rule_deny() {
+    # Rule 3 (deploy) should carry NOPASSWD + the deny_commands entries.
+    var buf = alloc(EX_BUF_CAP);
+    var n = _read_example("docs/examples/sudoers.toml", buf, EX_BUF_CAP);
+    var pol = parse_policy(buf, n);
+    var rules = policy_rules(pol);
+    var deploy = vec_get(rules, 2);
+    assert_eq(streq(rule_user(deploy), "deploy"), 1, "rule[2] is deploy");
+    assert_eq(rule_require_auth(deploy), 0, "deploy is NOPASSWD");
+    var deny = rule_deny_commands(deploy);
+    assert_gte(vec_len(deny), 4, "deploy has >= 4 deny patterns");
+}
+
+# ── docs/examples/fragments/*.toml ────────────────────
+
+fn t_fragments_parse_cleanly() {
+    var buf = alloc(EX_BUF_CAP);
+
+    var n = _read_example("docs/examples/fragments/main.toml", buf, EX_BUF_CAP);
+    assert_gt(n, 0, "main.toml readable");
+    var main_pol = parse_policy(buf, n);
+    assert_nonnull(main_pol, "main.toml parses");
+    # main.toml has only defaults, no rules.
+    assert_eq(vec_len(policy_rules(main_pol)), 0, "main.toml has 0 rules");
+
+    n = _read_example("docs/examples/fragments/00-base.toml", buf, EX_BUF_CAP);
+    var base = parse_policy(buf, n);
+    assert_eq(vec_len(policy_rules(base)), 2, "00-base.toml has 2 rules");
+
+    n = _read_example("docs/examples/fragments/10-deploy.toml", buf, EX_BUF_CAP);
+    var deploy = parse_policy(buf, n);
+    assert_eq(vec_len(policy_rules(deploy)), 2, "10-deploy.toml has 2 rules");
+
+    n = _read_example("docs/examples/fragments/20-ops.toml", buf, EX_BUF_CAP);
+    var ops = parse_policy(buf, n);
+    assert_eq(vec_len(policy_rules(ops)), 1, "20-ops.toml has 1 rule");
+}
+
+# ── lint the annotated example ────────────────────
+# Validates that our shipped example doesn't trip any LINT_ERROR
+# itself — it should be example-of-good-practice, not cautionary.
+
+fn t_annotated_example_lints_clean() {
+    var buf = alloc(EX_BUF_CAP);
+    var n = _read_example("docs/examples/sudoers.toml", buf, EX_BUF_CAP);
+    var pol = parse_policy(buf, n);
+    var warns = lint_policy(pol);
+    var nw = vec_len(warns);
+    var errors = 0;
+    var i = 0;
+    while (i < nw) {
+        var w = vec_get(warns, i);
+        if (warn_severity(w) == LINT_ERROR) { errors = errors + 1; }
+        i = i + 1;
+    }
+    assert_eq(errors, 0, "annotated example produces zero LINT_ERROR warnings");
+}
+
+# ── Runner ────────────────────
+
+fn main() {
+    alloc_init();
+    test_group("annotated sudoers.toml");
+    t_parse_annotated_example();
+    t_annotated_deploy_rule_deny();
+    t_annotated_example_lints_clean();
+    test_group("fragments/*.toml");
+    t_fragments_parse_cleanly();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);
