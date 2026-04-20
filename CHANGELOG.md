@@ -135,6 +135,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test count: **252 `.tcyr` unit assertions** (up from 239) +
   **20,101 fuzz assertions** + 18 integration + bench harness.
 
+### Known limitations
+
+- **`docs/development/issues/2026-04-19-mini-toml-parser-limits.md`**
+  — filed for language-agent review. Surfaced while writing
+  `docs/examples/*` — shakti's local mini-TOML parser in
+  `src/policy.cyr` doesn't support multi-line array values or
+  inline `#` comments inside array bodies. Workaround today:
+  collapse arrays to a single line. Fix is a downstream-only patch
+  to `parse_policy` + `_shk_parse_str_array` (cyrius `lib/toml.cyr`
+  is explicitly out of scope — shakti's local parser stays local).
+  Security impact: none (fail-closed); ergonomic only. Issue file
+  includes reproduction, two approach sketches, acceptance
+  criteria.
+
 ### Policy examples
 
 - **`docs/examples/sudoers.toml`** — fully annotated single-file
