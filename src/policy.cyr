@@ -419,13 +419,13 @@ fn parse_policy(buf, buflen) {
 # Load policy TOML from a path. Performs security checks (root-owned,
 # not world-writable) before reading.
 fn load_policy(path) {
-    var stbuf = alloc(STAT_BUF_SIZE);
+    var stbuf = alloc(STAT_BUFSZ);
     var r = syscall(SYS_STAT, path, stbuf);
     if (r < 0) { return 0; }
 
-    var mode = load32(stbuf + STAT_MODE_OFF);
+    var mode = load32(stbuf + STAT_MODE);
     if ((mode & S_IFMT) != S_IFREG) { return 0; }
-    var uid = load32(stbuf + STAT_UID_OFF);
+    var uid = load32(stbuf + STAT_UID);
     if (uid != 0) { return 0; }
     if ((mode & 2) != 0) { return 0; }
 
@@ -444,12 +444,12 @@ fn load_policy(path) {
 
 # Append rules from every *.toml in include_dir (lexicographic order).
 fn _shk_load_fragments(policy, dir_cstr) {
-    var dstat = alloc(STAT_BUF_SIZE);
+    var dstat = alloc(STAT_BUFSZ);
     var r = syscall(SYS_STAT, dir_cstr, dstat);
     if (r < 0) { return 0; }
-    var dmode = load32(dstat + STAT_MODE_OFF);
+    var dmode = load32(dstat + STAT_MODE);
     if ((dmode & S_IFMT) != S_IFDIR) { return 0; }
-    var duid = load32(dstat + STAT_UID_OFF);
+    var duid = load32(dstat + STAT_UID);
     if (duid != 0) { return 0; }
     if ((dmode & 2) != 0) { return 0; }
 
@@ -466,10 +466,10 @@ fn _shk_load_fragments(policy, dir_cstr) {
             var full = path_join(str_from(dir_cstr), nm);
             var fpath = str_data(full);
             # Verify fragment file is root-owned, not world-writable
-            var fstat = alloc(STAT_BUF_SIZE);
+            var fstat = alloc(STAT_BUFSZ);
             if (syscall(SYS_STAT, fpath, fstat) >= 0) {
-                var fmode = load32(fstat + STAT_MODE_OFF);
-                var fuid = load32(fstat + STAT_UID_OFF);
+                var fmode = load32(fstat + STAT_MODE);
+                var fuid = load32(fstat + STAT_UID);
                 if (fuid == 0) {
                     if ((fmode & 2) == 0) {
                         var cap2 = 262144;

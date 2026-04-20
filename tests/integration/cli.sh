@@ -111,6 +111,23 @@ case "$out" in
         ;;
 esac
 
+# ── dist/shakti.cyr consumer probe ──────────────────────────
+# Compiles + runs tests/integration/consumer_probe.cyr against
+# dist/shakti.cyr to verify the bundle is consumable as a dep.
+# If this fails after editing src/*.cyr, regenerate the bundle:
+#     cyrius distlib
+PROBE_BIN="build/consumer-probe"
+if cyrius build tests/integration/consumer_probe.cyr "$PROBE_BIN" >/dev/null 2>&1; then
+    probe_out=$("$PROBE_BIN" 2>&1)
+    probe_rc=$?
+    assert "consumer probe exits 0" "$probe_rc" "0"
+    assert "consumer probe prints OK" "$probe_out" "consumer probe OK"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: consumer probe did not compile against dist/shakti.cyr"
+    echo "  → regenerate the bundle with: cyrius distlib"
+fi
+
 echo
 echo "Integration: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi

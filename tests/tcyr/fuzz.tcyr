@@ -1,0 +1,227 @@
+# fuzz.tcyr — property-based fuzz harness for security-critical parsers
+#
+# Ports the four cargo-fuzz harnesses from rust-old/fuzz/fuzz_targets/
+# (parse_policy, validate_command, command_matches, validate_username)
+# that were lost in the 0.2.0 port to cyrius. Cyrius has no coverage-
+# guided fuzzer infrastructure (no sanitizers, no libfuzzer equivalent),
+# so this is a non-coverage-guided property fuzzer: deterministic
+# xorshift64 PRNG × invariant assertions × high iteration count.
+#
+# Invariants checked per target (must hold for any input):
+#   - parse_policy      : no crash, returns a valid (non-null) policy
+#   - validate_command  : no crash, returns SHK_OK or positive SHK_ERR_*
+#   - command_matches   : no crash, returns 0 or 1
+#   - validate_username : no crash; if OK, string has no '/' and is
+#                         not "." / ".." / empty (\0 is excluded by
+#                         cstr construction)
+#
+# Iteration count is a compromise between coverage and test runtime.
+# Bump FUZZ_ITERS when investigating a suspected regression. A
+# reproducer seed + iteration index is printed on any invariant
+# breach so failures are deterministically rerun-able.
+
+include "src/lib.cyr"
+
+# Iteration budget per target. 2500 × 4 targets = 10k parses, runs
+# in < 1s on modern hardware — keeps `cyrius test` responsive.
+var FUZZ_ITERS = 2500;
+
+# ── xorshift64 PRNG ────────────────────
+# Seeded from a fixed constant so crashes reproduce. Override via
+# _fuzz_seed() in bisects.
+
+var _fuzz_state = 0x1234567890ABCDEF;
+
+fn _fuzz_seed(s) { _fuzz_state = s; return 0; }
+
+fn _fuzz_rand() {
+    var x = _fuzz_state;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    _fuzz_state = x;
+    return x;
+}
+
+fn _fuzz_rand_u32() { return _fuzz_rand() & 0xFFFFFFFF; }
+
+fn _fuzz_rand_range(n) {
+    if (n <= 0) { return 0; }
+    var r = _fuzz_rand_u32();
+    if (r < 0) { r = 0 - r; }
+    return r % n;
+}
+
+# Generate a random cstr biased toward "common" shapes — printable
+# ASCII with path separators, quotes, brackets, backslashes — to hit
+# the security-relevant branches more often than pure random would.
+# Pure-random-byte generation was removed: it spent most iterations
+# in validate_username's "first byte not ASCII letter → reject" path,
+# skipping deeper branches. The adversarial menu exercises the full
+# parser surface every iter.
+fn _fuzz_cstr_adversarial(max_len) {
+    # 13-char menu of high-interest bytes for parsers: /, \, ", ', [,
+    # ], =, ;, |, $, (, ), space, #, ,, null-0 avoided, and plain
+    # ASCII letters sprinkled in.
+    var menu = "abc/\\\"'[]= ;|$();,#.-_";
+    var menu_len = strlen(menu);
+    var len = _fuzz_rand_range(max_len + 1);
+    var buf = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        var idx = _fuzz_rand_range(menu_len);
+        store8(buf + i, load8(menu + idx));
+        i = i + 1;
+    }
+    store8(buf + len, 0);
+    return buf;
+}
+
+# Generate a random vec<cstr> of length [0, max_items] with each item
+# of length [0, max_item_len].
+fn _fuzz_argv(max_items, max_item_len) {
+    var v = vec_new();
+    var n = _fuzz_rand_range(max_items + 1);
+    var i = 0;
+    while (i < n) {
+        vec_push(v, _fuzz_cstr_adversarial(max_item_len));
+        i = i + 1;
+    }
+    return v;
+}
+
+# Return 1 if string contains byte c, else 0.
+fn _fuzz_cstr_has(s, c) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        if (load8(s + i) == c) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── parse_policy: crash-free ────────────────────
+# Invariants:
+#   - parse_policy(buf, buflen) returns a non-null policy pointer
+#     for any input (it's tolerant: malformed lines are skipped).
+#   - Rules vec is always a valid vec (vec_len >= 0).
+
+fn fuzz_parse_policy() {
+    var iter = 0;
+    while (iter < FUZZ_ITERS) {
+        var buf = _fuzz_cstr_adversarial(512);
+        var n = strlen(buf);
+        var p = parse_policy(buf, n);
+        # Policy must always be a valid struct
+        assert_nonnull(p, "parse_policy: null policy");
+        assert_nonnull(policy_defaults(p), "parse_policy: null defaults");
+        var rules = policy_rules(p);
+        # vec_len never negative
+        assert_gte(vec_len(rules), 0, "parse_policy: negative rules count");
+        iter = iter + 1;
+    }
+    return 0;
+}
+
+# ── validate_command: crash-free + code-range ────────────────────
+# Invariants:
+#   - Return is SHK_OK (0) or a positive SHK_ERR_* code.
+#   - Empty argv vec → SHK_ERR_EMPTY_CMD (sanity check of the
+#     deterministic path).
+
+fn fuzz_validate_command() {
+    var iter = 0;
+    while (iter < FUZZ_ITERS) {
+        var argv = _fuzz_argv(6, 32);
+        # Cap max_len to avoid OOM-style pathological sizing.
+        var max_len = _fuzz_rand_range(8192) + 1;
+        var r = validate_command(argv, max_len);
+        assert_gte(r, 0, "validate_command: negative return");
+        iter = iter + 1;
+    }
+    # Deterministic sanity
+    assert_eq(validate_command(vec_new(), 4096), SHK_ERR_EMPTY_CMD,
+        "validate_command: empty argv → EMPTY_CMD");
+    return 0;
+}
+
+# ── command_matches: boolean return ────────────────────
+# Invariants:
+#   - Return is strictly 0 or 1. Anything else means a branch failed
+#     to normalise its result.
+
+fn fuzz_command_matches() {
+    var iter = 0;
+    while (iter < FUZZ_ITERS) {
+        var cmd = _fuzz_cstr_adversarial(64);
+        var pat = _fuzz_cstr_adversarial(64);
+        var r = command_matches(cmd, pat);
+        assert_gte(r, 0, "command_matches: negative return");
+        assert_lte(r, 1, "command_matches: return > 1");
+        iter = iter + 1;
+    }
+    return 0;
+}
+
+# ── validate_username: property fuzz ────────────────────
+# Invariants (mirroring the Rust harness):
+#   - Return is SHK_OK or positive SHK_ERR_*.
+#   - If SHK_OK: string is non-empty, has no '/', and is not "." / "..".
+#     (Embedded '\0' is impossible by cstr construction — the original
+#     Rust harness took &[u8] and needed that check; here we're safe.)
+
+fn fuzz_validate_username() {
+    var iter = 0;
+    while (iter < FUZZ_ITERS) {
+        var s = _fuzz_cstr_adversarial(32);
+        var r = validate_username(s);
+        assert_gte(r, 0, "validate_username: negative return");
+        if (r == SHK_OK) {
+            assert_gt(strlen(s), 0, "validate_username OK: empty string accepted");
+            assert_eq(_fuzz_cstr_has(s, 47), 0,
+                "validate_username OK: '/' accepted");
+            # "." and ".." checks — only possible if len is 1 or 2
+            if (strlen(s) == 1) {
+                assert_neq(load8(s), 46, "validate_username OK: '.' accepted");
+            }
+            if (strlen(s) == 2) {
+                var is_dotdot = 0;
+                if (load8(s) == 46) {
+                    if (load8(s + 1) == 46) { is_dotdot = 1; }
+                }
+                assert_eq(is_dotdot, 0, "validate_username OK: '..' accepted");
+            }
+        }
+        iter = iter + 1;
+    }
+    return 0;
+}
+
+# ── Runner ────────────────────
+
+fn main() {
+    alloc_init();
+    # Reseed explicitly so each test group starts from a known state.
+    # Seeds chosen to spread bit patterns across the PRNG warmup.
+    _fuzz_seed(0x1234567890ABCDEF);
+    test_group("fuzz: parse_policy");
+    fuzz_parse_policy();
+
+    _fuzz_seed(0xCAFEBABEDEADBEEF);
+    test_group("fuzz: validate_command");
+    fuzz_validate_command();
+
+    _fuzz_seed(0xA5A5A5A55A5A5A5A);
+    test_group("fuzz: command_matches");
+    fuzz_command_matches();
+
+    _fuzz_seed(0x0F0F0F0FF0F0F0F0);
+    test_group("fuzz: validate_username");
+    fuzz_validate_username();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

@@ -56,11 +56,23 @@ See `docs/architecture/overview.md` for the full security model.
 
 ## Consumer API
 
-Three AGNOS consumers integrate via `src/api.cyr`:
+Shakti ships as a library in two forms:
+
+- **`dist/shakti.cyr`** — single-file bundle (`cyrius distlib`
+  output). Drop-in `include`; consumer declares the stdlib surface.
+- **`src/*.cyr` modules** — piecemeal pickup for consumers that want
+  a subset (e.g. validation only, no auth).
+
+Four AGNOS consumers integrate via `src/api.cyr`:
 
 - **argonaut** (init system): uses `AUTH_SKIP` — already authenticated at boot
 - **agnoshi** (shell): uses `AUTH_INTERACTIVE` — full sudo experience
 - **daimon** (agent): uses `AUTH_TIMESTAMP_ONLY` — no terminal available
+- **ark** (package manager): uses `AUTH_TIMESTAMP_ONLY` for privileged ops
+
+See [`docs/guides/integration.md`](docs/guides/integration.md) for the
+full consumer guide (manifest layout, API surface, default paths,
+cyrius version floor, bundle regeneration).
 
 ## Part of AGNOS
 

@@ -4,12 +4,34 @@ version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.4.9"
+cyrius = "5.4.11"
 repository = "https://github.com/MacCracken/shakti"
 
 [build]
 entry = "src/main.cyr"
 output = "build/shakti"
+
+# `modules` drives `cyrius distlib`: concatenates these in order into
+# `dist/shakti.cyr`, stripping `include` directives for a self-
+# contained consumer bundle. Order matches src/lib.cyr's includes —
+# forward references are resolved because each module's symbols are
+# defined before any later module references them.
+#
+# src/main.cyr is DELIBERATELY EXCLUDED — it's the CLI entry point
+# (argument parsing, exec drop, interactive password prompt,
+# top-level `syscall(SYS_EXIT, rc)`). Consumers that want the
+# library API should include `dist/shakti.cyr` alone.
+modules = [
+    "src/lib.cyr",
+    "src/validate.cyr",
+    "src/env.cyr",
+    "src/identity.cyr",
+    "src/timestamp.cyr",
+    "src/audit.cyr",
+    "src/auth.cyr",
+    "src/policy.cyr",
+    "src/api.cyr",
+]
 
 [deps]
 stdlib = [

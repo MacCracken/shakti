@@ -53,20 +53,23 @@ the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.4.9.
       LDAP/sssd support; replaces the `/etc/group` parsing path
       in `identity_lookup_groups` / `identity_lookup_gids` behind
       the same API).
-      **Blocked on cyrius NSS dispatch bootstrap** — as of v5.4.9,
+      **Revisit at cyrius 5.5.x.** As of cyrius v5.4.9,
       `lib/dynlib.cyr` handles IRELATIVE + IFUNC + DT_INIT +
       cpu_features / TLS / stack_end bootstrap (v5.3.7 → v5.3.14),
       so simple libc calls (`getpid`, `strlen`, `strcmp`, `memcmp`)
       work end-to-end. `getgrouplist` / `getpwent` / `getaddrinfo`
       still crash inside nsswitch.conf parsing and NSS-module
       dlopen because locale init, malloc arena setup, and the NSS
-      module table are not yet populated. Cyrius tracks this as an
-      open follow-up in its roadmap ("needs a dedicated session").
+      module table are not yet populated. Cyrius has roadmapped the
+      NSS dispatch bootstrap for the 5.5.x line; smoke-probe
+      `getgrouplist` via `dynlib` when that lands before committing
+      to bite 2.
 - [ ] Real PAM authentication via `dlopen("libpam.so.0")` and a
       conversation callback (replaces the `/usr/bin/su` fallback
       currently used unconditionally in `src/auth.cyr`).
-      **Blocked on the same cyrius NSS dispatch bootstrap** — PAM
-      loads NSS modules transitively for user lookups.
+      **Revisit at cyrius 5.5.x** — PAM loads NSS modules
+      transitively for user lookups, so it rides on the same
+      bootstrap.
 
 ## Future (v0.3+)
 
@@ -82,10 +85,24 @@ blocked on cyrius. Pick up in the order consumers demand them.
 
 ## v1.0 Criteria
 
+Milestone-ever-hit checklist. Items marked [x] have a shipped
+implementation *somewhere* in the project history; the port-
+regressions section above tracks any that regressed in 0.2.0 and
+need reshipping before v1.0 cuts. Do not uncheck a criterion here
+when a regression lands — the port-regressions section is the
+single source of truth for "not currently shipping".
+
 - [x] All backlog items complete
-- [x] Real PAM integration (not `/usr/bin/su` shim)
-- [x] Full test coverage of all security-critical paths (130 tests)
-- [x] Fuzz testing on policy parser and command validation (4 harnesses)
+- [x] Real PAM integration (not `/usr/bin/su` shim) — shipped in
+      Rust 0.1.x; regressed in 0.2.0 cyrius port. Revisit at cyrius
+      5.5.x when the NSS dispatch bootstrap lands (port-regressions
+      section tracks the block).
+- [x] Full test coverage of all security-critical paths (252 `.tcyr`
+      unit assertions in 0.2.x, up from 130 in Rust 0.1.x; +20,101
+      property-fuzz assertions per run)
+- [x] Fuzz testing on policy parser and command validation
+      (`tests/tcyr/fuzz.tcyr` — 4 targets, non-coverage-guided
+      xorshift64 + invariant assertions, 2500 iters per target)
 - [ ] Security audit by at least one external reviewer
-- [x] Documentation complete (architecture, usage guide, ADRs)
+- [x] Documentation complete (architecture, usage guide, 5 ADRs)
 - [ ] All three consumers (argonaut, agnoshi, daimon) integrated and tested

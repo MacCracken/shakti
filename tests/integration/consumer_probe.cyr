@@ -1,0 +1,75 @@
+# consumer_probe.cyr — smoke-test dist/shakti.cyr from a consumer's
+# perspective.
+#
+# This file models exactly what a downstream (ark, argonaut,
+# agnoshi, daimon, …) would do to pull shakti as a dep:
+#
+#   1. Declare the stdlib surface shakti expects.
+#   2. Include the bundled `dist/shakti.cyr`.
+#   3. Call the public API.
+#
+# Compile with:
+#   cyrius build tests/integration/consumer_probe.cyr build/consumer-probe
+#   ./build/consumer-probe
+# Expected output: "consumer probe OK\n" and exit 0.
+#
+# Run the cyrius.cyml stdlib list matches — without it, the bundle
+# errors on undefined `alloc`/`vec_new`/`SYS_*` because distlib
+# strips all include directives. Keep this list in sync with the
+# `[deps] stdlib` section of cyrius.cyml.
+
+include "dist/shakti.cyr"
+
+fn main() {
+    alloc_init();
+
+    # validate_username: valid + invalid paths
+    if (validate_username("alice") != SHK_OK) {
+        file_write(2, "FAIL: valid username rejected\n", 30);
+        return 1;
+    }
+    if (validate_username("../etc/passwd") != SHK_ERR_PATH_TRAVERSAL) {
+        file_write(2, "FAIL: path traversal not caught\n", 32);
+        return 1;
+    }
+
+    # parse_policy: minimal policy from memory
+    var src = "[defaults]\ntimestamp_ttl = 600\n\n[[rules]]\nuser = \"alice\"\ncommands = [\"/usr/bin/id\"]\nrequire_auth = true\n";
+    var pol = parse_policy(src, strlen(src));
+    if (pol == 0) {
+        file_write(2, "FAIL: policy null\n", 18);
+        return 1;
+    }
+    var d = policy_defaults(pol);
+    if (def_ttl(d) != 600) {
+        file_write(2, "FAIL: ttl not parsed\n", 21);
+        return 1;
+    }
+    if (vec_len(policy_rules(pol)) != 1) {
+        file_write(2, "FAIL: rule count wrong\n", 23);
+        return 1;
+    }
+
+    # command_matches: exact + wildcard
+    if (command_matches("/usr/bin/id", "/usr/bin/id") != 1) {
+        file_write(2, "FAIL: exact match missed\n", 25);
+        return 1;
+    }
+    if (command_matches("/usr/bin/systemctl restart nginx",
+                        "/usr/bin/systemctl restart *") != 1) {
+        file_write(2, "FAIL: arg wildcard missed\n", 26);
+        return 1;
+    }
+
+    # is_unsafe_env: hashmap path (exercises cyrius stdlib hashmap)
+    if (is_unsafe_env("LD_PRELOAD") != 1) {
+        file_write(2, "FAIL: LD_PRELOAD not flagged unsafe\n", 36);
+        return 1;
+    }
+
+    file_write(1, "consumer probe OK\n", 18);
+    return 0;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

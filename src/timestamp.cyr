@@ -14,19 +14,20 @@
 # Not in stdlib's OpenFlag enum; Linux x86_64 value.
 var O_NOFOLLOW = 131072;  # 0o400000
 
-# Linux x86_64 syscall numbers not exposed by stdlib
+# Linux x86_64 syscall numbers not exposed by cyrius stdlib's SysNr
+# enum (as of 5.4.11). Shakti is x86_64-Linux-only today; aarch64
+# cross-build would need these remapped via cyrius's per-arch peer
+# files or a shakti-side arch selector.
 var SYS_LSTAT = 6;
 var SYS_READLINK = 89;
 var SYS_CLOCK_GETTIME = 228;
 var CLOCK_REALTIME = 0;
 
-# Stat buffer field offsets (x86_64)
-var STAT_MODE_OFF = 24;
-var STAT_UID_OFF = 28;
+# Mtime offset inside the x86_64 stat buffer (not in cyrius's Stat
+# enum — it exposes MODE / UID / GID / SIZE / NLINK / BUFSZ).
 var STAT_MTIME_OFF = 88;
-var STAT_BUF_SIZE = 144;
 
-# File mode bits
+# File mode bits (not in cyrius stdlib)
 var S_IFMT = 61440;    # 0o170000
 var S_IFLNK = 40960;   # 0o120000
 var S_IFREG = 32768;   # 0o100000
@@ -108,7 +109,7 @@ fn timestamp_path(user) {
 # exists, verify it is root-owned and not world-writable.
 fn _shk_ensure_ts_dir() {
     var dir = default_timestamp_dir();
-    var stbuf = alloc(STAT_BUF_SIZE);
+    var stbuf = alloc(STAT_BUFSZ);
     var r = syscall(SYS_STAT, dir, stbuf);
     if (r < 0) {
         # mkdir -p (parent assumed to exist; for /var/run it will)
@@ -118,9 +119,9 @@ fn _shk_ensure_ts_dir() {
     }
 
     # Exists — verify safety
-    var mode = load32(stbuf + STAT_MODE_OFF);
+    var mode = load32(stbuf + STAT_MODE);
     if ((mode & S_IFMT) != S_IFDIR) { return SHK_ERR_IO; }
-    var uid = load32(stbuf + STAT_UID_OFF);
+    var uid = load32(stbuf + STAT_UID);
     if (uid != 0) { return SHK_ERR_OWNER; }
     if ((mode & 2) != 0) { return SHK_ERR_WORLD_WRITABLE; }
     return SHK_OK;
@@ -133,17 +134,17 @@ fn _shk_ensure_ts_dir() {
 # by root, and its mtime+ttl is in the future.
 fn check_timestamp(user, ttl_secs) {
     var path = timestamp_path(user);
-    var stbuf = alloc(STAT_BUF_SIZE);
+    var stbuf = alloc(STAT_BUFSZ);
     var r = syscall(SYS_LSTAT, path, stbuf);
     if (r < 0) { return 0; }
 
-    var mode = load32(stbuf + STAT_MODE_OFF);
+    var mode = load32(stbuf + STAT_MODE);
     # Reject symlinks
     if ((mode & S_IFMT) == S_IFLNK) { return 0; }
     # Must be regular file
     if ((mode & S_IFMT) != S_IFREG) { return 0; }
     # Must be root-owned
-    var uid = load32(stbuf + STAT_UID_OFF);
+    var uid = load32(stbuf + STAT_UID);
     if (uid != 0) { return 0; }
 
     var mtime = load64(stbuf + STAT_MTIME_OFF);
@@ -181,11 +182,11 @@ fn invalidate_timestamp(user) {
     if (vuser != SHK_OK) { return vuser; }
 
     var path = timestamp_path(user);
-    var stbuf = alloc(STAT_BUF_SIZE);
+    var stbuf = alloc(STAT_BUFSZ);
     var r = syscall(SYS_LSTAT, path, stbuf);
     if (r < 0) { return SHK_OK; }  # already absent
 
-    var mode = load32(stbuf + STAT_MODE_OFF);
+    var mode = load32(stbuf + STAT_MODE);
     if ((mode & S_IFMT) == S_IFLNK) { return SHK_ERR_SYMLINK; }
 
     var ur = sys_unlink(path);

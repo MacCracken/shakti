@@ -58,6 +58,7 @@ pointed at cyrius 5.3.1:
 - v5.3.9 — `dynlib_bootstrap_tls()` + `_stack_end` (simple libc calls work)
 - v5.3.11 — IFUNC-aware `dynlib_sym` (string/mem functions work)
 - v5.3.14 — bounds-checked indirect calls; safety gates tightened
-- **pending (cyrius roadmap)** — locale init (`__ctype_init`), malloc
-  arena setup, NSS module table population. Explicitly tracked as
-  "needs a dedicated session" in cyrius's v5.3.x / v5.4.x follow-ups.
+- **v5.5.x (cyrius roadmap)** — locale init (`__ctype_init`), malloc
+  arena setup, NSS module table population. Bite 2 (NSS) and bite 3
+  (real PAM) resume when this lands; smoke-probe `getgrouplist` via
+  `dynlib` first to confirm the fix before committing.
