@@ -1,13 +1,18 @@
 # identity.cyr — user/group identity lookup
 #
-# Local-files identity backend: parses /etc/passwd and /etc/group.
-# This is the third /etc parser to land in main.cyr (uid lookup, group
-# lookup for caller, target uid lookup), so it earns its own module
-# with shared field-walking helpers.
+# Local-files identity backend split across two paths:
 #
-# Restoring NSS resolution (LDAP/sssd) for remote identity stores is
-# tracked separately and will replace these implementations behind
-# the same public API via a libc binding.
+#   passwd lookups   — local /etc/passwd parser in this file
+#                      (identity_lookup_uid / identity_lookup_user).
+#   group lookups    — delegated to lib/grp.cyr's /etc/group reader
+#                      (identity_lookup_groups / identity_lookup_gids).
+#
+# NSS modules (LDAP / sssd / nscd) are NOT consulted on either path;
+# both bypass NSS entirely. Restoring real NSS dispatch needs the
+# libc fdlopen path (cyrius v5.5.34+), which adds setuid attack
+# surface that hasn't been threat-modeled — tracked as a future
+# blocker on the roadmap. ~95% of Linux deployments use
+# `passwd: files / group: files` and are unaffected.
 
 # Maximum bytes read from /etc/passwd and /etc/group. Real systems
 # rarely exceed a few KB locally; remote NSS will not pass through
@@ -48,25 +53,6 @@ fn _identity_find_byte(buf, start, end, needle) {
         p = p + 1;
     }
     return end;
-}
-
-# Internal: scan group members field (comma-separated) for `username`.
-# Returns 1 if found, 0 otherwise.
-fn _identity_member_match(buf, mstart, line_end, username, ulen) {
-    var p = mstart;
-    while (p <= line_end) {
-        var at_sep = 0;
-        if (p == line_end) { at_sep = 1; }
-        elif (load8(buf + p) == 44) { at_sep = 1; }
-        if (at_sep == 1) {
-            if (p - mstart == ulen) {
-                if (memeq(buf + mstart, username, ulen) == 1) { return 1; }
-            }
-            mstart = p + 1;
-        }
-        p = p + 1;
-    }
-    return 0;
 }
 
 # ── Public: look up a passwd entry by uid ──
@@ -155,92 +141,122 @@ fn identity_lookup_user(name, out_uid_ptr, out_gid_ptr) {
 }
 
 # ── Public: collect group NAMES the user belongs to ──
-# Returns vec<cstr>. Used by policy evaluation to match per-group rules.
+# Returns vec<cstr> of group names. Includes the user's primary
+# group when known (matches getgrouplist(3) / sudo semantics — a
+# rule that names a user's primary group should match it). Used
+# by policy evaluation for per-group rules.
+#
+# Backed by lib/grp.cyr's /etc/group reader. Does NOT consult NSS
+# modules (LDAP / sssd / nscd) — that requires the libc fdlopen
+# path, tracked as a future-blocked roadmap item.
 fn identity_lookup_groups(username) {
     var groups = vec_new();
     if (username == 0) { return groups; }
-    var ulen = strlen(username);
-    if (ulen == 0) { return groups; }
+    if (strlen(username) == 0) { return groups; }
 
-    var buf = alloc(IDENTITY_BUF_MAX);
-    var n = file_read_all("/etc/group", buf, IDENTITY_BUF_MAX);
-    if (n <= 0) { return groups; }
+    # Resolve the primary GID via /etc/passwd. If the user is unknown
+    # we still walk /etc/group for member-list matches, but pass an
+    # unreachable primary so getgrouplist's primary-dedup logic
+    # doesn't suppress a real entry. -1 is unreachable because every
+    # parsed gid is in [0, UINT_MAX].
+    var uid_out = alloc(8);
+    var gid_out = alloc(8);
+    store64(uid_out, 0);
+    store64(gid_out, 0);
+    var have_primary = 0;
+    var primary_gid = 0 - 1;
+    if (identity_lookup_user(username, uid_out, gid_out) == 1) {
+        primary_gid = load64(gid_out);
+        have_primary = 1;
+    }
 
-    var pos = 0;
-    while (pos < n) {
-        var line_end = _identity_find_byte(buf, pos, n, 10);
-        var c1 = _identity_find_byte(buf, pos, line_end, 58);
-        if (c1 == line_end) { pos = line_end + 1; continue; }
-        var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
-        if (c2 == line_end) { pos = line_end + 1; continue; }
-        var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
-        if (c3 == line_end) { pos = line_end + 1; continue; }
+    # Collect gid list. lib/grp.cyr writes 8-byte (i64) gids;
+    # 256 slots is well above realistic group counts (NGROUPS_MAX).
+    var gid_buf_max = 256;
+    var gid_buf = alloc(gid_buf_max * 8);
+    var n = grp_getgrouplist(username, primary_gid, gid_buf, gid_buf_max);
+    var written = 0;
+    if (n == 0 - 2) { written = gid_buf_max; }
+    elif (n < 0) { return groups; }
+    else { written = n; }
 
-        if (_identity_member_match(buf, c3 + 1, line_end, username, ulen) == 1) {
-            var nlen = c1 - pos;
-            # Skip empty-name entries — same rationale as identity_lookup_uid.
-            if (nlen > 0) {
-                var gname = alloc(nlen + 1);
-                memcpy(gname, buf + pos, nlen);
-                store8(gname + nlen, 0);
-                vec_push(groups, gname);
+    # Resolve each gid back to its name. lib/grp.cyr keeps an internal
+    # cache of /etc/group across calls in the same process, so this
+    # is O(written * lines) memory walks with no extra disk I/O.
+    var grrec = alloc(24);
+    var strbuf_sz = 1024;
+    var strbuf = alloc(strbuf_sz);
+    var i = 0;
+    if (have_primary == 0) { i = 1; }   # skip the synthetic primary
+    while (i < written) {
+        memset(grrec, 0, 24);
+        memset(strbuf, 0, strbuf_sz);
+        var gid = load64(gid_buf + i * 8);
+        if (grp_getgrgid(gid, grrec, strbuf, strbuf_sz) == 1) {
+            var name = grp_name(grrec);
+            if (name != 0) {
+                var nlen = strlen(name);
+                if (nlen > 0) {
+                    # Copy out — strbuf is reused on the next iteration.
+                    var copy = alloc(nlen + 1);
+                    memcpy(copy, name, nlen);
+                    store8(copy + nlen, 0);
+                    vec_push(groups, copy);
+                }
             }
         }
-        pos = line_end + 1;
+        i = i + 1;
     }
     return groups;
 }
 
 # ── Public: collect supplementary GIDs for setgroups(2) ──
-# Mirrors initgroups(3) semantics: the resulting list always begins
-# with primary_gid, followed by each /etc/group entry where `username`
-# appears as a member, with duplicates removed.
+# Mirrors initgroups(3) / getgrouplist(3) semantics: the resulting
+# list always begins with primary_gid, followed by each /etc/group
+# entry where `username` appears as a member, with the primary's
+# duplicate suppressed.
 #
 # Writes u32 GIDs into out_buf (caller-allocated, max_count * 4 bytes).
 # Returns the number of GIDs written. Always returns at least 1
 # (primary_gid) when max_count >= 1, even if /etc/group is unreadable
 # — clearing supplementary groups silently is never the intended fallback.
+#
+# Backed by lib/grp.cyr's /etc/group reader; same NSS caveat as
+# identity_lookup_groups.
 fn identity_lookup_gids(username, primary_gid, out_buf, max_count) {
     if (max_count <= 0) { return 0; }
 
+    # Always at least primary, even if every step below fails.
     store32(out_buf, primary_gid);
     var count = 1;
 
     if (username == 0) { return count; }
-    var ulen = strlen(username);
-    if (ulen == 0) { return count; }
+    if (strlen(username) == 0) { return count; }
 
-    var buf = alloc(IDENTITY_BUF_MAX);
-    var n = file_read_all("/etc/group", buf, IDENTITY_BUF_MAX);
-    if (n <= 0) { return count; }
+    # lib/grp.cyr writes i64 gids at 8-byte stride; allocate scratch
+    # at the requested width then narrow at the API boundary. Linux
+    # gid_t is 32-bit, so the high 32 bits are always zero.
+    var scratch = alloc(max_count * 8);
+    var n = grp_getgrouplist(username, primary_gid, scratch, max_count);
+    # Three cases:
+    #   n >= 1 — n entries written successfully (n >= 1 because
+    #            primary is always in slot 0 on success).
+    #   n == -1 — /etc/group not readable; primary-only fallback.
+    #   n == -2 — caller buffer full at max_count; max_count entries
+    #             were written before bail. Honour the caller's cap.
+    var written = 0;
+    if (n == 0 - 2) { written = max_count; }
+    elif (n < 0) { return count; }
+    else { written = n; }
 
-    var pos = 0;
-    while (pos < n) {
-        var line_end = _identity_find_byte(buf, pos, n, 10);
-        var c1 = _identity_find_byte(buf, pos, line_end, 58);
-        if (c1 == line_end) { pos = line_end + 1; continue; }
-        var c2 = _identity_find_byte(buf, c1 + 1, line_end, 58);
-        if (c2 == line_end) { pos = line_end + 1; continue; }
-        var c3 = _identity_find_byte(buf, c2 + 1, line_end, 58);
-        if (c3 == line_end) { pos = line_end + 1; continue; }
-
-        var gid_val = _identity_parse_uint(buf, c2 + 1, c3);
-        if (gid_val < 0) { pos = line_end + 1; continue; }
-
-        if (_identity_member_match(buf, c3 + 1, line_end, username, ulen) == 1) {
-            var dup = 0;
-            var i = 0;
-            while (i < count) {
-                if (load32(out_buf + i * 4) == gid_val) { dup = 1; i = count; }
-                else { i = i + 1; }
-            }
-            if (dup == 0) {
-                if (count >= max_count) { return count; }
-                store32(out_buf + count * 4, gid_val);
-                count = count + 1;
-            }
-        }
-        pos = line_end + 1;
+    # Skip slot 0 (primary) — already written via store32 above.
+    # Mask each i64 to u32; defensive against any future widening.
+    var i = 1;
+    while (i < written) {
+        var g = load64(scratch + i * 8);
+        store32(out_buf + count * 4, g & 4294967295);
+        count = count + 1;
+        i = i + 1;
     }
     return count;
 }

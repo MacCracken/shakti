@@ -76,6 +76,50 @@ visible artefact is the version banner.
   audit fix from 0.2.2). Carried over from the audit cadence
   established in 0.2.2.
 
+### Refactored
+
+- **NSS group resolution — bite 2a (files-only).** Both
+  `identity_lookup_groups` and `identity_lookup_gids` in
+  `src/identity.cyr` now delegate to `lib/grp.cyr`'s shared
+  `/etc/group` reader (`grp_getgrouplist` + `grp_getgrgid`).
+  Drops ~80 LOC of bespoke field-walking and a private
+  `_identity_member_match` helper. `lib/grp.cyr` is added to
+  `cyrius.cyml [deps] stdlib`. **This does not restore
+  LDAP/sssd**: `lib/grp.cyr` bypasses NSS entirely (musl-style
+  `/etc/group` parser), same as the code it replaces. Real
+  NSS dispatch needs the libc-fdlopen path, blocked on a
+  setuid-safe helper-trust model — captured as a future
+  blocker on the roadmap.
+- **Behaviour change — primary group now included in
+  `identity_lookup_groups`.** Matches `getgrouplist(3)` /
+  sudo semantics: a policy rule that names a user's primary
+  group should match the user, even when the `/etc/group`
+  member list is empty (the common case for `root` on stock
+  Ubuntu/Debian). Previously a rule like `group = "users"`
+  would not match a user whose primary group was `users`
+  unless they were also in the member list. New test
+  `t_lookup_groups_root_includes_primary` locks this in;
+  `t_lookup_groups_root_well_formed` updated; new
+  `t_lookup_groups_missing_user`. Identity test count
+  23 → 30 (+7 portable assertions).
+
+### Audit deferrals (closeout)
+
+- **L-1 — `update_timestamp` no longer conflates open(2)
+  errors as `SHK_ERR_SYMLINK`.** From the 2026-04-20 internal
+  audit. `O_NOFOLLOW` on a symlinked path returns `-ELOOP`
+  (40); other errors (`-EACCES`, `-ENOENT`, `-EMFILE`, …) now
+  surface as `SHK_ERR_IO`. Operator-debuggability fix; no
+  security delta.
+- **L-2 (env-read buffer leak on grow)** remains deferred —
+  `lib/alloc.cyr` is a bump allocator with no `free`, so the
+  fix would require switching shakti to `lib/freelist.cyr` or
+  pre-sizing via `stat(2)`. Not security-relevant for the
+  single-shot CLI invocation.
+- **L-3 (unchecked `alloc()` returns)** remains deferred —
+  spans multiple call sites in `auth.cyr` and `env.cyr`;
+  earmarked for a defensive-checks pass.
+
 ### Internal
 
 - **NSS / PAM blocker note** updated in

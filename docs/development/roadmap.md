@@ -44,44 +44,78 @@
 
 Tracked here to keep them visible against the v1.0 criteria below.
 Each is a feature present in the Rust 0.1.x build that did not survive
-the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.4.9.
+the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.7.33.
 
 - [x] `initgroups` parity — populate target user's supplementary
       groups before privilege drop instead of `setgroups(0, NULL)`
       (closed via `src/identity.cyr` / `identity_lookup_gids`).
-- [ ] NSS group resolution via libc `getgrouplist(3)` (restore
-      LDAP/sssd support; replaces the `/etc/group` parsing path
-      in `identity_lookup_groups` / `identity_lookup_gids` behind
-      the same API).
-      **Revisit at cyrius 5.5.x.** As of cyrius v5.4.9,
-      `lib/dynlib.cyr` handles IRELATIVE + IFUNC + DT_INIT +
-      cpu_features / TLS / stack_end bootstrap (v5.3.7 → v5.3.14),
-      so simple libc calls (`getpid`, `strlen`, `strcmp`, `memcmp`)
-      work end-to-end. `getgrouplist` / `getpwent` / `getaddrinfo`
-      still crash inside nsswitch.conf parsing and NSS-module
-      dlopen because locale init, malloc arena setup, and the NSS
-      module table are not yet populated. Cyrius has roadmapped the
-      NSS dispatch bootstrap for the 5.5.x line; smoke-probe
-      `getgrouplist` via `dynlib` when that lands before committing
-      to bite 2.
-- [ ] Real PAM authentication via `dlopen("libpam.so.0")` and a
-      conversation callback (replaces the `/usr/bin/su` fallback
-      currently used unconditionally in `src/auth.cyr`).
-      **Revisit at cyrius 5.5.x** — PAM loads NSS modules
-      transitively for user lookups, so it rides on the same
-      bootstrap.
+- [~] NSS group resolution — **partial as of 0.2.3 (bite 2a)**.
+      `identity_lookup_groups` / `identity_lookup_gids` now delegate
+      to `lib/grp.cyr`'s shared `/etc/group` reader (cyrius v5.5.26+).
+      Drops ~80 LOC of bespoke field walking; primary group now
+      included in `identity_lookup_groups` to match `getgrouplist(3)`.
+      **Does NOT restore LDAP/sssd** — the cyrius reader is a musl-
+      style `/etc/group` parser that bypasses NSS entirely, same as
+      the code it replaced. Real NSS dispatch is bite 2b, blocked
+      below.
+- [ ] Real PAM authentication — replaces the `/usr/bin/su` fallback
+      in `src/auth.cyr`. cyrius v5.5.27 shipped
+      `lib/pam.cyr::pam_unix_authenticate` (forks Linux-PAM's
+      `unix_chkpwd` setuid helper). Migration is tractable feature
+      work; unblocked from cyrius's side. Consumes the same
+      threat-model review as bite 2b below if we want LDAP/sssd
+      coverage on auth too.
+
+## Blocked (later)
+
+- **Real NSS dispatch (bite 2b — restore LDAP/sssd).**
+  Path B from cyrius v5.5.34 (`lib/fdlopen.cyr::fdlopen_init_full`)
+  is the only way to call libc `getgrouplist(3)` with full NSS
+  resolution from a static cyrius binary. Blocked on a
+  **setuid-safe helper-trust model** — cyrius's `dlopen-helper`
+  ships at `~/.cyrius/dlopen-helper` (in the invoking user's
+  `$HOME`), which a non-root caller can replace and we'd execute
+  with root privileges before authentication. Closing this needs:
+  (1) a root-owned system path for the helper
+  (e.g. `/usr/lib/cyrius/dlopen-helper`), enforced via mode +
+  ownership + non-symlink check, and (2) integrity verification
+  (hash-pin or signature). Should land as an ADR before any code.
+- **Remote policy fetch (fleet management).** Same blocker —
+  `lib/tls.cyr` migrated to `fdlopen` at cyrius v5.6.37 for the
+  `SSL_connect` deadlock fix, so any HTTPS path inherits the
+  helper-trust requirement above. Defer until bite 2b's threat
+  model is settled.
 
 ## Future (v0.3+)
 
-Larger features deferred past the 0.2.x line while NSS/PAM remain
-blocked on cyrius. Pick up in the order consumers demand them.
+Larger features that are NOT blocked on cyrius. Pick up in the
+order consumers demand them.
 
-- Session logging / I/O recording (openpty-based).
+- Session logging / I/O recording (openpty-based) — direct Linux
+  syscalls; no fdlopen dependency.
 - Capability-based privilege (CAP_* instead of full root) — drop to a
-  per-rule capability set at exec instead of uid=0.
+  per-rule capability set at exec instead of uid=0. `prctl` /
+  `capset` direct syscalls; no fdlopen dependency.
 - SELinux / AppArmor context transitions
-  (`/proc/self/attr/exec`, feature-gated by distro).
-- Remote policy fetch (for fleet management).
+  (`/proc/self/attr/exec`, feature-gated by distro). Direct file
+  write; no fdlopen dependency.
+
+## Audit deferrals
+
+Finer-grained items from the 2026-04-20 internal review
+(see [`../audit/2026-04-20-internal-review.md`](../audit/2026-04-20-internal-review.md)).
+H-1 / H-2 / M-1 / M-2 / I-1 shipped in 0.2.2.
+
+- [x] **L-1** — `update_timestamp` differentiates `-ELOOP` (true
+      symlink reject) from generic open(2) errors. Closed in 0.2.3.
+- [ ] **L-2** — env-read buffer leak on grow. Blocked on `free()`
+      in shakti's bump allocator; would need switch to
+      `lib/freelist.cyr` or pre-size via `stat(2)`. Not security-
+      relevant for single-shot CLI; affects long-running library
+      consumers (daimon).
+- [ ] **L-3** — unchecked `alloc()` returns in `auth.cyr` /
+      `env.cyr`. Defensive-checks pass — non-trivial because of
+      multiple call sites. Earmarked for a separate hygiene pass.
 
 ## v1.0 Criteria
 

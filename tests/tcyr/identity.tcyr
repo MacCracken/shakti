@@ -69,14 +69,13 @@ fn t_lookup_user_substring_safety() {
 # ── identity_lookup_groups ────────────────────
 
 fn t_lookup_groups_root_well_formed() {
-    # `identity_lookup_groups` returns the supplementary groups whose
-    # member-list field in /etc/group names this user. On stock
-    # Ubuntu/Debian the member list for group "root" is empty; on
-    # Arch and many Linux From Scratch builds root is listed as a
-    # member of its own group. We can't anchor on contents without
-    # tying CI to one distro, so anchor on structural guarantees:
-    # function returns a real vec (non-null), every entry is a non-
-    # empty cstr, no entry is duplicated.
+    # `identity_lookup_groups` returns vec<cstr> of every group the
+    # user is in: their primary group from /etc/passwd plus every
+    # /etc/group entry whose member list names them. Anchor only on
+    # structural guarantees: non-null vec, every entry a non-empty
+    # cstr, no duplicates. Specific contents vary by distro (stock
+    # Ubuntu's group "root" has empty member list; Arch typically
+    # lists root explicitly), so don't pin those.
     var groups = identity_lookup_groups("root");
     assert_eq(groups != 0, 1, "lookup returns a non-null vec");
     var n = vec_len(groups);
@@ -93,6 +92,30 @@ fn t_lookup_groups_root_well_formed() {
         }
         i = i + 1;
     }
+}
+
+fn t_lookup_groups_root_includes_primary() {
+    # New in 0.2.4: identity_lookup_groups now matches getgrouplist(3)
+    # semantics — it includes the user's primary group, even if the
+    # /etc/group member-list is empty (the common case for "root" on
+    # Ubuntu/Debian). Root's primary gid is universally 0 = group
+    # "root", so this is a portable assertion.
+    var groups = identity_lookup_groups("root");
+    var n = vec_len(groups);
+    var found_root = 0;
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(groups, i), "root") == 1) { found_root = 1; }
+        i = i + 1;
+    }
+    assert_eq(found_root, 1, "root user includes group 'root' (primary)");
+}
+
+fn t_lookup_groups_missing_user() {
+    # Unknown user: no /etc/passwd entry, no /etc/group member-list
+    # match. Result is empty.
+    var groups = identity_lookup_groups("__definitely_not_a_user__");
+    assert_eq(vec_len(groups), 0, "missing user yields empty group vec");
 }
 
 fn t_lookup_groups_empty_user() {
@@ -196,6 +219,8 @@ fn main() {
     t_lookup_user_missing();
     t_lookup_user_substring_safety();
     t_lookup_groups_root_well_formed();
+    t_lookup_groups_root_includes_primary();
+    t_lookup_groups_missing_user();
     t_lookup_groups_empty_user();
     t_lookup_gids_root_primary_first();
     t_lookup_gids_dedup_primary();
