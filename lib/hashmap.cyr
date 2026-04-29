@@ -1,12 +1,13 @@
-# hashmap.cyr — hash table with string keys and i64 values
+# hashmap.cyr — hash table, choose-your-key-type at construction
 # Usage: include "lib/hashmap.cyr"
 # Requires: alloc.cyr, string.cyr, str.cyr, fnptr.cyr (for map_iter)
 #
-# Open addressing with linear probing. Choose your key type at
-# construction time:
+# Open addressing with linear probing. Three key-type surfaces
+# coexist — pick at construction time:
 #
-#   var m = map_new();      # keys are cstr (NUL-terminated char*) — legacy default
-#   var m = map_new_str();  # keys are Str struct (data+len fat pointer)
+#   var m = map_new();        # keys are cstr (NUL-terminated char*) — legacy
+#   var m = map_new_str();    # keys are Str struct (data+len fat pointer)
+#   var m = map_u64_new();    # keys are u64 inline (v5.5.20)
 #
 # All values are i64. Automatically grows at 70% load.
 #
@@ -18,17 +19,38 @@
 # >>> var r = main(); syscall(60, r);
 # === 42
 #
-# Layout per entry: { key_ptr: i64, value: i64, state: i64 } = 24 bytes
+# Layout — cstr / Str variants (key_type 0 / 1):
+#   slot { key_ptr: i64, value: i64, state: i64 } = 24 bytes
 #   state: 0=empty, 1=occupied, 2=tombstone
+#
+# Layout — u64 variant (key_type 2, added v5.5.20):
+#   slot { key: u64, value: i64 } = 16 bytes
+#   sentinels in key: 0=empty, 0xFFFFFFFFFFFFFFFF=tombstone
+#   (removes the state field — saves 33% slot size + one load
+#   per probe, which is the point of the u64 surface)
+#
 # Map header: { entries_ptr, capacity, count, key_type } = 32 bytes
 #   key_type: 0 = cstr (hash via hash_str, compare via streq)
 #             1 = Str  (hash via hash_str_v, compare via str_eq)
+#             2 = u64  (hash via hash_u64, equality via ==, v5.5.20)
+#
+# The cstr/Str helpers (map_keys / map_values / map_iter / map_print)
+# assume the 24-byte slot layout and do NOT work on u64 maps. The
+# u64 surface stays minimal (new/set/get/has/delete/size/clear)
+# per the v5.5.20 scope — all consumers today are cache hot-paths
+# that don't need iteration.
 #
 # v5.4.14 added key_type to fix the Str-struct key collision bug
 # surfaced by majra's soak test (hash_str was byte-walking a Str
 # struct's raw bytes until NUL, producing address-derived hashes
 # with ~3% entry loss). At v6.0.0 the map collapses to Str-only
 # and this branching goes away (see docs/development/roadmap.md).
+#
+# v5.5.20 added u64 keys (mabda cache hot-path). Benchmark target:
+# `shader_cache_hit` 553 → ≤ 50 ns (was 15× Rust). Implementation
+# walks a separate `_map_u64_find` / `_map_u64_grow` pair because
+# the slot size differs from cstr/Str (16 vs 24) and the state
+# encoding moves into the key field.
 
 include "lib/fnptr.cyr"
 
@@ -275,6 +297,185 @@ fn map_iter(m, fp) {
     return 0;
 }
 
+# ================================================================
+# u64-keyed hash map (v5.5.20)
+# ================================================================
+# Motivated by mabda's shader/bind-group cache hot loops — 15-16×
+# Rust on Criterion because every lookup boxed a decimal string
+# for the Str-keyed map_get. u64 keys let consumers with pre-
+# computed hashes (FNV/xxhash/identity) skip the boxing entirely
+# and hit zero allocations on the hot path.
+#
+# Slot layout: { key: u64, value: i64 } = 16 bytes.
+# Sentinel encoding uses the key field itself — no separate state
+# slot, so loads + probes stay in-line:
+#   key == MAP_U64_EMPTY (0)                    → empty slot
+#   key == MAP_U64_TOMB  (0xFFFFFFFFFFFFFFFF)   → tombstone
+#   otherwise                                    → occupied
+#
+# Consumers that must store key=0 or key=u64::MAX should pre-shift
+# their keys (e.g. +1). No real-world consumer hits this today.
+#
+# Header layout shares the Str-keyed shape so `map_size` reads
+# cleanly against either; `key_type` at offset 24 is set to 2 for
+# u64 maps. The u64-specific API is NOT wired into `_map_hash` /
+# `_map_key_eq` / `_map_find` — it runs through a dedicated
+# `_map_u64_find` / `_map_u64_grow` pair below because the slot
+# size (16 vs 24) and sentinel-encoded state preclude sharing.
+
+# SplitMix64 — fast, bijective, passes BigCrush. Applied to the
+# raw u64 key before masking to capacity-1. Without mixing, keys
+# that happen to cluster in low bits (e.g. pointer addresses
+# modulo page size) pile up in the same bucket and probe chains
+# degenerate to linear scans.
+fn hash_u64(k) {
+    var h = k;
+    h = h ^ (h >> 30);
+    h = h * 0xBF58476D1CE4E5B9;
+    h = h ^ (h >> 27);
+    h = h * 0x94D049BB133111EB;
+    h = h ^ (h >> 31);
+    return h;
+}
+
+# Sentinel keys. Users must not store these directly — document in
+# the header.
+var MAP_U64_EMPTY = 0;
+var MAP_U64_TOMB = 0xFFFFFFFFFFFFFFFF;
+
+# Create a new u64-keyed hash map (initial capacity 16).
+fn map_u64_new() {
+    var m = alloc(32);
+    var cap = 16;
+    var entries = alloc(cap * 16);
+    memset(entries, 0, cap * 16);
+    store64(m, entries);
+    store64(m + 8, cap);
+    store64(m + 16, 0);
+    store64(m + 24, 2);                # key_type = u64
+    return m;
+}
+
+# Find slot for key. Returns entry pointer (empty slot, tombstone
+# with no earlier tombstone seen, or occupied-with-matching-key)
+# or 0 if the probe chain went full-circle.
+fn _map_u64_find(m, key) {
+    var entries = load64(m);
+    var cap = load64(m + 8);
+    var idx = hash_u64(key) & (cap - 1);
+    var probes = 0;
+    var first_tomb = 0;
+    while (probes < cap) {
+        var ep = entries + idx * 16;
+        var k = load64(ep);
+        if (k == MAP_U64_EMPTY) {
+            if (first_tomb != 0) { return first_tomb; }
+            return ep;
+        }
+        elif (k == MAP_U64_TOMB) {
+            if (first_tomb == 0) { first_tomb = ep; }
+        }
+        elif (k == key) { return ep; }
+        idx = (idx + 1) & (cap - 1);
+        probes = probes + 1;
+    }
+    if (first_tomb != 0) { return first_tomb; }
+    return 0;
+}
+
+# Grow backing store (double capacity, rehash).
+fn _map_u64_grow(m) {
+    var old_entries = load64(m);
+    var old_cap = load64(m + 8);
+    var new_cap = old_cap * 2;
+    if (new_cap > MAP_CAP_MAX) {
+        syscall(1, 2, "map_u64: capacity overflow\n", 27);
+        syscall(60, 1);
+    }
+    var new_entries = alloc(new_cap * 16);
+    if (new_entries == 0) {
+        syscall(1, 2, "map_u64: alloc failed\n", 22);
+        syscall(60, 1);
+    }
+    memset(new_entries, 0, new_cap * 16);
+    store64(m, new_entries);
+    store64(m + 8, new_cap);
+    store64(m + 16, 0);
+    var gi = 0;
+    while (gi < old_cap) {
+        var oep = old_entries + gi * 16;
+        var ok = load64(oep);
+        if (ok != MAP_U64_EMPTY) {
+            if (ok != MAP_U64_TOMB) {
+                map_u64_set(m, ok, load64(oep + 8));
+            }
+        }
+        gi = gi + 1;
+    }
+    return 0;
+}
+
+# Set key=value. Overwrites if key exists. Returns 0 on success,
+# -1 if the probe chain was full (shouldn't happen — grow fires
+# at 70% load before the chain saturates).
+fn map_u64_set(m, key, value) {
+    if (load64(m + 16) * 10 >= load64(m + 8) * 7) { _map_u64_grow(m); }
+    var ep = _map_u64_find(m, key);
+    if (ep == 0) { return 0 - 1; }
+    var existing = load64(ep);
+    var was_new = 0;
+    if (existing == MAP_U64_EMPTY) { was_new = 1; }
+    elif (existing == MAP_U64_TOMB) { was_new = 1; }
+    store64(ep, key);
+    store64(ep + 8, value);
+    if (was_new == 1) { store64(m + 16, load64(m + 16) + 1); }
+    return 0;
+}
+
+# Get value for key. Returns value or 0 if not found.
+fn map_u64_get(m, key) {
+    var ep = _map_u64_find(m, key);
+    if (ep == 0) { return 0; }
+    if (load64(ep) != key) { return 0; }
+    return load64(ep + 8);
+}
+
+# Get value with default if key not found.
+fn map_u64_get_or(m, key, default_val) {
+    var ep = _map_u64_find(m, key);
+    if (ep == 0) { return default_val; }
+    if (load64(ep) != key) { return default_val; }
+    return load64(ep + 8);
+}
+
+# Check if key exists. Returns 1 or 0.
+fn map_u64_has(m, key) {
+    var ep = _map_u64_find(m, key);
+    if (ep == 0) { return 0; }
+    if (load64(ep) != key) { return 0; }
+    return 1;
+}
+
+# Delete key. Returns 1 if found, 0 if not.
+fn map_u64_delete(m, key) {
+    var ep = _map_u64_find(m, key);
+    if (ep == 0) { return 0; }
+    if (load64(ep) != key) { return 0; }
+    store64(ep, MAP_U64_TOMB);
+    store64(m + 16, load64(m + 16) - 1);
+    return 1;
+}
+
+# Occupied-entry count.
+fn map_u64_size(m) { return load64(m + 16); }
+
+# Reset to empty; keep capacity.
+fn map_u64_clear(m) {
+    memset(load64(m), 0, load64(m + 8) * 16);
+    store64(m + 16, 0);
+    return 0;
+}
+
 # Print map contents as {key: value, ...}.
 # Key rendering branches on the map's key_type: cstr uses strlen,
 # Str uses str_data + str_len.
@@ -283,24 +484,24 @@ fn map_print(m) {
     var cap = load64(m + 8);
     var is_str = load64(m + 24);
     syscall(1, 1, "{", 1);
-        var first = 1;
-        var pi = 0;
-        while (pi < cap) {
-            var ep = entries + pi * 24;
-            if (load64(ep + 16) == 1) {
-                if (first == 0) { syscall(1, 1, ", ", 2); }
-                var pk = load64(ep);
-                if (is_str == 1) {
-                    syscall(1, 1, str_data(pk), str_len(pk));
-                } else {
-                    syscall(1, 1, pk, strlen(pk));
-                }
-                syscall(1, 1, ": ", 2);
-                fmt_int(load64(ep + 8));
-                first = 0;
+    var first = 1;
+    var pi = 0;
+    while (pi < cap) {
+        var ep = entries + pi * 24;
+        if (load64(ep + 16) == 1) {
+            if (first == 0) { syscall(1, 1, ", ", 2); }
+            var pk = load64(ep);
+            if (is_str == 1) {
+                syscall(1, 1, str_data(pk), str_len(pk));
+            } else {
+                syscall(1, 1, pk, strlen(pk));
             }
-            pi = pi + 1;
+            syscall(1, 1, ": ", 2);
+            fmt_int(load64(ep + 8));
+            first = 0;
         }
-        syscall(1, 1, "}", 1);
+        pi = pi + 1;
+    }
+    syscall(1, 1, "}", 1);
     return 0;
 }

@@ -142,7 +142,7 @@ fn fuzz_validate_command() {
     }
     # Deterministic sanity
     assert_eq(validate_command(vec_new(), 4096), SHK_ERR_EMPTY_CMD,
-        "validate_command: empty argv → EMPTY_CMD");
+    "validate_command: empty argv → EMPTY_CMD");
     return 0;
 }
 
@@ -180,7 +180,7 @@ fn fuzz_validate_username() {
         if (r == SHK_OK) {
             assert_gt(strlen(s), 0, "validate_username OK: empty string accepted");
             assert_eq(_fuzz_cstr_has(s, 47), 0,
-                "validate_username OK: '/' accepted");
+            "validate_username OK: '/' accepted");
             # "." and ".." checks — only possible if len is 1 or 2
             if (strlen(s) == 1) {
                 assert_neq(load8(s), 46, "validate_username OK: '.' accepted");

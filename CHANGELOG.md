@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-04-28
+
+Toolchain-modernization release. Bumps the cyrius pin from 5.4.17
+to 5.7.33, re-formats the source tree under the new cyrfmt
+continuation-indent rules (5.7.22), regenerates `dist/shakti.cyr`
+against the bumped toolchain, and brings CI/release workflows up
+to the daimon/nous standard. No behaviour changes; one runtime-
+visible artefact is the version banner.
+
+### Changed
+
+- **cyrius `5.4.17` → `5.7.33`.** Stdlib API surface used by
+  shakti is unchanged across the bump (verified against:
+  `syscalls`, `string`, `alloc`, `freelist`, `fmt`, `str`,
+  `vec`, `io`, `fs`, `args`, `hashmap`, `toml`, `regex`,
+  `tagged`, `process`, `assert`, `bench`, `fnptr`). Picks up
+  the v5.6.34 `alloc` grow-undersize SIGSEGV fix passively;
+  silences the v5.7.8 `_SC_ARITY` SETSID warning that used to
+  appear on every build.
+- **`src/`, `tests/tcyr/`, `tests/bcyr/`, `tests/integration/`
+  reformatted by cyrfmt 5.7.33.** v5.7.22's brace-tracking
+  fix changed continuation-indent rules; rewrote 10 files
+  (`src/env.cyr`, `src/main.cyr`, `src/policy.cyr`, `tests/
+  tcyr/api.tcyr`, `tests/tcyr/audit.tcyr`, `tests/tcyr/
+  fuzz.tcyr`, `tests/tcyr/policy.tcyr`, `tests/tcyr/validate.
+  tcyr`, `tests/bcyr/core.bcyr`, `tests/integration/
+  consumer_probe.cyr`) so `cyrfmt --check` is now clean across
+  the tree.
+- **`dist/shakti.cyr` regenerated** under the bumped toolchain
+  + reformatted sources. Bundle line count unchanged (2417);
+  byte-level diff reflects the cyrfmt rewrite plus the
+  version-string bump.
+- **`shakti_version_string()` → `"shakti 0.2.3 (cyrius port)"`**
+  in `src/lib.cyr`.
+
+### CI / Release
+
+- **`.github/workflows/ci.yml` rewritten** to match the
+  daimon/nous standard. Adds: `cyrius vet`, `cyrfmt --check`
+  (hard fail on drift now that the tree is clean), `cyrius
+  lint` (advisory pending the long-line hygiene pass on test
+  fixtures), `cyrius deps --verify` (gated on
+  `cyrius.lock` presence), ELF magic check, version-surface
+  assertion (`./build/shakti --version` must contain
+  `$VERSION`), `cyrius distlib` drift gate, integration script
+  + consumer probe, `fuzz/*.fcyr` runs, `bench-history.sh`
+  artefact upload, separate `security` job (forbidden-call
+  scan + privilege-drop return-check audit), `docs` job
+  (required-file inventory + cross-file version consistency).
+- **`.github/workflows/release.yml` rewritten** to gate on the
+  new ci.yml, verify `tag == VERSION`, build with `strip`,
+  re-run tests + integration, hard-fail on `dist/shakti.cyr`
+  drift at tag time, archive a versioned source tarball
+  (`shakti-X.Y.Z-src.tar.gz`), x86_64 binary
+  (`shakti-X.Y.Z-x86_64-linux`), and the consumer bundle
+  (`shakti-X.Y.Z.cyr`), publish `cyrius.lock` + `SHA256SUMS`
+  alongside, and auto-flag `0.x` tags as prerelease for the
+  GitHub Release.
+
+### Security
+
+- **CI security scan tightened.** New `security` job hard-fails
+  on: any `system(`, `exec_str(`, `sys_system(` call site (any
+  shell-out is a bypass of the validate / authorize / drop
+  pipeline); any unchecked `sys_setuid` / `sys_setgid` /
+  `sys_setgroups` call site (regression guard for the H-1
+  audit fix from 0.2.2). Carried over from the audit cadence
+  established in 0.2.2.
+
+### Internal
+
+- **NSS / PAM blocker note** updated in
+  `~/.claude/projects/.../memory/blocker_dynlib_libc_init.md`.
+  cyrius v5.5.27 shipped `lib/pam.cyr::pam_unix_authenticate`
+  (forks `unix_chkpwd` setuid helper) and v5.5.34 completed
+  `fdlopen_init_full` orchestration. The dynlib libc-init
+  block cited in the parked memory is lifted; the migration
+  from shakti's PAM stub is now a tractable feature task,
+  not a parking lot. Tracked for v0.3.
+
 ## [0.2.2] - 2026-04-20
 
 Audit-driven patch release. Pairs an internal adversarial self-

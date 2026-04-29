@@ -6,7 +6,7 @@ fn t_audit_action_str() {
     assert_eq(streq(audit_action_str(AUDIT_COMMAND), "COMMAND"), 1, "COMMAND");
     assert_eq(streq(audit_action_str(AUDIT_AUTH_FAILURE), "AUTH_FAILURE"), 1, "AUTH_FAILURE");
     assert_eq(streq(audit_action_str(AUDIT_TIMESTAMP_INVALIDATED),
-        "TIMESTAMP_INVALIDATED"), 1, "TIMESTAMP_INVALIDATED");
+    "TIMESTAMP_INVALIDATED"), 1, "TIMESTAMP_INVALIDATED");
     assert_eq(streq(audit_action_str(999), "UNKNOWN"), 1, "unknown action");
 }
 

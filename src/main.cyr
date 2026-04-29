@@ -387,7 +387,7 @@ fn run() {
         var ir = invalidate_timestamp(caller);
         if (ir == SHK_OK) {
             audit_log(AUDIT_TIMESTAMP_INVALIDATED, caller,
-                load64(cli + CLI_TARGET), "", 1, "user-requested");
+            load64(cli + CLI_TARGET), "", 1, "user-requested");
             return 0;
         }
         file_write(2, "shakti: ", 8);
@@ -430,14 +430,14 @@ fn run() {
     cfg_set_auth_mode(config, AUTH_INTERACTIVE);
 
     var eval = evaluate_with_policy(config, policy, caller,
-        caller_uid, caller_gid, groups, load64(cli + CLI_ARGV));
+    caller_uid, caller_gid, groups, load64(cli + CLI_ARGV));
 
     var target = load64(cli + CLI_TARGET);
 
     if (eval_authorized(eval) == 0) {
         var msg = eval_error_msg(eval);
         audit_log(AUDIT_COMMAND, caller, target,
-            eval_resolved_command(eval), 0, msg);
+        eval_resolved_command(eval), 0, msg);
         file_write(2, "shakti: ", 8);
         file_write(2, msg, strlen(msg));
         file_write(2, "\n", 1);
@@ -454,7 +454,7 @@ fn run() {
             _restore_signals(saved);
             if (ok == 0) {
                 audit_log(AUDIT_AUTH_FAILURE, caller, target,
-                    eval_resolved_command(eval), 0, "auth failed");
+                eval_resolved_command(eval), 0, "auth failed");
                 file_write(2, "shakti: authentication failure\n", 31);
                 return 1;
             }
@@ -464,7 +464,7 @@ fn run() {
     }
 
     audit_log(AUDIT_COMMAND, caller, target,
-        eval_resolved_command(eval), 1, "authorized");
+    eval_resolved_command(eval), 1, "authorized");
 
     # Resolve target uid / gid
     var t_uid_ptr = alloc(8);
@@ -479,8 +479,8 @@ fn run() {
     var target_gid = load64(t_gid_ptr);
 
     _exec_target(eval_resolved_command(eval),
-        load64(cli + CLI_ARGV), eval_environment(eval),
-        target, target_uid, target_gid);
+    load64(cli + CLI_ARGV), eval_environment(eval),
+    target, target_uid, target_gid);
     return 127;
 }
 

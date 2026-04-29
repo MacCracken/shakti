@@ -126,22 +126,22 @@ fn t_matches_basename() {
 
 fn t_matches_arg_wildcard() {
     assert_eq(command_matches("/usr/bin/systemctl restart nginx",
-        "/usr/bin/systemctl restart *"), 1, "restart *");
+    "/usr/bin/systemctl restart *"), 1, "restart *");
     assert_eq(command_matches("/usr/bin/systemctl restart sshd",
-        "/usr/bin/systemctl restart *"), 1, "restart * different arg");
+    "/usr/bin/systemctl restart *"), 1, "restart * different arg");
     assert_eq(command_matches("/usr/bin/systemctl",
-        "/usr/bin/systemctl restart *"), 0, "no args, pattern needs restart");
+    "/usr/bin/systemctl restart *"), 0, "no args, pattern needs restart");
     assert_eq(command_matches("/usr/bin/systemctl stop nginx",
-        "/usr/bin/systemctl restart *"), 0, "wrong subcommand");
+    "/usr/bin/systemctl restart *"), 0, "wrong subcommand");
     assert_eq(command_matches("/usr/bin/systemctl restart",
-        "/usr/bin/systemctl restart *"), 1, "exact prefix match");
+    "/usr/bin/systemctl restart *"), 1, "exact prefix match");
 }
 
 fn t_matches_exact_with_args() {
     assert_eq(command_matches("/usr/bin/systemctl stop firewall",
-        "/usr/bin/systemctl stop firewall"), 1, "exact w/ args");
+    "/usr/bin/systemctl stop firewall"), 1, "exact w/ args");
     assert_eq(command_matches("/usr/bin/systemctl stop nginx",
-        "/usr/bin/systemctl stop firewall"), 0, "exact w/ args mismatch");
+    "/usr/bin/systemctl stop firewall"), 0, "exact w/ args mismatch");
 }
 
 fn t_matches_empty_pattern() {

@@ -77,7 +77,7 @@ fn t_timestamp_ttl_overflow_rejected() {
     var p = _parse_src(s);
     # Default TTL is DEFAULT_TIMESTAMP_TTL_SECS = 300.
     assert_eq(def_ttl(policy_defaults(p)), 300,
-        "overflow-wrapping TTL rejected, default preserved");
+    "overflow-wrapping TTL rejected, default preserved");
 }
 
 fn t_multiline_array_with_deny() {
@@ -151,14 +151,14 @@ fn t_authz_deploy_nopasswd() {
 fn t_authz_deploy_denied() {
     var p = _sample_policy();
     var r = check_authorization(p, "deploy", _groups_empty(), "root",
-        "/usr/bin/systemctl stop firewall");
+    "/usr/bin/systemctl stop firewall");
     assert_eq(authz_status(r), AZ_DENIED, "deploy can't stop firewall");
 }
 
 fn t_authz_deploy_allow_with_arg_wildcard() {
     var p = _sample_policy();
     var r = check_authorization(p, "deploy", _groups_empty(), "root",
-        "/usr/bin/systemctl restart nginx");
+    "/usr/bin/systemctl restart nginx");
     assert_eq(authz_status(r), AZ_ALLOWED, "deploy can restart *");
     assert_eq(authz_aux(r), 0, "still NOPASSWD");
 }

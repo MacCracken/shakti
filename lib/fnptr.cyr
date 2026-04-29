@@ -42,6 +42,7 @@
 # Call function pointer fp with zero arguments
 fn fncall0(fp) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]  (fp)
@@ -56,12 +57,29 @@ fn fncall0(fp) {
         0xA0; 0x03; 0x1F; 0xF8;    # stur x0, [x29, #-16]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # Win64 strict-compliance (v5.5.7): 32 B shadow mandatory at
+    # every call site. Cyrius callees ignore it (they spill arg
+    # regs to own locals) but C callees use it as spill home —
+    # both work with shadow present. Layout matches ECALLPOPS
+    # under _TARGET_PE: shadow at [rsp+0..31], stack args at
+    # [rsp+32..]. RSP stays 16-aligned: sub rsp, 0x20 keeps it.
+    asm {
+        0x48; 0x83; 0xEC; 0x20;    # sub rsp, 0x20 (shadow)
+        0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                # call rax
+        0x48; 0x83; 0xC4; 0x20;    # add rsp, 0x20
+        0x48; 0x89; 0x45; 0xF0;    # mov [rbp-16], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with one argument
 fn fncall1(fp, a) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x8B; 0x7D; 0xF0;    # mov rdi, [rbp-16] (a)
@@ -78,12 +96,24 @@ fn fncall1(fp, a) {
         0xA0; 0x83; 0x1E; 0xF8;    # stur x0, [x29, #-24]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;    # mov rcx, [rbp-16] (a → arg 0)
+        0x48; 0x83; 0xEC; 0x20;    # sub rsp, 0x20 (shadow)
+        0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                # call rax
+        0x48; 0x83; 0xC4; 0x20;    # add rsp, 0x20
+        0x48; 0x89; 0x45; 0xE8;    # mov [rbp-24], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with two arguments
 fn fncall2(fp, a, b) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x8B; 0x75; 0xE8;    # mov rsi, [rbp-24] (b)
@@ -102,12 +132,25 @@ fn fncall2(fp, a, b) {
         0xA0; 0x03; 0x1E; 0xF8;    # stur x0, [x29, #-32]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;    # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;    # mov rdx, [rbp-24] (b)
+        0x48; 0x83; 0xEC; 0x20;    # sub rsp, 0x20 (shadow)
+        0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]
+        0xFF; 0xD0;                # call rax
+        0x48; 0x83; 0xC4; 0x20;    # add rsp, 0x20
+        0x48; 0x89; 0x45; 0xE0;    # mov [rbp-32], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with three arguments
 fn fncall3(fp, a, b, c) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x8B; 0x55; 0xE0;    # mov rdx, [rbp-32] (c)
@@ -128,12 +171,26 @@ fn fncall3(fp, a, b, c) {
         0xA0; 0x83; 0x1D; 0xF8;    # stur x0, [x29, #-40]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;    # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;    # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;    # mov r8,  [rbp-32] (c)
+        0x48; 0x83; 0xEC; 0x20;    # sub rsp, 0x20 (shadow)
+        0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]
+        0xFF; 0xD0;                # call rax
+        0x48; 0x83; 0xC4; 0x20;    # add rsp, 0x20
+        0x48; 0x89; 0x45; 0xD8;    # mov [rbp-40], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with four arguments
 fn fncall4(fp, a, b, c, d) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x8B; 0x4D; 0xD8;    # mov rcx, [rbp-40] (d)
@@ -156,12 +213,27 @@ fn fncall4(fp, a, b, c, d) {
         0xA0; 0x03; 0x1D; 0xF8;    # stur x0, [x29, #-48]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;    # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;    # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;    # mov r8,  [rbp-32] (c)
+        0x4C; 0x8B; 0x4D; 0xD8;    # mov r9,  [rbp-40] (d)
+        0x48; 0x83; 0xEC; 0x20;    # sub rsp, 0x20 (shadow)
+        0x48; 0x8B; 0x45; 0xF8;    # mov rax, [rbp-8]
+        0xFF; 0xD0;                # call rax
+        0x48; 0x83; 0xC4; 0x20;    # add rsp, 0x20
+        0x48; 0x89; 0x45; 0xD0;    # mov [rbp-48], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with five arguments
 fn fncall5(fp, a, b, c, d, e) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x4C; 0x8B; 0x45; 0xD0;    # mov r8, [rbp-48] (e)
@@ -186,12 +258,31 @@ fn fncall5(fp, a, b, c, d, e) {
         0xA0; 0x83; 0x1C; 0xF8;    # stur x0, [x29, #-56]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # v5.5.7 strict-compliance: 32 B shadow + arg 4 (e) at
+    # [rsp+32]. framesize = 32 + 8 + 8 pad = 48 (16-aligned).
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;         # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;         # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;         # mov r8,  [rbp-32] (c)
+        0x4C; 0x8B; 0x4D; 0xD8;         # mov r9,  [rbp-40] (d)
+        0x48; 0x83; 0xEC; 0x30;         # sub rsp, 0x30
+        0x48; 0x8B; 0x45; 0xD0;         # mov rax, [rbp-48] (e)
+        0x48; 0x89; 0x44; 0x24; 0x20;   # mov [rsp+32], rax
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x30;         # add rsp, 0x30
+        0x48; 0x89; 0x45; 0xC8;         # mov [rbp-56], rax (result)
+    }
+    #endif
     return result;
 }
 
 # Call function pointer fp with six arguments
 fn fncall6(fp, a, b, c, d, e, f) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x4C; 0x8B; 0x4D; 0xC8;    # mov r9,  [rbp-56] (f)
@@ -218,6 +309,26 @@ fn fncall6(fp, a, b, c, d, e, f) {
         0xA0; 0x03; 0x1C; 0xF8;    # stur x0, [x29, #-64]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # v5.5.7 strict: 32 B shadow + args 4-5 (e, f) at [rsp+32],
+    # [rsp+40]. framesize = 32 + 16 = 48 (16-aligned).
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;         # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;         # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;         # mov r8,  [rbp-32] (c)
+        0x4C; 0x8B; 0x4D; 0xD8;         # mov r9,  [rbp-40] (d)
+        0x48; 0x83; 0xEC; 0x30;         # sub rsp, 0x30
+        0x48; 0x8B; 0x45; 0xD0;         # mov rax, [rbp-48] (e)
+        0x48; 0x89; 0x44; 0x24; 0x20;   # mov [rsp+32], rax
+        0x48; 0x8B; 0x45; 0xC8;         # mov rax, [rbp-56] (f)
+        0x48; 0x89; 0x44; 0x24; 0x28;   # mov [rsp+40], rax
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x30;         # add rsp, 0x30
+        0x48; 0x89; 0x45; 0xC0;         # mov [rbp-64], rax (result)
+    }
+    #endif
     return result;
 }
 
@@ -240,6 +351,7 @@ fn fncall6(fp, a, b, c, d, e, f) {
 # arg to preserve alignment), restore via `add sp, sp, #N*16`.
 fn fncall7(fp, a, b, c, d, e, f, g) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x83; 0xEC; 0x10;         # sub rsp, 16       (reserve stack-arg slot + padding)
@@ -273,6 +385,28 @@ fn fncall7(fp, a, b, c, d, e, f, g) {
         0xA0; 0x83; 0x1B; 0xF8;    # stur x0, [x29, #-72]  (result)
     }
     #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # v5.5.7 strict: 32 B shadow + args 4-6 (e, f, g) at
+    # [rsp+32..48]. framesize = 32 + 24 + 8 pad = 64 (16-aligned).
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;         # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;         # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;         # mov r8,  [rbp-32] (c)
+        0x4C; 0x8B; 0x4D; 0xD8;         # mov r9,  [rbp-40] (d)
+        0x48; 0x83; 0xEC; 0x40;         # sub rsp, 0x40
+        0x48; 0x8B; 0x45; 0xD0;         # mov rax, [rbp-48] (e)
+        0x48; 0x89; 0x44; 0x24; 0x20;   # mov [rsp+32], rax
+        0x48; 0x8B; 0x45; 0xC8;         # mov rax, [rbp-56] (f)
+        0x48; 0x89; 0x44; 0x24; 0x28;   # mov [rsp+40], rax
+        0x48; 0x8B; 0x45; 0xC0;         # mov rax, [rbp-64] (g)
+        0x48; 0x89; 0x44; 0x24; 0x30;   # mov [rsp+48], rax
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x40;         # add rsp, 0x40
+        0x48; 0x89; 0x45; 0xB8;         # mov [rbp-72], rax (result)
+    }
+    #endif
     return result;
 }
 
@@ -282,6 +416,7 @@ fn fncall7(fp, a, b, c, d, e, f, g) {
 # ECALLPOPS step 3 (`str x10, [sp, #-16]!; str x9, [sp, #-16]!`).
 fn fncall8(fp, a, b, c, d, e, f, g, h) {
     var result = 0;
+    #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
     asm {
         0x48; 0x83; 0xEC; 0x10;         # sub rsp, 16         (room for args 7+8)
@@ -317,6 +452,30 @@ fn fncall8(fp, a, b, c, d, e, f, g, h) {
         0x20; 0x01; 0x3F; 0xD6;    # blr x9
         0xFF; 0x83; 0x00; 0x91;    # add sp, sp, #32       (restore 2 × 16 bytes)
         0xA0; 0x03; 0x1B; 0xF8;    # stur x0, [x29, #-80]  (result)
+    }
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # v5.5.7 strict: 32 B shadow + args 4-7 (e, f, g, h) at
+    # [rsp+32..56]. framesize = 32 + 32 = 64 (16-aligned).
+    asm {
+        0x48; 0x8B; 0x4D; 0xF0;         # mov rcx, [rbp-16] (a)
+        0x48; 0x8B; 0x55; 0xE8;         # mov rdx, [rbp-24] (b)
+        0x4C; 0x8B; 0x45; 0xE0;         # mov r8,  [rbp-32] (c)
+        0x4C; 0x8B; 0x4D; 0xD8;         # mov r9,  [rbp-40] (d)
+        0x48; 0x83; 0xEC; 0x40;         # sub rsp, 0x40
+        0x48; 0x8B; 0x45; 0xD0;         # mov rax, [rbp-48] (e)
+        0x48; 0x89; 0x44; 0x24; 0x20;   # mov [rsp+32], rax
+        0x48; 0x8B; 0x45; 0xC8;         # mov rax, [rbp-56] (f)
+        0x48; 0x89; 0x44; 0x24; 0x28;   # mov [rsp+40], rax
+        0x48; 0x8B; 0x45; 0xC0;         # mov rax, [rbp-64] (g)
+        0x48; 0x89; 0x44; 0x24; 0x30;   # mov [rsp+48], rax
+        0x48; 0x8B; 0x45; 0xB8;         # mov rax, [rbp-72] (h)
+        0x48; 0x89; 0x44; 0x24; 0x38;   # mov [rsp+56], rax
+        0x48; 0x8B; 0x45; 0xF8;         # mov rax, [rbp-8]  (fp)
+        0xFF; 0xD0;                     # call rax
+        0x48; 0x83; 0xC4; 0x40;         # add rsp, 0x40
+        0x48; 0x89; 0x45; 0xB0;         # mov [rbp-80], rax (result)
     }
     #endif
     return result;

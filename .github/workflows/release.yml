@@ -2,7 +2,11 @@ name: Release
 
 on:
   push:
-    tags: ['[0-9]*']
+    # Accept both `1.2.3` and `v1.2.3` tag styles. The version-verify
+    # step below enforces semver shape + match against the VERSION file.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
@@ -12,8 +16,8 @@ jobs:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
 
-  release:
-    name: Build & Release
+  build:
+    name: Build Release
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
@@ -22,12 +26,16 @@ jobs:
       - name: Verify version
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME}"
-          test "$FILE_VERSION" = "$TAG_VERSION" || { echo "VERSION ($FILE_VERSION) != tag ($TAG_VERSION)"; exit 1; }
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "tag ($TAG) is not semver x.y.z"; exit 1; }
+          [ "$FILE_VERSION" = "$TAG" ] || {
+            echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
@@ -39,14 +47,111 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
+      - name: Resolve deps
+        run: cyrius deps
+
+      - name: Verify dep hashes
+        run: |
+          if [ -f cyrius.lock ]; then
+            cyrius deps --verify
+          else
+            echo "::warning::cyrius.lock not committed — skipping hash verification"
+          fi
+
       - name: Build
         run: |
-          cyrius deps
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/shakti
+          strip build/shakti 2>/dev/null || true
+          echo "shakti: $(wc -c < build/shakti) bytes"
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - name: Verify version surface
+        run: |
+          VER=$(cat VERSION | tr -d '[:space:]')
+          out=$(./build/shakti --version 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "$VER" || { echo "shakti --version missing VERSION ($VER)"; exit 1; }
+
+      - name: Test
+        run: |
+          fail=0
+          for t in tests/tcyr/*.tcyr; do
+            [ -f "$t" ] || continue
+            out=$(cyrius test "$t" 2>&1)
+            rc=$?
+            echo "$out" | tail -2
+            if [ $rc -ne 0 ] || ! echo "$out" | grep -aqE "0 failed"; then
+              echo "FAIL: $t"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ]
+
+      - name: Integration
+        run: sh tests/integration/cli.sh build/shakti
+
+      - name: Regenerate dist bundle
+        # Hard-fail on drift: a tagged release must ship the bundle
+        # that's actually checked in.
+        run: |
+          cyrius distlib
+          git diff --exit-code dist/ || {
+            echo "dist/shakti.cyr drift on a release tag — refuse to ship"
+            exit 1
+          }
+
+      - name: Clean toolchain artifacts
+        run: rm -f cyrius-*.tar.gz
+
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          # Source tarball (clean tree at the tag).
+          git archive --format=tar.gz --prefix="shakti-${TAG}/" \
+            -o "shakti-${TAG}-src.tar.gz" HEAD
+          # x86_64 binary, named with version.
+          cp build/shakti "shakti-${TAG}-x86_64-linux"
+          # Consumer-bundle distlib output, version-tagged for git-pin
+          # consumers that don't want to pull the binary.
+          cp dist/shakti.cyr "shakti-${TAG}.cyr"
+          sha256sum shakti-*.tar.gz shakti-*-linux shakti-*.cyr > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
         with:
-          generate_release_notes: true
-          files: build/*
+          name: release-artifacts
+          path: |
+            shakti-*.tar.gz
+            shakti-*-linux
+            shakti-*.cyr
+            cyrius.lock
+            SHA256SUMS
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+
+      - name: Extract changelog
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" \
+            CHANGELOG.md > /tmp/body.md
+          [ -s /tmp/body.md ] || echo "No changelog entry for $TAG." > /tmp/body.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: "shakti ${{ github.ref_name }}"
+          body_path: /tmp/body.md
+          # 0.x is pre-1.0 — mark prerelease so installers know.
+          prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') }}
+          files: |
+            shakti-*.tar.gz
+            shakti-*-linux
+            shakti-*.cyr
+            cyrius.lock
+            SHA256SUMS

@@ -703,17 +703,17 @@ fn lint_policy(policy) {
 
     if (n == 0) {
         vec_push(out, _warn_new(LINT_WARN, 0 - 1,
-            "policy has no rules — all commands will be denied"));
+        "policy has no rules — all commands will be denied"));
     }
     if (def_ttl(defaults) == 0) {
         if (def_require_auth(defaults) == 1) {
             vec_push(out, _warn_new(LINT_WARN, 0 - 1,
-                "timestamp_ttl is 0 with require_auth=true — password required every invocation"));
+            "timestamp_ttl is 0 with require_auth=true — password required every invocation"));
         }
     }
     if (def_require_auth(defaults) == 0) {
         vec_push(out, _warn_new(LINT_WARN, 0 - 1,
-            "Global require_auth is false — all rules default to NOPASSWD"));
+        "Global require_auth is false — all rules default to NOPASSWD"));
     }
 
     var i = 0;
@@ -725,7 +725,7 @@ fn lint_policy(policy) {
         if (ru == 0) {
             if (rg == 0) {
                 vec_push(out, _warn_new(LINT_ERROR, i,
-                    "rule has neither 'user' nor 'group' — it will never match"));
+                "rule has neither 'user' nor 'group' — it will never match"));
             }
         }
 
@@ -734,10 +734,10 @@ fn lint_policy(policy) {
                 if (rule_require_auth(r) == 0) {
                     if (vec_len(rule_commands(r)) == 0) {
                         vec_push(out, _warn_new(LINT_ERROR, i,
-                            "rule grants ALL commands to ALL users with NOPASSWD"));
+                        "rule grants ALL commands to ALL users with NOPASSWD"));
                     } else {
                         vec_push(out, _warn_new(LINT_WARN, i,
-                            "rule grants all users (*) NOPASSWD access — verify intended"));
+                        "rule grants all users (*) NOPASSWD access — verify intended"));
                     }
                 }
             }
@@ -746,7 +746,7 @@ fn lint_policy(policy) {
         if (streq(rule_run_as(r), "*") == 1) {
             if (vec_len(rule_commands(r)) == 0) {
                 vec_push(out, _warn_new(LINT_WARN, i,
-                    "rule allows running as any user with all commands"));
+                "rule allows running as any user with all commands"));
             }
         }
 
@@ -770,7 +770,7 @@ fn lint_policy(policy) {
             if (streq(rule_run_as(r), rule_run_as(o)) == 1) { aa = 1; }
             if (uu == 1 && gg == 1 && aa == 1) {
                 vec_push(out, _warn_new(LINT_WARN, i,
-                    "duplicate user/group/run_as as a later rule — only the first matches"));
+                "duplicate user/group/run_as as a later rule — only the first matches"));
                 j = n;
             }
             else { j = j + 1; }
@@ -796,7 +796,7 @@ fn lint_policy(policy) {
                 }
                 if (overlap == 0) {
                     vec_push(out, _warn_new(LINT_WARN, i,
-                        "deny_commands pattern doesn't overlap any commands entry — may be unreachable"));
+                    "deny_commands pattern doesn't overlap any commands entry — may be unreachable"));
                 }
                 di = di + 1;
             }

@@ -30,14 +30,26 @@
 # (same content, just relocated to the peer). aarch64 path is the
 # new surface.
 #
-# v5.4.13 closeout will replace the two-arm `#ifdef` shape below
-# with `#ifplat x86` / `#ifplat aarch64` once the directive lands —
-# see roadmap §v5.4.13. Until then, two-arm `#ifdef` matches the
-# verified pattern in lib/fnptr.cyr.
+# v5.4.19 added the `#ifplat` preprocessor directive (sugar for
+# `#ifdef CYRIUS_ARCH_<UPPER>`) but the call-site migration of this
+# file and its peers to the new surface is deferred: under certain
+# test shapes the migrated form triggers a codegen regression not
+# yet root-caused. Directive available for new consumers; existing
+# `#ifdef` call sites stay on the proven path until the regression
+# is diagnosed. Queued for v5.5.x.
 
+# v5.5.0 added a Windows arm. cc5 + cc5_aarch64 predefine
+# CYRIUS_TARGET_LINUX; cc5_win predefines CYRIUS_TARGET_WIN.
+# Only one is set per compile, so the three blocks are mutually
+# exclusive without needing #else.
+#ifdef CYRIUS_TARGET_WIN
+include "lib/syscalls_windows.cyr"
+#endif
+#ifdef CYRIUS_TARGET_LINUX
 #ifdef CYRIUS_ARCH_X86
 include "lib/syscalls_x86_64_linux.cyr"
 #endif
 #ifdef CYRIUS_ARCH_AARCH64
 include "lib/syscalls_aarch64_linux.cyr"
+#endif
 #endif

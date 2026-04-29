@@ -69,19 +69,19 @@ fn bench_parse_policy() {
 
 fn bench_authz_allowed_admin() {
     check_authorization(_BENCH_POLICY, "admin", _BENCH_GROUPS,
-        "root", "/usr/bin/anything");
+    "root", "/usr/bin/anything");
     return 0;
 }
 
 fn bench_authz_allowed_deploy_wildcard() {
     check_authorization(_BENCH_POLICY, "deploy", _BENCH_GROUPS,
-        "root", "/usr/bin/systemctl restart nginx");
+    "root", "/usr/bin/systemctl restart nginx");
     return 0;
 }
 
 fn bench_authz_denied() {
     check_authorization(_BENCH_POLICY, "unknown", _BENCH_GROUPS,
-        "root", "/usr/bin/dangerous");
+    "root", "/usr/bin/dangerous");
     return 0;
 }
 
@@ -92,7 +92,7 @@ var _BENCH_ENV_KEEP = 0;
 
 fn bench_sanitize_environment() {
     sanitize_environment(_BENCH_ENV_KEEP, "alice", 1000, 1000,
-        "root", "/root", "/bin/bash");
+    "root", "/root", "/bin/bash");
     return 0;
 }
 

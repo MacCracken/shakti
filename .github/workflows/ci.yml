@@ -13,14 +13,14 @@ concurrency:
 
 jobs:
   build:
-    name: Build
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -oP '(?<=^cyrius = ")[^"]+' cyrius.cyml)}"
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
@@ -33,20 +33,238 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve dependencies
+        # No-op today (only stdlib in cyrius.cyml [deps]), but kept so
+        # a future external dep is picked up automatically.
         run: cyrius deps
+
+      - name: Verify dep hashes
+        # `cyrius.lock` is written by default at v5.7.8+. Skip on the
+        # first push that introduces a new dep before the lock is
+        # committed; once present, enforce.
+        run: |
+          if [ -f cyrius.lock ]; then
+            cyrius deps --verify
+          else
+            echo "::warning::cyrius.lock not committed — skipping hash verification"
+          fi
+
+      - name: Vet
+        run: cyrius vet src/main.cyr
+
+      - name: Format check
+        # cyrfmt --check returns non-zero on any drift. The 5.7.22
+        # brace-tracking fix changed continuation indent rules; once
+        # we've swept all files, drift here is a hard fail.
+        run: |
+          drift=0
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr fuzz/*.fcyr tests/integration/*.cyr; do
+            [ -f "$f" ] || continue
+            if ! cyrfmt --check "$f" >/dev/null 2>&1; then
+              echo "needs fmt: $f"
+              drift=$((drift + 1))
+            fi
+          done
+          if [ "$drift" -gt 0 ]; then
+            echo "fmt drift in $drift file(s) — run: cyrfmt --write <file>"
+            exit 1
+          fi
+
+      - name: Lint (advisory)
+        # Long-line warnings live in test fixtures that embed multi-key
+        # TOML on a single line. Tracked for a future hygiene pass to
+        # split fixtures into builders; until then, advisory so genuine
+        # new warnings still show up in CI logs.
+        continue-on-error: true
+        run: |
+          fail=0
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/bcyr/*.bcyr fuzz/*.fcyr; do
+            [ -f "$f" ] || continue
+            out=$(cyrius lint "$f" 2>&1)
+            echo "$out" | grep -E '^\s*(warn|error) ' && fail=1
+          done
+          [ "$fail" -eq 0 ] || echo "::warning::lint warnings present — see logs"
 
       - name: Build
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/shakti
+          echo "shakti: $(wc -c < build/shakti) bytes"
+
+      - name: Verify ELF
+        run: xxd -l 4 build/shakti | grep -q "7f45 4c46"
+
+      - name: Verify version surface
+        # The binary's --version output must match the VERSION file.
+        # Catches drift between VERSION, cyrius.cyml ${file:VERSION},
+        # and shakti_version_string() in src/lib.cyr.
+        run: |
+          VER=$(cat VERSION | tr -d '[:space:]')
+          out=$(./build/shakti --version 2>&1)
+          echo "binary: $out"
+          echo "$out" | grep -q "$VER" || { echo "shakti --version missing VERSION ($VER)"; exit 1; }
+
+      - name: Regenerate dist bundle
+        # `dist/shakti.cyr` is the consumer-included bundle (argonaut /
+        # agnoshi / daimon). It's checked in so consumers can `git`-pin
+        # without running our build first. CLAUDE.md flags any drift as
+        # a commit-blocker; this step is the canonical enforcement.
+        run: |
+          cyrius distlib
+          if ! git diff --exit-code dist/; then
+            echo "dist/shakti.cyr drift — run: cyrius distlib && git add dist/shakti.cyr"
+            exit 1
+          fi
+
+      - name: Test suite
+        run: |
+          fail=0
+          for t in tests/tcyr/*.tcyr; do
+            [ -f "$t" ] || continue
+            name=$(basename "$t" .tcyr)
+            echo "=== $name ==="
+            out=$(cyrius test "$t" 2>&1)
+            rc=$?
+            echo "$out" | tail -3
+            if [ $rc -ne 0 ] || ! echo "$out" | grep -aqE "0 failed"; then
+              echo "FAIL: $name"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "test failures"; exit 1; }
+
+      - name: Integration (CLI surface + consumer probe)
+        run: sh tests/integration/cli.sh build/shakti
+
+      - name: Fuzz
+        run: |
+          for f in fuzz/*.fcyr; do
+            [ -f "$f" ] || continue
+            cyrius test "$f"
+          done
+
+      - name: Bench
+        # Non-fatal: numbers go to benchmarks/history.csv and the
+        # artifact upload. bench-history.sh handles git-sha tagging.
+        continue-on-error: true
+        run: |
+          if [ -x scripts/bench-history.sh ]; then
+            sh scripts/bench-history.sh tests/bcyr/core.bcyr || true
+          else
+            cyrius bench tests/bcyr/core.bcyr 2>&1 | tee bench-output.txt || true
+          fi
+
+      - name: Upload bench artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-history
+          path: |
+            benchmarks/history.csv
+            bench-output.txt
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-x86_64
+          path: build/shakti
+          retention-days: 5
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for forbidden patterns
+        # shakti runs setuid-root and execve()s arbitrary commands,
+        # so any pattern that bypasses the validate / authorize / drop
+        # pipeline is a hard fail. Match code lines only — strip
+        # comments so an inline `# ` example doesn't mask a real call.
+        run: |
+          FAIL=0
+          scan() {
+            local label="$1"; shift
+            local pat="$1"; shift
+            local hits
+            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
+                sub(/^[[:space:]]+/,"",line);
+                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+            if [ -n "$hits" ]; then
+              echo "FAIL: $label"
+              echo "$hits"
+              FAIL=1
+            fi
+          }
+          # Shell-out is forbidden — execve with explicit argv array only.
+          scan "raw system()"   '\bsystem\s*\('
+          scan "shell exec_str" '\bexec_str\s*\('
+          scan "sys_system"     '\bsys_system\s*\('
+          # LD_PRELOAD / LD_LIBRARY_PATH must be sanitized in env.cyr —
+          # any reference outside that file's allowlist is suspect.
+          scan "LD_PRELOAD ref outside env.cyr" 'LD_PRELOAD' || true
+          # Audit logging removal — every auth path must call audit_log.
+          # This is a coarse check (presence of the function); the test
+          # suite verifies success+failure paths.
+          if ! grep -q 'audit_log' src/main.cyr; then
+            echo "FAIL: src/main.cyr missing audit_log call"
+            FAIL=1
+          fi
+          echo "security scan complete (fail: $FAIL)"
+          exit $FAIL
+
+      - name: Verify privilege-drop checks
+        # Every setuid / setgid / setgroups call must check return
+        # value (H-1 audit fix in 0.2.2). Any unchecked drop is a
+        # privilege-leak vector. We grep for the syscalls and require
+        # each call site to be inside an `if (... < 0)` guard.
+        run: |
+          fail=0
+          for sc in sys_setuid sys_setgid sys_setgroups; do
+            # Find call sites and verify each has `< 0)` or `>= 0)` on the same logical line.
+            hits=$(grep -nE "\\b$sc\\s*\\(" src/main.cyr 2>/dev/null || true)
+            if [ -z "$hits" ]; then
+              echo "FAIL: $sc never called in src/main.cyr"
+              fail=1
+              continue
+            fi
+            unchecked=$(grep -nE "\\b$sc\\s*\\(" src/main.cyr | grep -vE '(< 0\)|>= 0\))' || true)
+            if [ -n "$unchecked" ]; then
+              echo "FAIL: $sc has unchecked call site:"
+              echo "$unchecked"
+              fail=1
+            fi
+          done
+          exit $fail
 
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check required docs
+
+      - name: Check required files
         run: |
-          for doc in README.md CHANGELOG.md VERSION LICENSE cyrius.cyml; do
-            test -f "$doc" && echo "OK: $doc" || { echo "MISSING: $doc"; exit 1; }
+          MISSING=0
+          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md \
+                   CODE_OF_CONDUCT.md LICENSE CLAUDE.md cyrius.cyml \
+                   docs/architecture/overview.md docs/development/roadmap.md; do
+            if [ -f "$f" ]; then echo "  OK: $f"
+            else echo "  MISSING: $f"; MISSING=1; fi
           done
+          exit $MISSING
+
+      - name: Verify version consistency
+        # cyrius.cyml pulls package.version from VERSION via
+        # ${file:VERSION}; just check VERSION appears in CHANGELOG and
+        # in shakti_version_string() in src/lib.cyr.
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "VERSION file: $VERSION"
+          grep -q "$VERSION" CHANGELOG.md \
+            || { echo "FAIL: VERSION not in CHANGELOG.md"; exit 1; }
+          grep -q "shakti $VERSION " src/lib.cyr \
+            || { echo "FAIL: shakti_version_string() in src/lib.cyr does not contain '$VERSION'"; exit 1; }
+          echo "Version consistent across VERSION + CHANGELOG + lib.cyr"

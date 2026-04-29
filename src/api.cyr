@@ -215,7 +215,7 @@ fn _target_shell(username) {
 # Returns an Evaluation. On success, eval_authorized == 1 and resolved_command
 # / environment are set. On failure, error_code / error_msg describe why.
 fn evaluate_with_policy(config, policy, caller, caller_uid, caller_gid,
-                       groups, command_argv) {
+groups, command_argv) {
     var e = eval_new();
     store64(e + EV_POLICY, policy);
 
@@ -271,7 +271,7 @@ fn evaluate_with_policy(config, policy, caller, caller_uid, caller_gid,
         if (effective_ra == 1) {
             if (ts_valid == 0) {
                 return _eval_fail(e, SHK_ERR_TIMESTAMP_EXPIRED,
-                    "timestamp expired — non-interactive mode cannot re-auth");
+                "timestamp expired — non-interactive mode cannot re-auth");
             }
         }
     }
@@ -280,7 +280,7 @@ fn evaluate_with_policy(config, policy, caller, caller_uid, caller_gid,
     var target_home = _target_home(target);
     var target_shell = _target_shell(target);
     var env = sanitize_environment(def_env_keep(defaults), caller,
-        caller_uid, caller_gid, target, target_home, target_shell);
+    caller_uid, caller_gid, target, target_home, target_shell);
     store64(e + EV_ENV, env);
 
     return e;
@@ -295,5 +295,5 @@ fn evaluate(config, caller, caller_uid, caller_gid, groups, command_argv) {
         return _eval_fail(e, SHK_ERR_POLICY, "failed to load policy");
     }
     return evaluate_with_policy(config, policy, caller,
-        caller_uid, caller_gid, groups, command_argv);
+    caller_uid, caller_gid, groups, command_argv);
 }
