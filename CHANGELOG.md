@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-28
+
+Audit deferrals closeout — final 0.2.x-line polish before the
+0.3.x feature line opens. Closes the last open finding from the
+2026-04-20 internal audit (L-3) at a level the audit explicitly
+deferred but a future external reviewer would expect. Nothing
+removed, nothing renamed; consumer API surface unchanged.
+
+### Security
+
+- **L-3 — defensive `if (alloc == 0)` guards in `src/auth.cyr`
+  and `src/env.cyr`.** From the 2026-04-20 internal audit's
+  deferred-list. Before, an `alloc()` returning 0 (the bump
+  allocator's OOM signal) would have been dereferenced by the
+  next `memcpy` / `store*`, producing a SIGSEGV. After, every
+  alloc site checks for 0 and returns the function's documented
+  error contract — `0 - SHK_ERR_IO` for parent-side auth
+  failures, `sys_exit(127)` (matching the existing exec-failure
+  exit code) for child-side alloc failures inside the post-fork
+  `su` invocation, `0` for pointer-returning helpers
+  (`_mk_env_pair`, `_mk_env_pair_int`, `_env_key`), an empty
+  vec for `shk_read_environment`, and graceful early-break for
+  `_shk_read_environ`'s grow loop.
+
+  Eleven guards added across:
+  - `src/auth.cyr:su_authenticate` — pipe fd buf, child argv
+    array, child empty envp, parent waitpid status buf. The
+    waitpid path also calls `sys_waitpid(pid, 0, 0)` on alloc
+    failure so the child is reaped rather than zombied.
+  - `src/env.cyr` — initial environ buffer, grow-buffer in
+    the read loop, length-out cell, per-entry copy, the two
+    KEY=VAL pair builders, and the key-extractor.
+
+  Per the audit's framing, OOM in a setuid binary is a
+  terminal state and segfault is acceptable abort behaviour.
+  The guards make that abort happen via documented error
+  paths instead of unsynchronised SIGSEGV — eliminates the
+  undefined-behaviour window between alloc and the first
+  deref. Defensive hygiene; not exploitable as written.
+
+### Notes
+
+- **Test coverage of OOM paths**: shakti's bump allocator
+  doesn't fail in any realistic test environment (it would
+  require exhausting the mmap-able address space). The
+  guards are reviewed by inspection, not exercised at unit
+  level. A future audit could add an alloc-fault-injection
+  hook in `lib/alloc.cyr` to make this testable.
+- **Downstream propagation**: when `_mk_env_pair` returns 0
+  on OOM, the existing `vec_push(out, 0)` in
+  `sanitize_environment` will null-terminate `envp` early at
+  execve marshalling, dropping subsequent entries (truncated
+  but not corrupt env). Acceptable fail-soft per the audit
+  framing; flagged for a future propagation pass if a
+  consumer surfaces a concern.
+
+### Roadmap
+
+- [x] **L-3** — closed in this release.
+- [ ] **L-2** — env-read buffer leak on grow remains deferred.
+  Blocked on `free()` in shakti's allocator; would require
+  switching to `lib/freelist.cyr` or pre-sizing via `stat(2)`.
+  Not security-relevant for single-shot CLI; see roadmap.
+- Capability-based privilege (CAP_*) is queued for **0.3.1**
+  per the v0.3+ roadmap.
+
 ## [0.2.3] - 2026-04-28
 
 Toolchain-modernization release. Bumps the cyrius pin from 5.4.17

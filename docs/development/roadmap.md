@@ -113,9 +113,11 @@ H-1 / H-2 / M-1 / M-2 / I-1 shipped in 0.2.2.
       `lib/freelist.cyr` or pre-size via `stat(2)`. Not security-
       relevant for single-shot CLI; affects long-running library
       consumers (daimon).
-- [ ] **L-3** — unchecked `alloc()` returns in `auth.cyr` /
-      `env.cyr`. Defensive-checks pass — non-trivial because of
-      multiple call sites. Earmarked for a separate hygiene pass.
+- [x] **L-3** — defensive `if (alloc == 0)` guards across 11
+      alloc sites in `src/auth.cyr` + `src/env.cyr`. Closed in
+      0.3.0. OOM is still a terminal state for shakti, but the
+      abort now happens via documented error paths rather than
+      SIGSEGV.
 
 ## v1.0 Criteria
 
