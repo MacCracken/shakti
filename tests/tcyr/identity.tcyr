@@ -68,17 +68,31 @@ fn t_lookup_user_substring_safety() {
 
 # ── identity_lookup_groups ────────────────────
 
-fn t_lookup_groups_root_includes_root() {
-    # On every Linux host with /etc/group, root is listed as a member
-    # of group "root" (and typically a few admin groups).
+fn t_lookup_groups_root_well_formed() {
+    # `identity_lookup_groups` returns the supplementary groups whose
+    # member-list field in /etc/group names this user. On stock
+    # Ubuntu/Debian the member list for group "root" is empty; on
+    # Arch and many Linux From Scratch builds root is listed as a
+    # member of its own group. We can't anchor on contents without
+    # tying CI to one distro, so anchor on structural guarantees:
+    # function returns a real vec (non-null), every entry is a non-
+    # empty cstr, no entry is duplicated.
     var groups = identity_lookup_groups("root");
-    var found_root = 0;
+    assert_eq(groups != 0, 1, "lookup returns a non-null vec");
+    var n = vec_len(groups);
     var i = 0;
-    while (i < vec_len(groups)) {
-        if (streq(vec_get(groups, i), "root") == 1) { found_root = 1; }
+    while (i < n) {
+        var name = vec_get(groups, i);
+        assert_eq(name != 0, 1, "group entry is non-null");
+        assert_eq(strlen(name) > 0, 1, "group entry is non-empty");
+        # Linear dedup check (n is tiny — typical 0..3).
+        var j = i + 1;
+        while (j < n) {
+            assert_eq(streq(name, vec_get(groups, j)) == 0, 1, "no duplicates");
+            j = j + 1;
+        }
         i = i + 1;
     }
-    assert_eq(found_root, 1, "root user is a member of group root");
 }
 
 fn t_lookup_groups_empty_user() {
@@ -181,7 +195,7 @@ fn main() {
     t_lookup_user_empty();
     t_lookup_user_missing();
     t_lookup_user_substring_safety();
-    t_lookup_groups_root_includes_root();
+    t_lookup_groups_root_well_formed();
     t_lookup_groups_empty_user();
     t_lookup_gids_root_primary_first();
     t_lookup_gids_dedup_primary();

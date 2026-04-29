@@ -203,8 +203,20 @@ jobs:
           scan "shell exec_str" '\bexec_str\s*\('
           scan "sys_system"     '\bsys_system\s*\('
           # LD_PRELOAD / LD_LIBRARY_PATH must be sanitized in env.cyr —
-          # any reference outside that file's allowlist is suspect.
-          scan "LD_PRELOAD ref outside env.cyr" 'LD_PRELOAD' || true
+          # any reference OUTSIDE env.cyr (its canonical allowlist) is
+          # suspect. env.cyr itself is excluded because that's where
+          # the unsafe-vars table lives by design.
+          ld_hits=$(grep -rn 'LD_PRELOAD' src/ 2>/dev/null \
+            | grep -v '^src/env.cyr:' \
+            | awk -F: '
+              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
+                sub(/^[[:space:]]+/,"",line);
+                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+          if [ -n "$ld_hits" ]; then
+            echo "FAIL: LD_PRELOAD ref outside env.cyr"
+            echo "$ld_hits"
+            FAIL=1
+          fi
           # Audit logging removal — every auth path must call audit_log.
           # This is a coarse check (presence of the function); the test
           # suite verifies success+failure paths.
