@@ -11,35 +11,69 @@
 # Each table is a vec of key-value pairs (like json.cyr).
 # toml_parse returns a vec of { section_name, pairs_vec } entries.
 
+# v5.8.30 — Result-returning *_r variant for the file-loading
+# parser (`toml_parse_file_r`). Bare `toml_parse(src)` keeps its
+# best-effort vec return — no clean -1 surface to migrate.
+include "lib/result.cyr"
+include "lib/io.cyr"
+
+# v5.8.30 — TomlError variants. Mirrors the JsonError shape:
+# `TomlIoErr` for any IoError raised while reading the source
+# file; `TomlParseErr` reserved for a future slot when the
+# parser tracks structural errors instead of best-effort
+# recovery; `TomlOther` is the catch-all. Variant-name prefix
+# `Toml` to keep these distinct from `Io*` / `Json*` variants
+# in the global enum-variant namespace.
+enum TomlError {
+    TomlIoErr;
+    TomlParseErr;
+    TomlOther;
+}
+
 # TOML entry: { section: Str, pairs: vec of {key: Str, value: Str} }
-# Create a TOML section entry
-fn toml_section_new(name, pairs) {
-    var s = alloc(16);
+
+# v5.8.36 — Allocator-as-first-arg variant of toml_section_new.
+# Allocates the 16-byte section header via `a`. Returns 0 on OOM.
+fn toml_section_new_a(a, name, pairs): i64 {
+    var s = alloc_via(a, 16);
+    if (s == 0) { return 0; }
     store64(s, name);
     store64(s + 8, pairs);
     return s;
 }
 
-# Get section name from a TOML section entry
-fn toml_section_name(s) { return load64(s); }
-# Get pairs vec from a TOML section entry
-fn toml_section_pairs(s) { return load64(s + 8); }
+# Create a TOML section entry. v5.8.36 wrapper.
+fn toml_section_new(name, pairs): i64 {
+    return toml_section_new_a(default_alloc(), name, pairs);
+}
 
-# Create a TOML key-value pair
-fn toml_pair_new(key, value) {
-    var p = alloc(16);
+# Get section name from a TOML section entry
+fn toml_section_name(s) : i64 { return load64(s); }
+# Get pairs vec from a TOML section entry
+fn toml_section_pairs(s) : i64 { return load64(s + 8); }
+
+# v5.8.36 — Allocator-as-first-arg variant of toml_pair_new.
+# Allocates the 16-byte pair via `a`. Returns 0 on OOM.
+fn toml_pair_new_a(a, key, value): i64 {
+    var p = alloc_via(a, 16);
+    if (p == 0) { return 0; }
     store64(p, key);
     store64(p + 8, value);
     return p;
 }
 
+# Create a TOML key-value pair. v5.8.36 wrapper.
+fn toml_pair_new(key, value): i64 {
+    return toml_pair_new_a(default_alloc(), key, value);
+}
+
 # Get key from a TOML pair
-fn toml_pair_key(p) { return load64(p); }
+fn toml_pair_key(p) : i64 { return load64(p); }
 # Get value from a TOML pair
-fn toml_pair_value(p) { return load64(p + 8); }
+fn toml_pair_value(p) : i64 { return load64(p + 8); }
 
 # Skip whitespace in buffer, return new position
-fn _toml_skip_ws(buf, pos, end) {
+fn _toml_skip_ws(buf, pos, end): i64 {
     while (pos < end) {
         var c = load8(buf + pos);
         if (c != 32 && c != 9) { return pos; }
@@ -49,7 +83,7 @@ fn _toml_skip_ws(buf, pos, end) {
 }
 
 # Parse a single-line quoted string: "value" — returns Str, advances pos
-fn _toml_parse_str(buf, pos, end) {
+fn _toml_parse_str(buf, pos, end): i64 {
     # Skip opening quote
     pos = pos + 1;
     var start = pos;
@@ -68,7 +102,7 @@ fn _toml_parse_str(buf, pos, end) {
 }
 
 # Get the end position after a single-line string parse
-fn _toml_str_end(buf, pos, end) {
+fn _toml_str_end(buf, pos, end): i64 {
     pos = pos + 1;
     while (pos < end) {
         var c = load8(buf + pos);
@@ -80,7 +114,7 @@ fn _toml_str_end(buf, pos, end) {
 }
 
 # Parse a triple-quoted string: '''...''' — returns Str
-fn _toml_parse_multiline(buf, pos, end) {
+fn _toml_parse_multiline(buf, pos, end): i64 {
     # Skip opening '''
     pos = pos + 3;
     # Skip optional newline after opening '''
@@ -100,7 +134,7 @@ fn _toml_parse_multiline(buf, pos, end) {
 }
 
 # Get end position after triple-quoted string
-fn _toml_multiline_end(buf, pos, end) {
+fn _toml_multiline_end(buf, pos, end): i64 {
     pos = pos + 3;
     if (pos < end && load8(buf + pos) == 10) { pos = pos + 1; }
     while (pos + 2 < end) {
@@ -115,7 +149,7 @@ fn _toml_multiline_end(buf, pos, end) {
 # Parse a TOML file into a vec of sections.
 # Each section has a name (from [[name]]) and a pairs vec.
 # Top-level key=value pairs go into a section named "".
-fn toml_parse(src) {
+fn toml_parse(src): i64 {
     var sections = vec_new();
     var data = str_data(src);
     var slen = str_len(src);
@@ -233,16 +267,41 @@ fn toml_parse(src) {
 }
 
 # Parse a TOML file from disk. Reads up to 256KB.
-fn toml_parse_file(path) {
+fn toml_parse_file(path): i64 {
     var buf[262144];
     var n = file_read_all(path, &buf, 262144);
     if (n <= 0) { return vec_new(); }
     return toml_parse(str_new(&buf, n));
 }
 
+# v5.8.30 — Result variant of toml_parse_file. Surfaces underlying
+# I/O errors as Err(TomlIoErr) instead of silently converting to an
+# empty vec (the back-compat behavior of `toml_parse_file`).
+fn toml_parse_file_r(path) : Result {
+    var fd_r = file_open_r(path, 0, 0);
+    if (is_err_result(fd_r) == 1) { return Err(TomlIoErr); }
+    var fd = load64(fd_r + 8);
+    var buf = alloc(262144);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var rd_r = file_read_r(fd, buf + total, 262144 - total);
+        if (is_err_result(rd_r) == 1) { sys_close(fd); return Err(TomlIoErr); }
+        var n = load64(rd_r + 8);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= 262144) { rgo = 0; }
+        }
+    }
+    sys_close(fd);
+    if (total == 0) { return Err(TomlIoErr); }
+    return Ok(toml_parse(str_new(buf, total)));
+}
+
 # Get value for a key from a pairs vec. Returns Str or 0 if not found.
 # Get value by key. Key can be a cstring (e.g. "name") or a Str.
-fn toml_get(pairs, key) {
+fn toml_get(pairs, key): i64 {
     var i = 0;
     var len = vec_len(pairs);
     while (i < len) {
@@ -256,7 +315,7 @@ fn toml_get(pairs, key) {
 }
 
 # Get all sections with a given name (for [[entries]] etc.)
-fn toml_get_sections(sections, name) {
+fn toml_get_sections(sections, name): i64 {
     var result = vec_new();
     var i = 0;
     var len = vec_len(sections);

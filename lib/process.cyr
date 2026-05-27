@@ -1,6 +1,16 @@
 # process.cyr — process management
 # Usage: include "lib/process.cyr"
-# Requires: agnosys/syscalls.cyr, string.cyr, alloc.cyr, tagged.cyr
+# Requires: lib/syscalls.cyr, lib/string.cyr, lib/alloc.cyr, lib/tagged.cyr
+#
+# v5.10.18 — was hard-blocked on `O_WRONLY` from `lib/io.cyr` for
+# the `/dev/null` redirect in `run_capture`; cyrius's own
+# `programs/check.cyr` (the only in-tree consumer) happened to
+# include io.cyr first so it parsed clean, but every downstream
+# consumer that didn't (agnosys 1.1.x specifically) hit
+# `error: undefined variable 'O_WRONLY'`. Replaced with the
+# literal `1` + a comment to keep this module self-sufficient
+# (matching the pattern in `lib/fdlopen.cyr:234` —
+# `# O_RDONLY`).
 
 # Build argv array and execve. Called in child after fork. Does not return.
 fn _exec3(cmd, arg1, arg2) {
@@ -48,7 +58,7 @@ fn run_capture(cmd, arg1, arg2, buf, buflen) {
         sys_close(read_fd);
         sys_dup2(write_fd, 1);
         sys_close(write_fd);
-        var devnull = sys_open("/dev/null", O_WRONLY, 0);
+        var devnull = sys_open("/dev/null", 1, 0);   # 1 = O_WRONLY (Linux/macOS native; PE backend reroutes)
         if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
         _exec3(cmd, arg1, arg2);
     }

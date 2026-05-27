@@ -3,6 +3,14 @@
 # API-compatible: alloc_init(), alloc(size), alloc_reset(), alloc_used().
 #
 # Uses mmap(MAP_PRIVATE|MAP_ANON) for memory. Grows in 1MB chunks.
+#
+# v5.5.16: inlined Linux syscall numbers (9=mmap, 11=munmap) rather
+# than relying on an outer `#include "lib/syscalls.cyr"` for SYS_*
+# constants. Keeps alloc_macos.cyr self-contained the same way
+# alloc_windows.cyr is — the `lib/alloc.cyr` dispatch just drops
+# this file in with no preamble, mirroring the Linux/Windows paths.
+# The aarch64 Mach-O ESYSXLAT chain translates the Linux numbers to
+# BSD-arm64 equivalents (mmap 9→197, munmap 11→73) at emit time.
 
 var _heap_base = 0;
 var _heap_ptr = 0;
@@ -14,10 +22,10 @@ var ALLOC_MAX = 0x10000000;
 # Initialize the heap allocator (must call before any alloc)
 fn alloc_init() {
     # mmap(addr=0, len=1MB, prot=RW, flags=MAP_PRIVATE|MAP_ANON, fd=-1, offset=0)
-    _heap_base = syscall(SYS_MMAP, 0, 0x100000, 3, 0x1002, 0 - 1, 0);
+    _heap_base = syscall(9, 0, 0x100000, 3, 0x1002, 0 - 1, 0);
     if (_heap_base < 0) {
-        syscall(SYS_WRITE, 2, "alloc_init: mmap failed\n", 24);
-        syscall(SYS_EXIT, 1);
+        syscall(1, 2, "alloc_init: mmap failed\n", 24);
+        syscall(60, 1);
     }
     _heap_end = _heap_base + 0x100000;
     _heap_ptr = _heap_base;
@@ -26,6 +34,10 @@ fn alloc_init() {
 
 # Allocate size bytes from the heap, 8-byte aligned
 fn alloc(size) {
+    # v5.8.37 — lazy-init the heap if alloc_init() was never called.
+    # Mirrors the Linux branch in lib/alloc.cyr; alloc_init() is now
+    # optional. See lib/alloc.cyr header for the full migration note.
+    if (_heap_base == 0) { alloc_init(); }
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
     # Align to 8 bytes
@@ -35,16 +47,24 @@ fn alloc(size) {
     # Overflow check
     if (new_ptr < ptr) { return 0; }
     _heap_ptr = new_ptr;
-    if (_heap_ptr > _heap_end) {
-        # Grow heap by 1MB via mmap (MAP_PRIVATE|MAP_ANON at hint=_heap_end)
-        var result = syscall(SYS_MMAP, _heap_end, 0x100000, 3, 0x1002, 0 - 1, 0);
+    # v5.6.34: loop 1MB mmaps until _heap_end covers _heap_ptr. Previous
+    # single-step grew by exactly 0x100000 regardless of how far past
+    # _heap_end the new_ptr was, so any alloc(>1MB) near the grow point
+    # returned a pointer past the mmap — SIGSEGV on first tail-write.
+    # mmap's hint contract is stricter than brk's: a single big mmap
+    # can legitimately return a different base than requested, which
+    # would break the contiguity guard. Looping per-1MB preserves the
+    # per-step guard and only fails when the kernel actually refuses
+    # the next-contiguous 1MB page.
+    while (_heap_end < _heap_ptr) {
+        var result = syscall(9, _heap_end, 0x100000, 3, 0x1002, 0 - 1, 0);
         if (result < 0) {
             _heap_ptr = ptr;
             return 0;
         }
         # If kernel gave us a different address, the heap is non-contiguous — fail
         if (result != _heap_end) {
-            syscall(SYS_MUNMAP, result, 0x100000);
+            syscall(11, result, 0x100000);
             _heap_ptr = ptr;
             return 0;
         }

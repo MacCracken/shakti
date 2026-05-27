@@ -8,7 +8,7 @@
 # Match a glob pattern against a string
 # Supports: * (zero or more chars), ? (exactly one char)
 # Returns 1 if match, 0 if not.
-fn glob_match(pattern, text) {
+fn glob_match(pattern, text): i64 {
     var pi = 0;
     var ti = 0;
     var plen = strlen(pattern);
@@ -63,7 +63,7 @@ fn glob_match(pattern, text) {
 }
 
 # Match a Str against a glob pattern (C string)
-fn str_glob(s, pattern) {
+fn str_glob(s, pattern): i64 {
     # Need null-terminated version of Str data
     var slen = str_len(s);
     var buf = alloc(slen + 1);
@@ -74,7 +74,7 @@ fn str_glob(s, pattern) {
 
 # Find all occurrences of needle in haystack
 # Returns vec of indices
-fn find_all(haystack, needle) {
+fn find_all(haystack, needle): i64 {
     var results = vec_new();
     var hlen = strlen(haystack);
     var nlen = strlen(needle);
@@ -91,7 +91,7 @@ fn find_all(haystack, needle) {
 
 # Replace first occurrence of old with new in a Str
 # Returns new Str (or original if not found)
-fn str_replace(s, old, new_str) {
+fn str_replace(s, old, new_str): i64 {
     var sdata = str_data(s);
     var slen = str_len(s);
     var odata = str_data(old);
@@ -117,7 +117,7 @@ fn str_replace(s, old, new_str) {
 }
 
 # Replace all occurrences
-fn str_replace_all(s, old, new_str) {
+fn str_replace_all(s, old, new_str): i64 {
     var result = s;
     var changed = 1;
     while (changed == 1) {
@@ -199,7 +199,7 @@ var _re_m_next = 0;
 var _re_m_lastgen = 0;
 var _re_m_gen = 0;
 
-fn _re_m_lazy_init() {
+fn _re_m_lazy_init(): i64 {
     if (_re_m_init == 1) { return 0; }
     _re_m_cur     = alloc(8 + REGEX_MAX_INSTRS * 168);
     _re_m_next    = alloc(8 + REGEX_MAX_INSTRS * 168);
@@ -216,11 +216,11 @@ fn _re_m_lazy_init() {
 
 # === Instruction emit / patch helpers =================================
 
-fn _re_w0(op, small, arg1) {
+fn _re_w0(op, small, arg1): i64 {
     return op | (small << 8) | (arg1 << 32);
 }
 
-fn _re_emit_raw(w0, w1) {
+fn _re_emit_raw(w0, w1): i64 {
     var i = _re_instr_n;
     if (i >= REGEX_MAX_INSTRS) { _re_err = 1; return i; }
     store64(_re_instr_base + i * 16, w0);
@@ -231,7 +231,7 @@ fn _re_emit_raw(w0, w1) {
 
 fn _re_emit_op(op)        { return _re_emit_raw(op, 0); }
 fn _re_emit_char(c)       { return _re_emit_raw(REOP_CHAR | (c << 8), 0); }
-fn _re_emit_class(neg, ci) {
+fn _re_emit_class(neg, ci): i64 {
     var op = REOP_CLASS;
     if (neg == 1) { op = REOP_NCLASS; }
     return _re_emit_raw(op | (ci << 8), 0);
@@ -240,20 +240,20 @@ fn _re_emit_save(idx)     { return _re_emit_raw(REOP_SAVE | (idx << 8), 0); }
 fn _re_emit_jmp(target)   { return _re_emit_raw(REOP_JMP | (target << 32), 0); }
 fn _re_emit_split(a, b)   { return _re_emit_raw(REOP_SPLIT | (a << 32), b); }
 
-fn _re_patch_arg1(idx, arg1) {
+fn _re_patch_arg1(idx, arg1): i64 {
     var off = _re_instr_base + idx * 16;
     var w0 = load64(off);
     store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
     return 0;
 }
 
-fn _re_patch_arg2(idx, arg2) {
+fn _re_patch_arg2(idx, arg2): i64 {
     store64(_re_instr_base + idx * 16 + 8, arg2);
     return 0;
 }
 
 # Shift instructions [lo, hi) right by 1 slot (overlap-safe backward copy).
-fn _re_shift_right(lo, hi) {
+fn _re_shift_right(lo, hi): i64 {
     var k = (hi - lo) * 16 - 1;
     while (k >= 0) {
         var src = _re_instr_base + lo * 16 + k;
@@ -265,7 +265,7 @@ fn _re_shift_right(lo, hi) {
 
 # After shifting [lo, hi) right by 1, jumps inside [lo+1, hi+1) that point
 # back into the OLD [lo, hi) range are stale — bump them by 1.
-fn _re_shift_targets_one(lo, hi) {
+fn _re_shift_targets_one(lo, hi): i64 {
     # Inclusive upper bound: a target == hi means "first position past
     # the fragment" (where a JMP-to-end was patched at iter end with the
     # then-current _re_instr_n == hi). After shift, that position is hi+1,
@@ -301,7 +301,7 @@ fn _re_shift_targets_one(lo, hi) {
 
 # === Class bitmap helpers =============================================
 
-fn _re_alloc_class() {
+fn _re_alloc_class(): i64 {
     var ci = _re_class_n;
     if (ci >= REGEX_MAX_CLASSES) { _re_err = 1; return ci; }
     var z = 0;
@@ -313,7 +313,7 @@ fn _re_alloc_class() {
     return ci;
 }
 
-fn _re_class_set(ci, c) {
+fn _re_class_set(ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = _re_class_base + ci * 32 + (c >> 3);
@@ -321,7 +321,7 @@ fn _re_class_set(ci, c) {
     return 0;
 }
 
-fn _re_class_clear(ci, c) {
+fn _re_class_clear(ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = _re_class_base + ci * 32 + (c >> 3);
@@ -329,7 +329,7 @@ fn _re_class_clear(ci, c) {
     return 0;
 }
 
-fn _re_class_get(ci, c) {
+fn _re_class_get(ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = _re_class_base + ci * 32 + (c >> 3);
@@ -338,7 +338,7 @@ fn _re_class_get(ci, c) {
     return 0;
 }
 
-fn _re_class_range(ci, lo, hi) {
+fn _re_class_range(ci, lo, hi): i64 {
     var c = lo;
     while (c <= hi) {
         _re_class_set(ci, c);
@@ -347,9 +347,9 @@ fn _re_class_range(ci, lo, hi) {
     return 0;
 }
 
-fn _re_class_fill_digit(ci) { _re_class_range(ci, 48, 57); return 0; }
+fn _re_class_fill_digit(ci): i64 { _re_class_range(ci, 48, 57); return 0; }
 
-fn _re_class_fill_word(ci) {
+fn _re_class_fill_word(ci): i64 {
     _re_class_range(ci, 48, 57);
     _re_class_range(ci, 65, 90);
     _re_class_range(ci, 97, 122);
@@ -357,7 +357,7 @@ fn _re_class_fill_word(ci) {
     return 0;
 }
 
-fn _re_class_fill_space(ci) {
+fn _re_class_fill_space(ci): i64 {
     _re_class_set(ci, 32);
     _re_class_set(ci, 9);
     _re_class_set(ci, 10);
@@ -372,7 +372,7 @@ fn _re_class_fill_space(ci) {
 # Decode the next char in the pattern (handles backslash escapes for
 # in-pattern bytes only — NOT classes like \d). Advances _re_pos. Sets
 # _re_err on EOF.
-fn _re_lit_byte() {
+fn _re_lit_byte(): i64 {
     if (_re_pos >= _re_pat_len) { _re_err = 1; return 0; }
     var c = load8(_re_pat + _re_pos);
     _re_pos = _re_pos + 1;
@@ -391,7 +391,7 @@ fn _re_lit_byte() {
 }
 
 # Apply ASCII complement to a class bitmap (in place).
-fn _re_class_invert(ci) {
+fn _re_class_invert(ci): i64 {
     var z = 0;
     while (z < 32) {
         var off = _re_class_base + ci * 32 + z;
@@ -404,7 +404,7 @@ fn _re_class_invert(ci) {
 # Parse a `[...]` class body (caller already consumed `[`). Returns the
 # class index. Sets _re_err on syntax error. Negation is encoded by
 # returning -(ci+1).
-fn _re_parse_class() {
+fn _re_parse_class(): i64 {
     var ci = _re_alloc_class();
     if (_re_err == 1) { return ci; }
     var neg = 0;
@@ -506,7 +506,7 @@ fn _re_parse_class() {
 
 # Forward references: parse_primary -> parse_alt (groups) -> parse_concat -> parse_atom -> parse_primary.
 
-fn _re_parse_primary() {
+fn _re_parse_primary(): i64 {
     if (_re_pos >= _re_pat_len) { _re_err = 1; return 0; }
     var c = load8(_re_pat + _re_pos);
     if (c == 46) {
@@ -610,7 +610,7 @@ fn _re_parse_primary() {
 
 # Apply *, +, ?, *?, +?, ?? to the just-emitted atom at [atom_start, _re_instr_n).
 # `op_char` is the quantifier byte; _re_pos is at it.
-fn _re_apply_simple_q(atom_start, op_char) {
+fn _re_apply_simple_q(atom_start, op_char): i64 {
     var atom_end = _re_instr_n;
     if (atom_end == atom_start) { _re_err = 1; return 0; }
     _re_pos = _re_pos + 1;
@@ -668,7 +668,7 @@ fn _re_apply_simple_q(atom_start, op_char) {
 # Apply {n,m} or {n,} or {n} to the atom at [atom_start, _re_instr_n).
 # `save_primary_start` is the source position right before parse_primary
 # was called for the FIRST copy — used to re-parse for additional copies.
-fn _re_apply_brace_q(save_primary_start, atom_start) {
+fn _re_apply_brace_q(save_primary_start, atom_start): i64 {
     if (_re_instr_n == atom_start) { _re_err = 1; return 0; }
     _re_pos = _re_pos + 1;
     var n_min = 0;
@@ -778,7 +778,7 @@ fn _re_apply_brace_q(save_primary_start, atom_start) {
 
 # Apply `*` (greedy or lazy) to the body at [body_start, _re_instr_n) — used
 # by {n,} unrolling for the unbounded tail.
-fn _re_apply_star_inline(body_start, lazy) {
+fn _re_apply_star_inline(body_start, lazy): i64 {
     var body_end = _re_instr_n;
     _re_shift_right(body_start, body_end);
     _re_shift_targets_one(body_start, body_end);
@@ -798,7 +798,7 @@ fn _re_apply_star_inline(body_start, lazy) {
     return 0;
 }
 
-fn _re_parse_atom() {
+fn _re_parse_atom(): i64 {
     var save_primary_start = _re_pos;
     var atom_start = _re_instr_n;
     _re_parse_primary();
@@ -814,7 +814,7 @@ fn _re_parse_atom() {
     return 0;
 }
 
-fn _re_parse_concat() {
+fn _re_parse_concat(): i64 {
     while (_re_pos < _re_pat_len) {
         var c = load8(_re_pat + _re_pos);
         if (c == 124 || c == 41) { return 0; }
@@ -824,7 +824,7 @@ fn _re_parse_concat() {
     return 0;
 }
 
-fn _re_parse_alt() {
+fn _re_parse_alt(): i64 {
     var left_start = _re_instr_n;
     _re_parse_concat();
     if (_re_err == 1) { return 0; }
@@ -850,7 +850,7 @@ fn _re_parse_alt() {
 
 # Compile a null-terminated regex pattern. Returns an opaque NFA pointer
 # (heap-allocated) or 0 on syntax error.
-fn regex_compile(pat) {
+fn regex_compile(pat): i64 {
     var n = strlen(pat);
     var instr_bytes = REGEX_MAX_INSTRS * 16;
     var class_bytes = REGEX_MAX_CLASSES * 32;
@@ -891,25 +891,25 @@ fn regex_compile(pat) {
 # Two thread lists; each thread is (pc: i64, saves[20]: i64) — 168 B.
 # Layout per list: count (u64) at base+0, then threads at base+8.
 
-fn _re_thread_pc(list_base, idx) {
+fn _re_thread_pc(list_base, idx): i64 {
     return load64(list_base + 8 + idx * 168);
 }
 
-fn _re_thread_save(list_base, idx, k) {
+fn _re_thread_save(list_base, idx, k): i64 {
     return load64(list_base + 8 + idx * 168 + 8 + k * 8);
 }
 
-fn _re_set_thread_pc(list_base, idx, pc) {
+fn _re_set_thread_pc(list_base, idx, pc): i64 {
     store64(list_base + 8 + idx * 168, pc);
     return 0;
 }
 
-fn _re_set_thread_save(list_base, idx, k, v) {
+fn _re_set_thread_save(list_base, idx, k, v): i64 {
     store64(list_base + 8 + idx * 168 + 8 + k * 8, v);
     return 0;
 }
 
-fn _re_copy_saves_into_thread(list_base, idx, src_saves) {
+fn _re_copy_saves_into_thread(list_base, idx, src_saves): i64 {
     var k = 0;
     while (k < REGEX_MAX_SAVES) {
         var v = load64(src_saves + k * 8);
@@ -924,7 +924,7 @@ fn _re_copy_saves_into_thread(list_base, idx, src_saves) {
 # are deduped per pc per generation via `_re_m_lastgen`. `pos` is the
 # current input position; `input_len` is total input length; `input` is
 # the input ptr; `saves` is a 20×8B scratch buffer carrying capture state.
-fn _re_at_word_char(input, input_len, pos) {
+fn _re_at_word_char(input, input_len, pos): i64 {
     if (pos < 0)         { return 0; }
     if (pos >= input_len){ return 0; }
     var c = load8(input + pos);
@@ -935,14 +935,14 @@ fn _re_at_word_char(input, input_len, pos) {
     return 0;
 }
 
-fn _re_is_boundary(input, input_len, pos) {
+fn _re_is_boundary(input, input_len, pos): i64 {
     var l = _re_at_word_char(input, input_len, pos - 1);
     var r = _re_at_word_char(input, input_len, pos);
     if (l != r) { return 1; }
     return 0;
 }
 
-fn _re_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+fn _re_add_thread(list_base, pc, input, input_len, pos, saves, instrs): i64 {
     if (pc < 0)                 { return 0; }
     if (load64(_re_m_lastgen + pc * 8) == _re_m_gen) { return 0; }
     store64(_re_m_lastgen + pc * 8, _re_m_gen);
@@ -1007,7 +1007,7 @@ fn _re_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
 # Run the NFA against `input[start_pos..input_len)`. On match, write the
 # capture saves into nfa's header and return the match-end position.
 # Returns -1 on no match.
-fn _re_pike_run(nfa, input, input_len, start_pos) {
+fn _re_pike_run(nfa, input, input_len, start_pos): i64 {
     _re_m_lazy_init();
     var instrs = nfa + load64(nfa + REGEX_OFF_INSTRS_OFF);
     var instr_count = load64(nfa + REGEX_OFF_INSTR_COUNT);
@@ -1126,7 +1126,7 @@ fn _re_pike_run(nfa, input, input_len, start_pos) {
     return matched;
 }
 
-fn _re_class_get_at(class_base, ci, c) {
+fn _re_class_get_at(class_base, ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = class_base + ci * 32 + (c >> 3);
@@ -1138,7 +1138,7 @@ fn _re_class_get_at(class_base, ci, c) {
 # === Public API ======================================================
 
 # regex_match — anchored at position 0. Returns 1 on match, 0 on no match.
-fn regex_match(nfa, s) {
+fn regex_match(nfa, s): i64 {
     if (nfa == 0) { return 0; }
     var len = strlen(s);
     var r = _re_pike_run(nfa, s, len, 0);
@@ -1147,14 +1147,14 @@ fn regex_match(nfa, s) {
 }
 
 # regex_search — find first match anywhere. Returns start offset, or -1.
-fn regex_search(nfa, s) {
+fn regex_search(nfa, s): i64 {
     if (nfa == 0) { return 0 - 1; }
     var len = strlen(s);
     return regex_search_at(nfa, s, len, 0);
 }
 
 # regex_search_at — like regex_search but starts at offset `from`.
-fn regex_search_at(nfa, s, len, from) {
+fn regex_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
     var i = from;
     while (i <= len) {
@@ -1166,14 +1166,14 @@ fn regex_search_at(nfa, s, len, from) {
 }
 
 # regex_group_start — capture-group n start (group 0 = whole match).
-fn regex_group_start(nfa, n) {
+fn regex_group_start(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + REGEX_OFF_SAVES + n * 16);
 }
 
 # regex_group_end — capture-group n end.
-fn regex_group_end(nfa, n) {
+fn regex_group_end(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + REGEX_OFF_SAVES + n * 16 + 8);

@@ -52,12 +52,26 @@ fn path_dirname(path) {
     return str_sub(path, 0, last_slash);
 }
 
-# Check if path has a specific extension
+# Check if path has a specific extension. Both args are Str
+# (matches str_ends_with's signature). Callers passing a cstring
+# literal must wrap via str_from(".tcyr"). v5.9.6 added the wrap
+# at programs/check.cyr's _testsuite_gate caller.
 fn path_has_ext(path, ext) {
     return str_ends_with(path, ext);
 }
 
 # List directory entries. Returns vec of Str (filenames).
+#
+# v5.9.6 fix: clone each filename out of the getdents64 batch
+# buffer before pushing to the vec. Pre-fix `vec_push(entries,
+# str_from(name))` borrowed the byte pointer into the 4096-byte
+# `buf`; on the next outer iteration, getdents64 overwrote that
+# buf with the next batch, and previously-pushed Strs silently
+# pointed at garbage. Surfaced when programs/check.cyr's
+# `_testsuite_gate` reported "0 files" despite 128 .tcyr files
+# present — `path_has_ext(name, ".tcyr")` returned false for
+# every borrowed-then-clobbered name. dir_list_full + dir_walk
+# inherit the fix transitively (they call dir_list).
 fn dir_list(path) {
     var entries = vec_new();
     var fd = sys_open(str_data(path), O_RDONLY, 0);
@@ -82,7 +96,7 @@ fn dir_list(path) {
                     }
                 }
                 if (skip == 0) {
-                    vec_push(entries, str_from(name));
+                    vec_push(entries, str_clone(str_from(name)));
                 }
                 pos = pos + reclen;
             }
@@ -135,6 +149,62 @@ fn dir_walk(path, results) {
 fn find_files(path, ext) {
     var all = vec_new();
     dir_walk(path, all);
+    var matched = vec_new();
+    var fi = 0;
+    while (fi < vec_len(all)) {
+        var fp = vec_get(all, fi);
+        if (path_has_ext(fp, ext) == 1) {
+            vec_push(matched, fp);
+        }
+        fi = fi + 1;
+    }
+    return matched;
+}
+
+# Walk a directory tree, push all file paths to `results`,
+# pruning any subtree whose entry name matches a member of
+# `prunes`. `prunes` is a vec of Str; comparison is exact
+# (no glob, no path-prefix). Equivalent to `find PATH -type f
+# ( -path '*/X/*' -o ... ) -prune -o -print` with X drawn
+# from `prunes`.
+#
+# Pinned at v5.9.17 for the TS corpus regression gates which
+# walk `~/Repos/secureyeoman` for *.ts / *.tsx while skipping
+# node_modules, dist, build, .next, coverage. Signature picked
+# to mirror `dir_walk(path, results)` so callers can use the
+# same shape.
+fn dir_walk_with_prunes(path, results, prunes) {
+    var entries = dir_list(path);
+    var wi = 0;
+    while (wi < vec_len(entries)) {
+        var name = vec_get(entries, wi);
+        var pruned = 0;
+        var pi = 0;
+        while (pi < vec_len(prunes)) {
+            if (str_eq(name, vec_get(prunes, pi)) == 1) {
+                pruned = 1;
+            }
+            pi = pi + 1;
+        }
+        if (pruned == 0) {
+            var full = path_join(path, name);
+            if (is_dir(full) == 1) {
+                dir_walk_with_prunes(full, results, prunes);
+            } else {
+                vec_push(results, full);
+            }
+        }
+        wi = wi + 1;
+    }
+    return vec_len(results);
+}
+
+# Find files matching an extension under `path`, pruning any
+# subtree whose entry name matches a member of `prunes`. Same
+# shape as `find_files(path, ext)`; adds the pruning hook.
+fn find_files_with_prunes(path, ext, prunes) {
+    var all = vec_new();
+    dir_walk_with_prunes(path, all, prunes);
     var matched = vec_new();
     var fi = 0;
     while (fi < vec_len(all)) {
