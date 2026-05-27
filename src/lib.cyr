@@ -71,13 +71,17 @@ var DEFAULT_TIMESTAMP_TTL_SECS = 300;
 # has no compile-time value injection, so this lives here as the
 # single in-source reference. cyrius.cyml picks up VERSION itself via
 # `version = "${file:VERSION}"` (v5.1.13).
-fn shakti_version_string() { return "shakti 0.3.0 (cyrius port)"; }
+fn shakti_version_string() { return "shakti 0.4.0 (cyrius port)"; }
 
 fn default_policy_path() { return "/etc/agnos/sudoers.toml"; }
 fn default_timestamp_dir() { return "/var/run/agnos/sudo"; }
 
 # ── Module includes (leaves first) ──
-# Stdlib is auto-prepended from cyrius.cyml [deps].
+# Stdlib is auto-prepended from cyrius.cyml [deps]. External deps
+# (resolved by `cyrius deps` into lib/) are included explicitly.
+
+# sakshi: structured logging used by src/audit.cyr — must precede it.
+include "lib/sakshi.cyr"
 
 include "src/validate.cyr"
 include "src/env.cyr"

@@ -38,6 +38,11 @@ var _grp_buf_len = 0;
 
 # Force a re-read of /etc/group on the next lookup. Use after
 # editing the file (e.g. `groupadd` from cyrius tooling).
+# No current downstream caller (audited v5.11.21); part of the
+# NSS cache-invalidation trio (pwd / grp / shadow) — intended
+# consumer is agnos / kavach user-management primitives. Trio
+# stays as a coherent surface; revisit at v6.0.0 dead-code sweep
+# if no claimant. See docs/audit/2026-05-11-zero-call-stdlib.md.
 fn grp_invalidate_cache(): i64 {
     _grp_buf_len = 0;
     return 0;
@@ -316,9 +321,9 @@ fn grp_getgrouplist(user, primary_gid, gid_buf, max): i64 {
 }
 
 # Return the numeric gid from a parsed grrec.
-fn grp_gid(grrec)    { return load64(grrec); }
+fn grp_gid(grrec): i64 { return load64(grrec); }
 # Return the group name cstring (points into strbuf).
-fn grp_name(grrec)   { return load64(grrec + 8); }
+fn grp_name(grrec): i64 { return load64(grrec + 8); }
 # Return the group passwd field (rarely used; usually "x").
 fn grp_passwd(grrec) : i64 { return load64(grrec + 16); }
 

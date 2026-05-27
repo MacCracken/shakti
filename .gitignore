@@ -38,3 +38,9 @@ tarpaulin-report.*
 # Cyrius port
 /rust-old/target/
 /build/
+
+# Stdlib + resolved deps: `lib/` is populated by `cyrius deps` from
+# cyrius.cyml [deps] (stdlib + sakshi), matching patra/sigil — it is
+# NOT vendored. A stale 5.7.x copy was tracked through 0.3.0; at 0.4.0
+# it is untracked (run `git rm -r --cached lib/` once to drop it).
+/lib/

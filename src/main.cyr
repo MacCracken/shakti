@@ -353,9 +353,12 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
     return 0;
 }
 
-# ── run ────────────────────
+# ── shk_run ────────────────────
+# Named with the `shk_` prefix to avoid colliding with the stdlib
+# `process.run` (lib/process.cyr) — an unqualified `run` triggered a
+# "duplicate fn (last definition wins)" warning at build time.
 
-fn run() {
+fn shk_run() {
     init_tracing();
     var cli = _parse_cli();
     if (cli == 0) { _print_usage(); return 1; }
@@ -487,7 +490,7 @@ fn run() {
 fn main() {
     alloc_init();
     args_init();
-    return run();
+    return shk_run();
 }
 
 var rc = main();

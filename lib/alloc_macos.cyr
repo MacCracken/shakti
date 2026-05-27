@@ -4,13 +4,9 @@
 #
 # Uses mmap(MAP_PRIVATE|MAP_ANON) for memory. Grows in 1MB chunks.
 #
-# v5.5.16: inlined Linux syscall numbers (9=mmap, 11=munmap) rather
-# than relying on an outer `#include "lib/syscalls.cyr"` for SYS_*
-# constants. Keeps alloc_macos.cyr self-contained the same way
-# alloc_windows.cyr is — the `lib/alloc.cyr` dispatch just drops
-# this file in with no preamble, mirroring the Linux/Windows paths.
-# The aarch64 Mach-O ESYSXLAT chain translates the Linux numbers to
-# BSD-arm64 equivalents (mmap 9→197, munmap 11→73) at emit time.
+# Self-contained (no `lib/syscalls.cyr` dep). Uses Linux syscall
+# numbers 9/11 inline; aarch64 Mach-O ESYSXLAT translates to BSD-arm64
+# equivalents at emit time. See CHANGELOG [5.5.16].
 
 var _heap_base = 0;
 var _heap_ptr = 0;
@@ -47,15 +43,9 @@ fn alloc(size) {
     # Overflow check
     if (new_ptr < ptr) { return 0; }
     _heap_ptr = new_ptr;
-    # v5.6.34: loop 1MB mmaps until _heap_end covers _heap_ptr. Previous
-    # single-step grew by exactly 0x100000 regardless of how far past
-    # _heap_end the new_ptr was, so any alloc(>1MB) near the grow point
-    # returned a pointer past the mmap — SIGSEGV on first tail-write.
-    # mmap's hint contract is stricter than brk's: a single big mmap
-    # can legitimately return a different base than requested, which
-    # would break the contiguity guard. Looping per-1MB preserves the
-    # per-step guard and only fails when the kernel actually refuses
-    # the next-contiguous 1MB page.
+    # Loop per-1MB mmaps; mmap hint contract is stricter than brk
+    # (big single mmap may return a different base, breaking the
+    # contiguity guard). See CHANGELOG [5.6.34].
     while (_heap_end < _heap_ptr) {
         var result = syscall(9, _heap_end, 0x100000, 3, 0x1002, 0 - 1, 0);
         if (result < 0) {

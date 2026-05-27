@@ -16,7 +16,8 @@ timestamp_ttl = 300
 require_auth = true
 
 # Write an audit log entry for each authorisation decision. Audit
-# infrastructure lives in src/audit.cyr (journald + file backend).
+# infrastructure lives in src/audit.cyr (file-locked trail + structured
+# sakshi logging).
 audit_log = true
 
 # Additional env vars preserved on exec, on top of the default safe

@@ -78,6 +78,20 @@ Shakti ships as a library in two forms:
 - **`src/*.cyr` modules** — piecemeal pickup for consumers that want
   a subset (e.g. validation only, no auth).
 
+**Dependencies.** The bundle leaves `sakshi_*` (structured audit
+logging) as unresolved symbols, just like the stdlib — Cyrius does not
+resolve transitive deps, so a consumer of `dist/shakti.cyr` must declare
+sakshi in its own `cyrius.cyml` alongside `[deps.shakti]`:
+
+```toml
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+tag = "2.2.5"
+modules = ["dist/sakshi.cyr"]
+```
+
+Keep the tag in sync with shakti's `cyrius.cyml` if it moves.
+
 Four AGNOS consumers integrate via `src/api.cyr`:
 
 - **argonaut** (init system): uses `AUTH_SKIP` — already authenticated at boot

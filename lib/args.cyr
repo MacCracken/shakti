@@ -8,10 +8,9 @@
 #   [rsp+16] = argv[1] (first arg pointer)
 #   ...
 #
-# v5.5.17 adds a macOS arm64 dispatch: the Mach-O entry prologue in
-# main_aarch64.cyr stashes argc/argv in x28 before enum/gvar inits
-# can clobber x0/x1, so lib/args_macos.cyr can expose them without
-# reaching for /proc (XNU has no /procfs).
+# macOS arm64: Mach-O entry prologue stashes argc/argv in x28 before
+# enum/gvar inits clobber x0/x1; args_macos.cyr reads from there
+# (XNU has no /procfs). See CHANGELOG [5.5.17].
 
 #ifdef CYRIUS_TARGET_MACOS
 include "lib/args_macos.cyr"

@@ -40,11 +40,25 @@
 - [x] Security-critical test coverage: 130 tests (up from 77)
 - [x] Architecture documentation, 4 ADRs, dependency watch tracking
 
+## Completed (v0.4)
+
+- [x] Cyrius toolchain pin 5.7.33 → 6.0.3 (cybs/cycc rename ceremony; no
+      breaking language change)
+- [x] `cyrius.cyml` `modules` moved `[build]` → `[lib]` — clean build, no
+      duplicate-fn warnings
+- [x] sakshi 2.2.5 adopted for structured, level-filterable audit logging
+      (`init_tracing` / `audit_log`); durable file trail unchanged
+- [x] CI/release toolchain install via upstream `scripts/install.sh`
+      (matches patra/sigil); stdlib un-vendored (`lib/` now `cyrius deps`-
+      populated + gitignored)
+- [x] `scripts/version-bump.sh` for version-surface lockstep; `cyrius.lock`
+      committed
+
 ## Cyrius port regressions (close before v1.0)
 
 Tracked here to keep them visible against the v1.0 criteria below.
 Each is a feature present in the Rust 0.1.x build that did not survive
-the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 5.7.33.
+the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.3.
 
 - [x] `initgroups` parity — populate target user's supplementary
       groups before privilege drop instead of `setgroups(0, NULL)`

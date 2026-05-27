@@ -267,11 +267,16 @@ fn toml_parse(src): i64 {
 }
 
 # Parse a TOML file from disk. Reads up to 256KB.
+# v5.11.61: heap-alloc the read buffer instead of declaring it on-fn-scope.
+# The previous `var buf[262144]` landed 256 KB in every consumer's `.bss`
+# regardless of whether this fn was ever called (DCE drops the fn body but
+# the static survives). Mirrors `toml_parse_file_r` (v5.8.30, already
+# heap-allocs). See CHANGELOG [5.11.61].
 fn toml_parse_file(path): i64 {
-    var buf[262144];
-    var n = file_read_all(path, &buf, 262144);
+    var buf = alloc(262144);
+    var n = file_read_all(path, buf, 262144);
     if (n <= 0) { return vec_new(); }
-    return toml_parse(str_new(&buf, n));
+    return toml_parse(str_new(buf, n));
 }
 
 # v5.8.30 — Result variant of toml_parse_file. Surfaces underlying

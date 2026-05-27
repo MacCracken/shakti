@@ -13,7 +13,7 @@ var DT_DIR = 4;
 var DT_LNK = 10;
 
 # Join two path components with /
-fn path_join(dir, name) {
+fn path_join(dir, name): i64 {
     var sb = str_builder_new();
     str_builder_add(sb, dir);
     if (str_len(dir) > 0) {
@@ -25,7 +25,7 @@ fn path_join(dir, name) {
 }
 
 # Get basename (last component after /)
-fn path_basename(path) {
+fn path_basename(path): i64 {
     var slen = str_len(path);
     var sd = str_data(path);
     var last_slash = 0 - 1;
@@ -39,7 +39,7 @@ fn path_basename(path) {
 }
 
 # Get dirname (everything before last /)
-fn path_dirname(path) {
+fn path_dirname(path): i64 {
     var slen = str_len(path);
     var sd = str_data(path);
     var last_slash = 0 - 1;
@@ -56,7 +56,7 @@ fn path_dirname(path) {
 # (matches str_ends_with's signature). Callers passing a cstring
 # literal must wrap via str_from(".tcyr"). v5.9.6 added the wrap
 # at programs/check.cyr's _testsuite_gate caller.
-fn path_has_ext(path, ext) {
+fn path_has_ext(path, ext): i64 {
     return str_ends_with(path, ext);
 }
 
@@ -72,7 +72,7 @@ fn path_has_ext(path, ext) {
 # present — `path_has_ext(name, ".tcyr")` returned false for
 # every borrowed-then-clobbered name. dir_list_full + dir_walk
 # inherit the fix transitively (they call dir_list).
-fn dir_list(path) {
+fn dir_list(path): i64 {
     var entries = vec_new();
     var fd = sys_open(str_data(path), O_RDONLY, 0);
     if (fd < 0) { return entries; }
@@ -107,7 +107,7 @@ fn dir_list(path) {
 }
 
 # List directory entries with full paths
-fn dir_list_full(path) {
+fn dir_list_full(path): i64 {
     var names = dir_list(path);
     var full = vec_new();
     var di = 0;
@@ -119,7 +119,7 @@ fn dir_list_full(path) {
 }
 
 # Check if path is a directory (try to open with getdents)
-fn is_dir(path) {
+fn is_dir(path): i64 {
     var fd = sys_open(str_data(path), O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var buf = alloc(32);
@@ -130,7 +130,7 @@ fn is_dir(path) {
 }
 
 # Walk a directory tree, push all file paths to a vec
-fn dir_walk(path, results) {
+fn dir_walk(path, results): i64 {
     var entries = dir_list(path);
     var wi = 0;
     while (wi < vec_len(entries)) {
@@ -146,7 +146,7 @@ fn dir_walk(path, results) {
 }
 
 # Find files matching an extension in a directory tree
-fn find_files(path, ext) {
+fn find_files(path, ext): i64 {
     var all = vec_new();
     dir_walk(path, all);
     var matched = vec_new();
@@ -173,7 +173,7 @@ fn find_files(path, ext) {
 # node_modules, dist, build, .next, coverage. Signature picked
 # to mirror `dir_walk(path, results)` so callers can use the
 # same shape.
-fn dir_walk_with_prunes(path, results, prunes) {
+fn dir_walk_with_prunes(path, results, prunes): i64 {
     var entries = dir_list(path);
     var wi = 0;
     while (wi < vec_len(entries)) {
@@ -202,7 +202,7 @@ fn dir_walk_with_prunes(path, results, prunes) {
 # Find files matching an extension under `path`, pruning any
 # subtree whose entry name matches a member of `prunes`. Same
 # shape as `find_files(path, ext)`; adds the pruning hook.
-fn find_files_with_prunes(path, ext, prunes) {
+fn find_files_with_prunes(path, ext, prunes): i64 {
     var all = vec_new();
     dir_walk_with_prunes(path, all, prunes);
     var matched = vec_new();

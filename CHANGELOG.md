@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-27
+
+Toolchain + ecosystem modernization, aligning shakti with its sibling
+first-party projects (patra, sigil) now that both are on cyrius 6.0.3.
+No change to the consumer authorization/auth API surface; the audit
+*record* gains a structured stderr channel (see **Changed**).
+
+### Changed
+
+- **Cyrius toolchain pin 5.7.33 → 6.0.3.** v6.0.0 is the two-binary
+  rename ceremony (`cyrc`→`cybs`, `cc5`→`cycc`); no breaking language
+  change. Source idioms were already current — no rewrites required.
+- **`cyrius.cyml`: moved `modules` from `[build]` to `[lib]`.** The
+  compiler treats `[build].modules` as an auto-prepend list, which
+  re-included every module that `src/lib.cyr` already pulls — emitting
+  ~15 duplicate-fn warnings and inflating the unreachable-fn count.
+  `[lib].modules` is read only by `cyrius distlib`. Build is now clean.
+- **Audit stderr is now structured + level-filterable via sakshi.** The
+  raw `file_write(2, …)` line is replaced by `sakshi_info` (ALLOWED) /
+  `sakshi_warn` (DENIED, AUTH_FAILURE), emitting `[ts] [LEVEL] shakti: …`.
+  The durable `/var/log/agnos/sudo.log` trail is unchanged (see
+  **Security**). `init_tracing()` is no longer a no-op — it sets the
+  sakshi level to `SK_INFO`.
+- **CI/release: toolchain install now uses the upstream
+  `scripts/install.sh`** (sourcing the version from `cyrius.cyml`'s pin)
+  instead of a hand-rolled tarball fetch — matching patra/sigil. The
+  vestigial tarball-cleanup step was removed from `release.yml`.
+- **Stdlib is no longer vendored.** `lib/` was a stale 5.7.x copy tracked
+  in git (and shadowed the version-pinned 6.0.3 stdlib). It is now
+  gitignored and populated by `cyrius deps`, matching patra/sigil. Run
+  `git rm -r --cached lib/` once to drop the tracked copy.
+- Renamed the binary's `run()` → `shk_run()` to avoid colliding with the
+  stdlib `process.run` (was a "duplicate fn, last definition wins"
+  warning).
+
+### Added
+
+- **`sakshi` 2.2.5 dependency** (`[deps.sakshi]`) — structured logging,
+  the `tracing` layer the Rust original always intended. Zero-alloc hot
+  path, fixed stack buffers, no env reads — safe in the setuid post-fork
+  path. Consumers of `dist/shakti.cyr` must declare it themselves (it is
+  left unresolved in the bundle, like the stdlib); see README §
+  Consumer API → Dependencies.
+- **`cyrius.lock`** — now generated (shakti has a real external dep);
+  CI's `cyrius deps --verify` enforces it.
+- **`scripts/version-bump.sh`** — keeps VERSION, `shakti_version_string()`,
+  and the CHANGELOG heading in lockstep (ports patra's pattern).
+
+### Security
+
+- **Audit logging is preserved on every path, success and failure.** The
+  authoritative record is still the file-locked, untruncated
+  `/var/log/agnos/sudo.log` write (`file_append_locked`), unchanged. The
+  new sakshi channel is additive; `SK_INFO` is chosen deliberately so
+  ALLOWED actions still emit (a higher level would have silently dropped
+  successful-command audit lines from stderr). sakshi's 256-byte line
+  buffer may truncate a very long command on stderr — the file trail
+  remains the complete record.
+
 ## [0.3.0] - 2026-04-28
 
 Audit deferrals closeout — final 0.2.x-line polish before the

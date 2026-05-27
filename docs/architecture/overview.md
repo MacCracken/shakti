@@ -142,7 +142,7 @@ Files in `include_dir` (e.g., `/etc/agnos/sudoers.d/*.toml`) are loaded in lexic
 | `env.cyr` | ✓ | Environment sanitization (unsafe var hashmap, `LD_*` / `BASH_FUNC_*` prefix blocking) |
 | `identity.cyr` | ✓ | `/etc/passwd` / `/etc/group` lookups (uid → name, name → uid, group membership, supplementary GID vector) |
 | `timestamp.cyr` | ✓ | Credential caching with per-TTY isolation and tamper detection |
-| `audit.cyr` | ✓ | Structured journald logging and file-based audit trail |
+| `audit.cyr` | ✓ | File-locked audit trail (`/var/log/agnos/sudo.log`) plus structured, level-filterable logging via sakshi (ALLOWED→INFO, DENIED/failure→WARN) |
 | `auth.cyr` | ✓ | `/usr/bin/su` shim; PAM stub reserved for cyrius-5.5.x libpam binding |
 | `policy.cyr` | ✓ | TOML parsing, fragment loading (`include_dir`), authorization engine, policy linter |
 | `api.cyr` | ✓ | High-level consumer API (`ShaktiConfig`, `Evaluation`, `evaluate`, `evaluate_with_policy`) |
@@ -185,12 +185,13 @@ is the same order `src/lib.cyr` `include`s them, because cyrius is
 single-pass — every symbol must be defined before it's referenced:
 
 ```
-src/lib.cyr   →  SHK_ERR_* enum, constants, default paths
+src/lib.cyr   →  SHK_ERR_* enum, constants, default paths; includes
+                 lib/sakshi.cyr (external dep) before the modules below
 src/validate.cyr   ←  uses SHK_ERR_*
 src/env.cyr        ←  stdlib only
 src/identity.cyr   ←  uses SHK_ERR_IO
 src/timestamp.cyr  ←  uses validate_username + default_timestamp_dir
-src/audit.cyr      ←  stdlib only
+src/audit.cyr      ←  uses sakshi_* (structured logging) + str builders
 src/auth.cyr       ←  stdlib only
 src/policy.cyr     ←  uses command_matches + MAX_COMMAND_LEN_DEFAULT + STAT_*
 src/api.cyr        ←  uses everything above

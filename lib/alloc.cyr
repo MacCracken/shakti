@@ -13,14 +13,9 @@
 # alloc(size) returns aligned pointer or 0 on failure.
 # alloc_reset() frees everything (batch).
 #
-# v5.5.0 split the implementation: Linux + aarch64 use the brk-
-# based path below; Windows (CYRIUS_TARGET_WIN) delegates to
-# lib/alloc_windows.cyr which uses VirtualAlloc. v5.5.16 adds the
-# macOS (CYRIUS_TARGET_MACOS) delegation to lib/alloc_macos.cyr
-# (mmap-based — Darwin has no brk, and BSD syscall 12 is chdir,
-# so the Linux branch silently corrupts _heap_base when it runs
-# on Mach-O). arena_* helpers are OS-agnostic and shipped inline
-# after the selector.
+# Linux/aarch64 → brk path (below); Windows → alloc_windows.cyr
+# (VirtualAlloc); macOS → alloc_macos.cyr (mmap; Darwin has no brk).
+# arena_* helpers are OS-agnostic. See CHANGELOG [5.5.0], [5.5.16].
 
 #ifdef CYRIUS_TARGET_WIN
 include "lib/alloc_windows.cyr"
@@ -39,7 +34,7 @@ var _heap_end = 0;
 # before any alloc(); v5.8.37 makes the call optional via lazy-init
 # in alloc() itself. Still callable for explicitness; re-callable
 # (re-brk's the heap to its initial 1MB size).
-fn alloc_init() {
+fn alloc_init(): i64 {
     _heap_base = syscall(12, 0);
     _heap_end = _heap_base + 0x100000;
     syscall(12, _heap_end);
@@ -51,7 +46,7 @@ fn alloc_init() {
 var ALLOC_MAX = 0x10000000;
 
 # Allocate size bytes from the heap, 8-byte aligned
-fn alloc(size) {
+fn alloc(size): i64 {
     # v5.8.37 — lazy-init the heap if alloc_init() was never called.
     # Pre-v5.8.37 every consumer had to call alloc_init() explicitly
     # at top-level; the auto-bootstrap below makes that step
@@ -72,12 +67,8 @@ fn alloc(size) {
     if (new_ptr < ptr) { return 0; }
     _heap_ptr = new_ptr;
     if (_heap_ptr > _heap_end) {
-        # Grow to cover _heap_ptr, rounded up to the next 1MB boundary.
-        # v5.6.34: previously stepped by exactly 0x100000 regardless of
-        # how far past _heap_end the new_ptr was, so any alloc(>1MB) near
-        # the grow point returned a pointer past the brk — SIGSEGV on
-        # first tail-write. Rounding up to a 1MB grain keeps the
-        # brk-per-alloc churn low while always mapping enough space.
+        # Grow to cover _heap_ptr, round up to next 1MB grain
+        # (low brk-churn + correct for alloc(>1MB); see CHANGELOG [5.6.34]).
         var new_end = (_heap_ptr + 0xFFFFF) & (0 - 0x100000);
         var result = syscall(12, new_end);
         if (result < new_end) {
@@ -91,13 +82,13 @@ fn alloc(size) {
 }
 
 # Reset the heap, freeing all allocations at once
-fn alloc_reset() {
+fn alloc_reset(): i64 {
     _heap_ptr = _heap_base;
     return 0;
 }
 
 # Return the number of heap bytes currently in use
-fn alloc_used() {
+fn alloc_used(): i64 {
     return _heap_ptr - _heap_base;
 }
 #endif
@@ -109,17 +100,34 @@ fn alloc_used() {
 # Each arena has its own bump pointer. Freeing one arena doesn't
 # affect allocations from other arenas or the global allocator.
 #
+# Per-frame / per-emission reuse pattern (bote WS, bote SSE,
+# daimon agent supervision, mneme long-running — closes bote audit
+# item via v5.11.14):
+#   var a = arena_new(65536);             # one-time per connection
+#   while (more_frames) {
+#       arena_reset(a);                    # zero-cost: bump back to base
+#       var buf = arena_alloc(a, frame_sz);
+#       handle_frame(buf, ...);
+#   }
+#   arena_free(a);                          # end of connection
+#
 # Usage:
 #   var a = arena_new(4096);          # 4KB arena
 #   var p1 = arena_alloc(a, 64);     # allocate from arena
 #   var p2 = arena_alloc(a, 128);    # still valid after arena_reset
 #   arena_reset(a);                   # frees p1 and p2, not global allocs
-#   (no arena_free — bump allocator, memory reclaimed on process exit)
+#   arena_free(a);                    # invalidates arena (further allocs fail)
+#
+# Memory semantics: arena_free invalidates the arena handle but does NOT
+# return the backing buffer to the global heap (global is a bump allocator
+# with no individual free — backing memory is reclaimed at process exit
+# or global alloc_reset). A future variant could be mmap-backed for true
+# OS-level reclamation; see CHANGELOG [5.11.14] for the scope discussion.
 #
 # Layout: { base: i64, ptr: i64, end: i64 } = 24 bytes
 
 # Create a new arena with the given capacity (bytes)
-fn arena_new(capacity) {
+fn arena_new(capacity): i64 {
     var a = alloc(24);
     var base = alloc(capacity);
     store64(a, base);
@@ -129,7 +137,7 @@ fn arena_new(capacity) {
 }
 
 # Allocate size bytes from the arena, 8-byte aligned. Returns 0 on overflow.
-fn arena_alloc(a, size) {
+fn arena_alloc(a, size): i64 {
     if (size <= 0) { return 0; }
     size = (size + 7) & (0 - 8);
     var ptr = load64(a + 8);
@@ -141,19 +149,36 @@ fn arena_alloc(a, size) {
 }
 
 # Reset the arena — all allocations from this arena are freed
-fn arena_reset(a) {
+fn arena_reset(a): i64 {
     store64(a + 8, load64(a));
     return 0;
 }
 
 # Return bytes used in the arena
-fn arena_used(a) {
+fn arena_used(a): i64 {
     return load64(a + 8) - load64(a);
 }
 
 # Return bytes remaining in the arena
-fn arena_remaining(a) {
+fn arena_remaining(a): i64 {
     return load64(a + 16) - load64(a + 8);
+}
+
+# Invalidate the arena: zero out the header so subsequent arena_alloc
+# returns 0. The backing buffer remains in the global bump heap until
+# process exit or alloc_reset() (bump allocator has no individual free).
+# Match this with arena_reset() before arena_free() if you want to
+# observe used-bytes go to 0 first.
+#
+# bote use case (v5.11.14 closeout): end-of-connection cleanup —
+# arena handle no longer valid, future arena_alloc on the freed
+# handle fails safely instead of leaking writes into stale memory.
+fn arena_free(a): i64 {
+    if (a == 0) { return 0; }
+    store64(a,      0);   # base = 0
+    store64(a + 8,  0);   # ptr  = 0  (matches base; arena_used == 0)
+    store64(a + 16, 0);   # end  = 0  (so arena_alloc's bounds check fails)
+    return 0;
 }
 
 # ================================================================
@@ -182,35 +207,35 @@ include "lib/fnptr.cyr"
 # ---- vtable accessors ----
 
 # Return the alloc fn pointer from an Allocator (slot +0).
-fn allocator_alloc_fn(a)   { return load64(a); }
+fn allocator_alloc_fn(a): i64   { return load64(a); }
 # Return the realloc fn pointer from an Allocator (slot +8).
-fn allocator_realloc_fn(a) { return load64(a + 8); }
+fn allocator_realloc_fn(a): i64 { return load64(a + 8); }
 # Return the free fn pointer from an Allocator (slot +16).
-fn allocator_free_fn(a)    { return load64(a + 16); }
+fn allocator_free_fn(a): i64    { return load64(a + 16); }
 # Return the reset fn pointer from an Allocator (slot +24).
-fn allocator_reset_fn(a)   { return load64(a + 24); }
+fn allocator_reset_fn(a): i64   { return load64(a + 24); }
 # Return the allocator-private state pointer (slot +32; 0 = no state).
-fn allocator_state(a)      { return load64(a + 32); }
+fn allocator_state(a): i64      { return load64(a + 32); }
 
 # ---- dispatch helpers ----
 
 # alloc(size) via vtable
-fn alloc_via(a, size) {
+fn alloc_via(a, size): i64 {
     return fncall2(allocator_alloc_fn(a), allocator_state(a), size);
 }
 
 # realloc(old_ptr, old_size, new_size) via vtable
-fn realloc_via(a, old_ptr, old_size, new_size) {
+fn realloc_via(a, old_ptr, old_size, new_size): i64 {
     return fncall4(allocator_realloc_fn(a), allocator_state(a), old_ptr, old_size, new_size);
 }
 
 # free(ptr) via vtable. Bump + arena impls treat as a no-op.
-fn free_via(a, ptr) {
+fn free_via(a, ptr): i64 {
     return fncall2(allocator_free_fn(a), allocator_state(a), ptr);
 }
 
 # reset() via vtable
-fn reset_via(a) {
+fn reset_via(a): i64 {
     return fncall1(allocator_reset_fn(a), allocator_state(a));
 }
 
@@ -219,7 +244,7 @@ fn reset_via(a) {
 # Build an Allocator from 4 fn pointers + state. Used by the impl
 # constructors below; consumers may also use this to wrap a custom
 # allocator that follows the vtable contract.
-fn allocator_new(alloc_fn, realloc_fn, free_fn, reset_fn, state) {
+fn allocator_new(alloc_fn, realloc_fn, free_fn, reset_fn, state): i64 {
     var a = alloc(40);
     if (a == 0) { return 0; }
     store64(a,      alloc_fn);
@@ -231,14 +256,14 @@ fn allocator_new(alloc_fn, realloc_fn, free_fn, reset_fn, state) {
 }
 
 # Default no-op free (bump + arena both leak; reclaimed on reset).
-fn _alloc_free_noop(state, ptr) {
+fn _alloc_free_noop(state, ptr): i64 {
     return 0;
 }
 
 # Default realloc shape: alloc new + memcpy old → new. The old
 # allocation is leaked (acceptable for bump/arena since reset/exit
 # reclaims). Used by both bump_allocator and arena_allocator.
-fn _alloc_realloc_via(a, old_ptr, old_size, new_size) {
+fn _alloc_realloc_via(a, old_ptr, old_size, new_size): i64 {
     var new_ptr = alloc_via(a, new_size);
     if (new_ptr == 0) { return 0; }
     if (old_ptr != 0) {
@@ -267,11 +292,11 @@ fn _alloc_realloc_via(a, old_ptr, old_size, new_size) {
 # individually free, and realloc's "alloc new + leak old" is
 # the honest semantics.
 
-fn _bump_alloc(state, size) {
+fn _bump_alloc(state, size): i64 {
     return alloc(size);
 }
 
-fn _bump_realloc(state, old_ptr, old_size, new_size) {
+fn _bump_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = alloc(new_size);
     if (new_ptr == 0) { return 0; }
     if (old_ptr != 0) {
@@ -286,7 +311,7 @@ fn _bump_realloc(state, old_ptr, old_size, new_size) {
     return new_ptr;
 }
 
-fn _bump_reset(state) {
+fn _bump_reset(state): i64 {
     return alloc_reset();
 }
 
@@ -295,7 +320,7 @@ fn _bump_reset(state) {
 # global bump is a process-wide singleton. reset_via on the result
 # clears EVERY global allocation — use carefully when other code
 # on the same heap might still hold pointers.
-fn bump_allocator() {
+fn bump_allocator(): i64 {
     return allocator_new(&_bump_alloc, &_bump_realloc, &_alloc_free_noop, &_bump_reset, 0);
 }
 
@@ -310,11 +335,11 @@ fn bump_allocator() {
 # the global bump; freeing the Allocator's `state` pointer is not
 # meaningful (no individual free on the global bump either).
 
-fn _arena_alloc(state, size) {
+fn _arena_alloc(state, size): i64 {
     return arena_alloc(state, size);
 }
 
-fn _arena_realloc(state, old_ptr, old_size, new_size) {
+fn _arena_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = arena_alloc(state, new_size);
     if (new_ptr == 0) { return 0; }
     if (old_ptr != 0) {
@@ -329,7 +354,7 @@ fn _arena_realloc(state, old_ptr, old_size, new_size) {
     return new_ptr;
 }
 
-fn _arena_reset(state) {
+fn _arena_reset(state): i64 {
     return arena_reset(state);
 }
 
@@ -338,7 +363,7 @@ fn _arena_reset(state) {
 # bump. reset_via on the result clears only THIS allocator's
 # allocations (other arenas + global state untouched). Returns 0
 # on allocation failure (capacity > available bump space).
-fn arena_allocator(capacity) {
+fn arena_allocator(capacity): i64 {
     var arena = arena_new(capacity);
     if (arena == 0) { return 0; }
     return allocator_new(&_arena_alloc, &_arena_realloc, &_alloc_free_noop, &_arena_reset, arena);
@@ -360,7 +385,7 @@ fn arena_allocator(capacity) {
 # `test_allocator_fail_after(a, n)` sets the threshold; pass -1
 # to disable. `test_allocator_alloc_count(a)` reads the counter.
 
-fn _test_alloc(state, size) {
+fn _test_alloc(state, size): i64 {
     var count = load64(state);
     var fail_after = load64(state + 8);
     count = count + 1;
@@ -372,7 +397,7 @@ fn _test_alloc(state, size) {
     return alloc(size);
 }
 
-fn _test_realloc(state, old_ptr, old_size, new_size) {
+fn _test_realloc(state, old_ptr, old_size, new_size): i64 {
     var new_ptr = _test_alloc(state, new_size);
     if (new_ptr == 0) { return 0; }
     if (old_ptr != 0) {
@@ -387,7 +412,7 @@ fn _test_realloc(state, old_ptr, old_size, new_size) {
     return new_ptr;
 }
 
-fn _test_reset(state) {
+fn _test_reset(state): i64 {
     store64(state, 0);
     store64(state + 16, 0);
     # Note: doesn't call alloc_reset() — test allocators share the
@@ -402,7 +427,7 @@ fn _test_reset(state) {
 # harness. State layout (24 bytes): alloc_count / fail_after /
 # bytes_total. Initial fail_after is -1 (never fail). Returns 0
 # on state-allocation failure.
-fn test_allocator() {
+fn test_allocator(): i64 {
     var state = alloc(24);
     if (state == 0) { return 0; }
     store64(state,      0);          # alloc_count
@@ -414,20 +439,20 @@ fn test_allocator() {
 # Configure when the test_allocator should start failing. Pass -1
 # to disable (default). `n` is the threshold AFTER which alloc
 # returns 0 — alloc N succeeds, alloc N+1 fails.
-fn test_allocator_fail_after(a, n) {
+fn test_allocator_fail_after(a, n): i64 {
     store64(allocator_state(a) + 8, n);
     return 0;
 }
 
 # Read the running alloc count (number of successful alloc_via
 # calls, including ones that returned 0 because of fail_after).
-fn test_allocator_alloc_count(a) {
+fn test_allocator_alloc_count(a): i64 {
     return load64(allocator_state(a));
 }
 
 # Read the running byte total (sum of size args; not adjusted for
 # 8-byte alignment or for fail_after rejections — diagnostic only).
-fn test_allocator_bytes_total(a) {
+fn test_allocator_bytes_total(a): i64 {
     return load64(allocator_state(a) + 16);
 }
 
@@ -450,7 +475,7 @@ var _default_allocator = 0;
 # the global bump (`bump_allocator()`); identical to calling
 # bump_allocator() each time except memoized — every call returns
 # the same Allocator pointer.
-fn default_alloc() {
+fn default_alloc(): i64 {
     if (_default_allocator == 0) {
         _default_allocator = bump_allocator();
     }

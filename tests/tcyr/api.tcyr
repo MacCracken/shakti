@@ -57,6 +57,16 @@ fn t_evaluate_authorized_with_auth() {
     assert_eq(eval_require_auth(eval), 1, "policy says require_auth");
 }
 
+# HOST DEPENDENCY: evaluate_with_policy resolves the command against
+# the real filesystem (resolve_command) BEFORE the authorization
+# check, so the target binary must exist and be executable on the
+# test host. If it doesn't, resolve_command returns
+# SHK_ERR_NOT_EXECUTABLE (8) and the deny path is never reached —
+# the assert below would see 8 instead of SHK_ERR_DENIED (13).
+# /usr/bin/docker is used here precisely because it sits OUTSIDE the
+# `*` rule's env-only allowlist; the sibling evaluate tests use
+# /usr/bin/env, which is universally present. If docker is absent on
+# the host, install it (or the assert fails with got 8, expected 13).
 fn t_evaluate_denied() {
     var cfg = _skip_config();
     # /usr/bin/docker is not in the * rule's allowlist, so unknown user fails.

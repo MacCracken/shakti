@@ -4,13 +4,14 @@ version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "5.7.33"
+cyrius = "6.0.3"
 repository = "https://github.com/MacCracken/shakti"
 
 [build]
 entry = "src/main.cyr"
 output = "build/shakti"
 
+[lib]
 # `modules` drives `cyrius distlib`: concatenates these in order into
 # `dist/shakti.cyr`, stripping `include` directives for a self-
 # contained consumer bundle. Order matches src/lib.cyr's includes —
@@ -21,6 +22,13 @@ output = "build/shakti"
 # (argument parsing, exec drop, interactive password prompt,
 # top-level `syscall(SYS_EXIT, rc)`). Consumers that want the
 # library API should include `dist/shakti.cyr` alone.
+#
+# IMPORTANT: keep `modules` under `[lib]`, NOT `[build]`. The compiler
+# treats `[build].modules` as an auto-prepend list and inlines every
+# src/ file into the temp before the entry source — which then
+# re-includes them via `src/lib.cyr`'s include directives, producing
+# duplicate-fn / unreachable-fn warnings (the same lesson sigil and
+# agnosys learned). `[lib].modules` is read only by `cyrius distlib`.
 modules = [
     "src/lib.cyr",
     "src/validate.cyr",
@@ -55,3 +63,14 @@ stdlib = [
     "bench",
     "fnptr",
 ]
+
+# Sakshi — structured, level-filterable logging (the `tracing` layer the
+# Rust original always intended; see src/audit.cyr). Used by audit_log()
+# and init_tracing(). Zero-alloc hot path, fixed stack buffers, no env
+# reads — safe in the setuid post-fork path. Cyrius does not resolve
+# transitive deps, so downstream consumers of dist/shakti.cyr must
+# replicate this block alongside [deps.shakti] (see README § Dependencies).
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+tag = "2.2.5"
+modules = ["dist/sakshi.cyr"]

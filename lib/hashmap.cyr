@@ -66,7 +66,7 @@ enum KeyType {
 }
 
 # FNV-1a hash for null-terminated string (cstr keys).
-fn hash_str(s) {
+fn hash_str(s): i64 {
     if (s == 0) { return 0; }
     var h = 0xCBF29CE484222325;
     var hi = 0;
@@ -81,7 +81,7 @@ fn hash_str(s) {
 # FNV-1a hash for Str struct (fat pointer keys).
 # Walks str_data for str_len bytes — content-derived, not address-derived.
 # Added v5.4.14 as part of the majra-surfaced Str-key map fix.
-fn hash_str_v(s) {
+fn hash_str_v(s): i64 {
     if (s == 0) { return 0; }
     var data = str_data(s);
     var len = str_len(s);
@@ -96,13 +96,13 @@ fn hash_str_v(s) {
 }
 
 # Internal: pick hash based on map's key_type.
-fn _map_hash(m, key) {
+fn _map_hash(m, key): i64 {
     if (load64(m + 24) == KeyTypeStr) { return hash_str_v(key); }
     return hash_str(key);
 }
 
 # Internal: pick equality based on map's key_type.
-fn _map_key_eq(m, a, b) {
+fn _map_key_eq(m, a, b): i64 {
     if (load64(m + 24) == KeyTypeStr) { return str_eq(a, b); }
     return streq(a, b);
 }
@@ -111,7 +111,7 @@ fn _map_key_eq(m, a, b) {
 # the 32-byte map header + initial 16-slot entries array via `a`.
 # Returns 0 on OOM. Pair with map_set_a / _map_grow_a (called
 # transitively) to keep the same allocator threaded through grows.
-fn map_new_a(a) {
+fn map_new_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
@@ -128,7 +128,7 @@ fn map_new_a(a) {
 # Create a new cstr-keyed hash map (initial capacity 16).
 # Keys passed to map_set / map_get / etc. are char* (NUL-terminated).
 # v5.8.35 wrapper — delegates to map_new_a with default_alloc().
-fn map_new() {
+fn map_new(): i64 {
     return map_new_a(default_alloc());
 }
 
@@ -142,7 +142,7 @@ fn map_new() {
 # byte-walk mishandling struct layouts.
 # v5.8.35 — Allocator-as-first-arg variant of map_new_str.
 # Same shape as map_new_a but with KeyTypeStr discriminant.
-fn map_new_str_a(a) {
+fn map_new_str_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
@@ -161,21 +161,21 @@ fn map_new_str_a(a) {
 # this for any map whose keys are built via str_from_int(n) or
 # similar (the cstr-keyed map_new variant silently loses ~3% of
 # entries due to hash_str byte-walk mishandling struct layouts).
-fn map_new_str() {
+fn map_new_str(): i64 {
     return map_new_str_a(default_alloc());
 }
 
 # Return pointer to the entries array
-fn map_entries(m) { return load64(m); }
+fn map_entries(m): i64 { return load64(m); }
 # Return the current capacity
-fn map_cap(m) { return load64(m + 8); }
+fn map_cap(m): i64 { return load64(m + 8); }
 # Return the number of occupied entries
-fn map_count(m) { return load64(m + 16); }
+fn map_count(m): i64 { return load64(m + 16); }
 
 # Find slot for key. Returns entry pointer or 0.
 # Hash + equality are dispatched through _map_hash / _map_key_eq so
 # the same _map_find serves both cstr and Str key-type maps.
-fn _map_find(m, key) {
+fn _map_find(m, key): i64 {
     var entries = load64(m);
     var cap = load64(m + 8);
     var idx = _map_hash(m, key) & (cap - 1);
@@ -200,7 +200,7 @@ fn _map_find(m, key) {
 }
 
 # Lookup occupied entry. Returns entry pointer or 0.
-fn _map_lookup(m, key) {
+fn _map_lookup(m, key): i64 {
     var ep = _map_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep + 16) != 1) { return 0; }
@@ -213,7 +213,7 @@ var MAP_CAP_MAX = 0x4000000;
 # v5.8.35 — Allocator-as-first-arg internal grow. Returns 0 on
 # success, -1 on grow OOM (the back-compat _map_grow aborts the
 # process; map_set_a propagates the -1 to its caller).
-fn _map_grow_a(a, m) {
+fn _map_grow_a(a, m): i64 {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
     var new_cap = old_cap * 2;
@@ -240,7 +240,7 @@ fn _map_grow_a(a, m) {
 
 # Grow the map (double capacity, rehash). v5.8.35 wrapper —
 # aborts on OOM (matching pre-v5.8.35 behavior).
-fn _map_grow(m) {
+fn _map_grow(m): i64 {
     var rc = _map_grow_a(default_alloc(), m);
     if (rc < 0) {
         syscall(1, 2, "map: alloc failed\n", 18);
@@ -252,7 +252,7 @@ fn _map_grow(m) {
 # v5.8.35 — Allocator-as-first-arg variant of map_set. Routes any
 # grow through `a`. Returns 0 on success, -1 on grow OOM (caller
 # must check; back-compat map_set aborts instead).
-fn map_set_a(a, m, key, value) {
+fn map_set_a(a, m, key, value): i64 {
     if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
         var rc = _map_grow_a(a, m);
         if (rc < 0) { return 0 - 1; }
@@ -270,7 +270,7 @@ fn map_set_a(a, m, key, value) {
 # Set key=value. Overwrites if key exists. v5.8.35 wrapper —
 # aborts on grow OOM (matching pre-v5.8.35 behavior). New code
 # should prefer map_set_a for graceful OOM handling.
-fn map_set(m, key, value) {
+fn map_set(m, key, value): i64 {
     var rc = map_set_a(default_alloc(), m, key, value);
     if (rc < 0) {
         syscall(1, 2, "map: alloc failed\n", 18);
@@ -280,30 +280,30 @@ fn map_set(m, key, value) {
 }
 
 # Get value for key. Returns value or 0 if not found.
-fn map_get(m, key) {
+fn map_get(m, key): i64 {
     var ep = _map_lookup(m, key);
     if (ep == 0) { return 0; }
     return load64(ep + 8);
 }
 
 # Get value for key with default. Returns value or default_val if not found.
-fn map_get_or(m, key, default_val) {
+fn map_get_or(m, key, default_val): i64 {
     var ep = _map_lookup(m, key);
     if (ep == 0) { return default_val; }
     return load64(ep + 8);
 }
 
 # Alias for map_count
-fn map_size(m) { return load64(m + 16); }
+fn map_size(m): i64 { return load64(m + 16); }
 
 # Check if key exists. Returns 1 or 0.
-fn map_has(m, key) {
+fn map_has(m, key): i64 {
     if (_map_lookup(m, key) != 0) { return 1; }
     return 0;
 }
 
 # Delete key. Returns 1 if found, 0 if not.
-fn map_delete(m, key) {
+fn map_delete(m, key): i64 {
     var ep = _map_lookup(m, key);
     if (ep == 0) { return 0; }
     store64(ep + 16, 2);
@@ -312,7 +312,7 @@ fn map_delete(m, key) {
 }
 
 # Get all keys as a vec
-fn map_keys(m) {
+fn map_keys(m): i64 {
     var result = vec_new();
     var entries = load64(m);
     var cap = load64(m + 8);
@@ -326,7 +326,7 @@ fn map_keys(m) {
 }
 
 # Get all values as a vec
-fn map_values(m) {
+fn map_values(m): i64 {
     var result = vec_new();
     var entries = load64(m);
     var cap = load64(m + 8);
@@ -340,14 +340,14 @@ fn map_values(m) {
 }
 
 # Clear all entries (reset to empty, keep capacity)
-fn map_clear(m) {
+fn map_clear(m): i64 {
     memset(load64(m), 0, load64(m + 8) * 24);
     store64(m + 16, 0);
     return 0;
 }
 
 # Iterate entries. Calls fn(key, value) for each occupied entry.
-fn map_iter(m, fp) {
+fn map_iter(m, fp): i64 {
     var entries = load64(m);
     var cap = load64(m + 8);
     var ii = 0;
@@ -390,7 +390,7 @@ fn map_iter(m, fp) {
 # that happen to cluster in low bits (e.g. pointer addresses
 # modulo page size) pile up in the same bucket and probe chains
 # degenerate to linear scans.
-fn hash_u64(k) {
+fn hash_u64(k): i64 {
     var h = k;
     h = h ^ (h >> 30);
     h = h * 0xBF58476D1CE4E5B9;
@@ -408,7 +408,7 @@ var MAP_U64_TOMB = 0xFFFFFFFFFFFFFFFF;
 # v5.8.43 — Allocator-as-first-arg variant of map_u64_new.
 # Allocates the 32-byte map header + initial 16-slot entries
 # array (16 bytes per slot) via `a`. Returns 0 on OOM.
-fn map_u64_new_a(a) {
+fn map_u64_new_a(a): i64 {
     var m = alloc_via(a, 32);
     if (m == 0) { return 0; }
     var cap = 16;
@@ -424,14 +424,14 @@ fn map_u64_new_a(a) {
 
 # Create a new u64-keyed hash map (initial capacity 16). v5.8.43
 # wrapper — delegates to map_u64_new_a with default_alloc().
-fn map_u64_new() {
+fn map_u64_new(): i64 {
     return map_u64_new_a(default_alloc());
 }
 
 # Find slot for key. Returns entry pointer (empty slot, tombstone
 # with no earlier tombstone seen, or occupied-with-matching-key)
 # or 0 if the probe chain went full-circle.
-fn _map_u64_find(m, key) {
+fn _map_u64_find(m, key): i64 {
     var entries = load64(m);
     var cap = load64(m + 8);
     var idx = hash_u64(key) & (cap - 1);
@@ -458,7 +458,7 @@ fn _map_u64_find(m, key) {
 # v5.8.43 — Allocator-as-first-arg internal grow. Returns 0 on
 # success, -1 on grow OOM (vs back-compat _map_u64_grow which
 # aborts).
-fn _map_u64_grow_a(a, m) {
+fn _map_u64_grow_a(a, m): i64 {
     var old_entries = load64(m);
     var old_cap = load64(m + 8);
     var new_cap = old_cap * 2;
@@ -488,7 +488,7 @@ fn _map_u64_grow_a(a, m) {
 
 # Grow backing store (double capacity, rehash). v5.8.43 wrapper —
 # aborts on OOM (matching pre-v5.8.43 behavior).
-fn _map_u64_grow(m) {
+fn _map_u64_grow(m): i64 {
     var rc = _map_u64_grow_a(default_alloc(), m);
     if (rc < 0) {
         syscall(1, 2, "map_u64: alloc failed\n", 22);
@@ -500,7 +500,7 @@ fn _map_u64_grow(m) {
 # v5.8.43 — Allocator-as-first-arg variant of map_u64_set. Routes
 # any grow through `a`. Returns 0 on success, -1 on grow OOM
 # (caller must check; back-compat map_u64_set aborts instead).
-fn map_u64_set_a(a, m, key, value) {
+fn map_u64_set_a(a, m, key, value): i64 {
     if (load64(m + 16) * 10 >= load64(m + 8) * 7) {
         var rc = _map_u64_grow_a(a, m);
         if (rc < 0) { return 0 - 1; }
@@ -521,14 +521,14 @@ fn map_u64_set_a(a, m, key, value) {
 # -1 if the probe chain was full (shouldn't happen — grow fires
 # at 70% load before the chain saturates). v5.8.43 wrapper —
 # aborts on grow OOM.
-fn map_u64_set(m, key, value) {
+fn map_u64_set(m, key, value): i64 {
     var rc = map_u64_set_a(default_alloc(), m, key, value);
     if (rc < 0) { return rc; }
     return 0;
 }
 
 # Get value for key. Returns value or 0 if not found.
-fn map_u64_get(m, key) {
+fn map_u64_get(m, key): i64 {
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }
@@ -536,7 +536,7 @@ fn map_u64_get(m, key) {
 }
 
 # Get value with default if key not found.
-fn map_u64_get_or(m, key, default_val) {
+fn map_u64_get_or(m, key, default_val): i64 {
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return default_val; }
     if (load64(ep) != key) { return default_val; }
@@ -544,7 +544,7 @@ fn map_u64_get_or(m, key, default_val) {
 }
 
 # Check if key exists. Returns 1 or 0.
-fn map_u64_has(m, key) {
+fn map_u64_has(m, key): i64 {
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }
@@ -552,7 +552,7 @@ fn map_u64_has(m, key) {
 }
 
 # Delete key. Returns 1 if found, 0 if not.
-fn map_u64_delete(m, key) {
+fn map_u64_delete(m, key): i64 {
     var ep = _map_u64_find(m, key);
     if (ep == 0) { return 0; }
     if (load64(ep) != key) { return 0; }
@@ -562,10 +562,10 @@ fn map_u64_delete(m, key) {
 }
 
 # Occupied-entry count.
-fn map_u64_size(m) { return load64(m + 16); }
+fn map_u64_size(m): i64 { return load64(m + 16); }
 
 # Reset to empty; keep capacity.
-fn map_u64_clear(m) {
+fn map_u64_clear(m): i64 {
     memset(load64(m), 0, load64(m + 8) * 16);
     store64(m + 16, 0);
     return 0;
@@ -574,7 +574,7 @@ fn map_u64_clear(m) {
 # Print map contents as {key: value, ...}.
 # Key rendering branches on the map's key_type: cstr uses strlen,
 # Str uses str_data + str_len.
-fn map_print(m) {
+fn map_print(m): i64 {
     var entries = load64(m);
     var cap = load64(m + 8);
     var is_str = load64(m + 24);
