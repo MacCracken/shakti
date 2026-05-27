@@ -55,6 +55,14 @@ No change to the consumer authorization/auth API surface; the audit
 - **`scripts/version-bump.sh`** — keeps VERSION, `shakti_version_string()`,
   and the CHANGELOG heading in lockstep (ports patra's pattern).
 
+### Fixed
+
+- **Release: removed `strip build/shakti`.** Cyrius emits minimal ELF
+  with no symbol table, so `strip` didn't shrink the binary — but it
+  corrupted the section/program headers, making the binary SIGSEGV on
+  first run. The release `Verify version surface` step failed with exit
+  139. patra/sigil never strip cyrius binaries.
+
 ### Security
 
 - **Audit logging is preserved on every path, success and failure.** The

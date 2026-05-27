@@ -59,10 +59,15 @@ jobs:
           fi
 
       - name: Build
+        # Do NOT `strip` the binary. Cyrius emits its own minimal ELF
+        # with no symbol table to remove (strip doesn't shrink it), and
+        # GNU strip corrupts the section/program headers — the stripped
+        # binary SIGSEGVs on first run (exit 139 in the version-surface
+        # check below). Confirmed locally: unstripped runs, stripped
+        # segfaults at identical byte size. patra/sigil never strip.
         run: |
           mkdir -p build
           cyrius build src/main.cyr build/shakti
-          strip build/shakti 2>/dev/null || true
           echo "shakti: $(wc -c < build/shakti) bytes"
 
       - name: Verify version surface
