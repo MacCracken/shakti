@@ -1,0 +1,49 @@
+# cap_probe.cyr — isolates the capability-drop syscall wrappers from
+# src/caps.cyr (ADR-007) and execs grep so the caller can read the
+# resulting /proc/self/status Cap* lines.
+#
+# It applies ONLY the capability syscalls (bounding-set drop → capset →
+# ambient raise), deliberately skipping setgroups/setgid/setuid. That
+# lets it run inside an UNPRIVILEGED user namespace (`unshare -Ucr`,
+# uid 0 with a full cap set, where setgroups is force-denied), giving CI
+# real coverage of caps_capset / caps_ambient_raise_set /
+# caps_bset_drop_complement without root. The full _exec_target path
+# (which does drop uid/gid) is covered by the root branch of
+# caps_drop.sh.
+#
+# Hardcoded to CAP_NET_BIND_SERVICE (bit 10 = 0x400). Driver asserts the
+# Cap* fields read 0000000000000400.
+
+include "src/lib.cyr"
+
+fn main() {
+    alloc_init();
+    var mask = 1 << CAP_NET_BIND_SERVICE;
+    if (caps_bset_drop_complement(mask) < 0) {
+        file_write(2, "cap_probe: bounding drop failed\n", 32);
+        return 1;
+    }
+    if (caps_capset(mask) < 0) {
+        file_write(2, "cap_probe: capset failed\n", 25);
+        return 1;
+    }
+    if (caps_ambient_raise_set(mask) < 0) {
+        file_write(2, "cap_probe: ambient raise failed\n", 32);
+        return 1;
+    }
+
+    var argv = alloc(8 * 5);
+    store64(argv + 0, "/usr/bin/grep");
+    store64(argv + 8, "-E");
+    store64(argv + 16, "CapEff|CapBnd|CapAmb|CapInh|CapPrm");
+    store64(argv + 24, "/proc/self/status");
+    store64(argv + 32, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+    sys_execve("/usr/bin/grep", argv, envp);
+    file_write(2, "cap_probe: exec failed\n", 23);
+    return 127;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

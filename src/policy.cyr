@@ -35,13 +35,15 @@ enum RuleOff {
     RU_DENY = 32;
     RU_REQUIRE_AUTH = 40;
     RU_DESCRIPTION = 48;
-    RU_SZ = 56;
+    RU_CAPABILITIES = 56;
+    RU_SZ = 64;
 }
 
 enum AuthzOff {
     AZ_STATUS = 0;
     AZ_AUX = 8;
-    AZ_SZ = 16;
+    AZ_CAPS = 16;
+    AZ_SZ = 24;
 }
 
 enum AuthzStatus { AZ_DENIED = 0; AZ_ALLOWED = 1; }
@@ -85,6 +87,9 @@ fn rule_new() {
     store64(r + RU_DENY, vec_new());
     store64(r + RU_REQUIRE_AUTH, 1);
     store64(r + RU_DESCRIPTION, "");
+    # Empty capability set = full-uid drop (today's default). Opt-in
+    # least-privilege when the policy names caps. See ADR-007.
+    store64(r + RU_CAPABILITIES, vec_new());
     return r;
 }
 
@@ -95,16 +100,21 @@ fn rule_commands(r) { return load64(r + RU_COMMANDS); }
 fn rule_deny_commands(r) { return load64(r + RU_DENY); }
 fn rule_require_auth(r) { return load64(r + RU_REQUIRE_AUTH); }
 fn rule_description(r) { return load64(r + RU_DESCRIPTION); }
+fn rule_capabilities(r) { return load64(r + RU_CAPABILITIES); }
 
 fn authz_new(status, aux) {
     var a = alloc(AZ_SZ);
     store64(a + AZ_STATUS, status);
     store64(a + AZ_AUX, aux);
+    # Capability set of the matched rule (0 = none/denied → full-uid
+    # drop). Set by the AZ_ALLOWED return sites in check_authorization.
+    store64(a + AZ_CAPS, 0);
     return a;
 }
 
 fn authz_status(a) { return load64(a + AZ_STATUS); }
 fn authz_aux(a) { return load64(a + AZ_AUX); }
+fn authz_caps(a) { return load64(a + AZ_CAPS); }
 
 # ── Mini TOML loader ────────────────────
 
@@ -314,6 +324,13 @@ fn _shk_rule_set(r, key, raw_val) {
     }
     if (streq(key, "description") == 1) {
         store64(r + RU_DESCRIPTION, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "capabilities") == 1) {
+        # Parsed as a string array like commands; names are validated
+        # (caps_name_to_bit) when the set is resolved to a bitmask at
+        # exec time, so a bogus name fails closed there. See ADR-007.
+        store64(r + RU_CAPABILITIES, _shk_parse_str_array(raw_val));
         return 0;
     }
     return 0;
@@ -658,13 +675,17 @@ fn check_authorization(policy, caller, groups, target, command) {
                 # Empty commands list = all commands allowed
                 if (cn == 0) {
                     var ra_flag = rule_require_auth(r) & def_req;
-                    return authz_new(AZ_ALLOWED, ra_flag);
+                    var az0 = authz_new(AZ_ALLOWED, ra_flag);
+                    store64(az0 + AZ_CAPS, rule_capabilities(r));
+                    return az0;
                 }
                 var ci = 0;
                 while (ci < cn) {
                     if (command_matches(command, vec_get(cmds, ci)) == 1) {
                         var ra_flag2 = rule_require_auth(r) & def_req;
-                        return authz_new(AZ_ALLOWED, ra_flag2);
+                        var az1 = authz_new(AZ_ALLOWED, ra_flag2);
+                        store64(az1 + AZ_CAPS, rule_capabilities(r));
+                        return az1;
                     }
                     ci = ci + 1;
                 }

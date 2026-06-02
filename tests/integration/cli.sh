@@ -128,6 +128,19 @@ else
     echo "  → regenerate the bundle with: cyrius distlib"
 fi
 
+# ── capability drop (ADR-007) ──────────────────────────
+# Delegated to caps_drop.sh: verifies the live capability narrowing via
+# an unprivileged user namespace (or the full exec path under root), and
+# SKIPs cleanly where neither is available. Its own pass/fail summary is
+# printed above; here we only fold its exit status into ours.
+SCRIPT_DIR=$(dirname "$0")
+if sh "$SCRIPT_DIR/caps_drop.sh" "$BIN"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: caps_drop.sh reported a capability-drop failure"
+fi
+
 echo
 echo "Integration: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi

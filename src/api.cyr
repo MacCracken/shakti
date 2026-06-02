@@ -53,7 +53,8 @@ enum EvalOff {
     EV_POLICY = 40;
     EV_ERROR_CODE = 48;
     EV_ERROR_MSG = 56;
-    EV_SZ = 64;
+    EV_CAPABILITIES = 64;
+    EV_SZ = 72;
 }
 
 fn eval_new() {
@@ -66,6 +67,8 @@ fn eval_new() {
     store64(e + EV_POLICY, 0);
     store64(e + EV_ERROR_CODE, SHK_OK);
     store64(e + EV_ERROR_MSG, "");
+    # Capability set of the matched rule (0 = none → full-uid drop).
+    store64(e + EV_CAPABILITIES, 0);
     return e;
 }
 
@@ -77,6 +80,7 @@ fn eval_environment(e) { return load64(e + EV_ENV); }
 fn eval_policy(e) { return load64(e + EV_POLICY); }
 fn eval_error_code(e) { return load64(e + EV_ERROR_CODE); }
 fn eval_error_msg(e) { return load64(e + EV_ERROR_MSG); }
+fn eval_capabilities(e) { return load64(e + EV_CAPABILITIES); }
 
 # Build a joined "command args..." cstr from an argv vec.
 fn _shk_join_command(argv) {
@@ -253,6 +257,8 @@ groups, command_argv) {
     var rule_ra = authz_aux(authz);
     store64(e + EV_AUTHORIZED, 1);
     store64(e + EV_REQUIRE_AUTH, rule_ra);
+    # Carry the matched rule's capability set to the exec path (ADR-007).
+    store64(e + EV_CAPABILITIES, authz_caps(authz));
 
     # Effective require-auth accounts for AuthMode::Skip
     var mode = cfg_auth_mode(config);

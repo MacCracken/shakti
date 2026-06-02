@@ -57,6 +57,38 @@ fn t_evaluate_authorized_with_auth() {
     assert_eq(eval_require_auth(eval), 1, "policy says require_auth");
 }
 
+# ── capability threading (ADR-007) ────────────────────
+
+fn _cap_policy() {
+    var s = "[defaults]\nrequire_auth = false\n[[rules]]\nuser = \"net\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\"]\ncapabilities = [\"CAP_NET_BIND_SERVICE\"]\n";
+    return parse_policy(s, strlen(s));
+}
+
+fn t_evaluate_threads_capabilities() {
+    # The matched rule's capability set must reach the Evaluation so the
+    # exec path can drop to it instead of full root.
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _cap_policy(), "net", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    var caps = eval_capabilities(eval);
+    assert_eq(caps != 0, 1, "capabilities surfaced (non-null)");
+    assert_eq(vec_len(caps), 1, "one capability threaded through");
+    assert_eq(caps_parse_set(caps), 1024, "resolves to CAP_NET_BIND_SERVICE mask");
+}
+
+fn t_evaluate_default_no_capabilities() {
+    # A rule without a capabilities field threads an empty set → mask 0
+    # → the full-uid drop path is taken (no behavioural change).
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "deploy", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    var caps = eval_capabilities(eval);
+    assert_eq(caps != 0, 1, "empty set is a real (non-null) vec");
+    assert_eq(caps_parse_set(caps), 0, "empty set resolves to mask 0 (full uid)");
+}
+
 # HOST DEPENDENCY: evaluate_with_policy resolves the command against
 # the real filesystem (resolve_command) BEFORE the authorization
 # check, so the target binary must exist and be executable on the
@@ -162,6 +194,8 @@ fn main() {
     test_group("evaluate_with_policy");
     t_evaluate_nopasswd();
     t_evaluate_authorized_with_auth();
+    t_evaluate_threads_capabilities();
+    t_evaluate_default_no_capabilities();
     t_evaluate_denied();
     t_evaluate_invalid_username();
     t_evaluate_invalid_command();

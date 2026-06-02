@@ -1,0 +1,281 @@
+# caps.cyr — Linux capability name/bit mapping and set construction
+#
+# Foundation for per-rule capability-based privilege (ADR-007). This
+# module is PURE: name↔bit lookup and bitmask construction only. The
+# syscall plumbing that actually drops privilege (capset/prctl in
+# _exec_target) builds on the constants and the mask produced here.
+#
+# Capability bit numbers are a stable kernel ABI; values verified against
+# <linux/capability.h> (CAP_LAST_CAP = 40 as of Linux 6.x). prctl/capset
+# constants verified against <linux/prctl.h> and asm/unistd_64.h.
+
+# ── Syscall numbers (x86_64) ────────────────────
+# Not in the stdlib syscall tables; defined locally, as timestamp.cyr
+# does for SYS_LSTAT. (aarch64: capget=90, capset=91.)
+var SYS_CAPGET = 125;
+var SYS_CAPSET = 126;
+
+# ── prctl options / capset version ────────────────────
+var PR_SET_KEEPCAPS = 8;
+var PR_CAPBSET_DROP = 24;
+var PR_CAP_AMBIENT = 47;
+var PR_CAP_AMBIENT_RAISE = 2;
+var PR_CAP_AMBIENT_LOWER = 3;
+var PR_CAP_AMBIENT_CLEAR_ALL = 4;
+
+# _LINUX_CAPABILITY_VERSION_3 — 64-bit (2x u32) capability sets.
+var LINUX_CAPABILITY_VERSION_3 = 537396514;   # 0x20080522
+
+# ── Capability bit numbers ────────────────────
+enum Cap {
+    CAP_CHOWN = 0;
+    CAP_DAC_OVERRIDE = 1;
+    CAP_DAC_READ_SEARCH = 2;
+    CAP_FOWNER = 3;
+    CAP_FSETID = 4;
+    CAP_KILL = 5;
+    CAP_SETGID = 6;
+    CAP_SETUID = 7;
+    CAP_SETPCAP = 8;
+    CAP_LINUX_IMMUTABLE = 9;
+    CAP_NET_BIND_SERVICE = 10;
+    CAP_NET_BROADCAST = 11;
+    CAP_NET_ADMIN = 12;
+    CAP_NET_RAW = 13;
+    CAP_IPC_LOCK = 14;
+    CAP_IPC_OWNER = 15;
+    CAP_SYS_MODULE = 16;
+    CAP_SYS_RAWIO = 17;
+    CAP_SYS_CHROOT = 18;
+    CAP_SYS_PTRACE = 19;
+    CAP_SYS_PACCT = 20;
+    CAP_SYS_ADMIN = 21;
+    CAP_SYS_BOOT = 22;
+    CAP_SYS_NICE = 23;
+    CAP_SYS_RESOURCE = 24;
+    CAP_SYS_TIME = 25;
+    CAP_SYS_TTY_CONFIG = 26;
+    CAP_MKNOD = 27;
+    CAP_LEASE = 28;
+    CAP_AUDIT_WRITE = 29;
+    CAP_AUDIT_CONTROL = 30;
+    CAP_SETFCAP = 31;
+    CAP_MAC_OVERRIDE = 32;
+    CAP_MAC_ADMIN = 33;
+    CAP_SYSLOG = 34;
+    CAP_WAKE_ALARM = 35;
+    CAP_BLOCK_SUSPEND = 36;
+    CAP_AUDIT_READ = 37;
+    CAP_PERFMON = 38;
+    CAP_BPF = 39;
+    CAP_CHECKPOINT_RESTORE = 40;
+    CAP_LAST_CAP = 40;
+}
+
+# ── caps_name_to_bit ────────────────────
+# Map a kernel capability name ("CAP_NET_BIND_SERVICE") to its bit
+# number (0..CAP_LAST_CAP). Returns 0 - 1 for an unrecognised name —
+# callers MUST treat that as a hard policy error (fail closed).
+fn caps_name_to_bit(name) {
+    if (streq(name, "CAP_CHOWN") == 1) { return CAP_CHOWN; }
+    if (streq(name, "CAP_DAC_OVERRIDE") == 1) { return CAP_DAC_OVERRIDE; }
+    if (streq(name, "CAP_DAC_READ_SEARCH") == 1) { return CAP_DAC_READ_SEARCH; }
+    if (streq(name, "CAP_FOWNER") == 1) { return CAP_FOWNER; }
+    if (streq(name, "CAP_FSETID") == 1) { return CAP_FSETID; }
+    if (streq(name, "CAP_KILL") == 1) { return CAP_KILL; }
+    if (streq(name, "CAP_SETGID") == 1) { return CAP_SETGID; }
+    if (streq(name, "CAP_SETUID") == 1) { return CAP_SETUID; }
+    if (streq(name, "CAP_SETPCAP") == 1) { return CAP_SETPCAP; }
+    if (streq(name, "CAP_LINUX_IMMUTABLE") == 1) { return CAP_LINUX_IMMUTABLE; }
+    if (streq(name, "CAP_NET_BIND_SERVICE") == 1) { return CAP_NET_BIND_SERVICE; }
+    if (streq(name, "CAP_NET_BROADCAST") == 1) { return CAP_NET_BROADCAST; }
+    if (streq(name, "CAP_NET_ADMIN") == 1) { return CAP_NET_ADMIN; }
+    if (streq(name, "CAP_NET_RAW") == 1) { return CAP_NET_RAW; }
+    if (streq(name, "CAP_IPC_LOCK") == 1) { return CAP_IPC_LOCK; }
+    if (streq(name, "CAP_IPC_OWNER") == 1) { return CAP_IPC_OWNER; }
+    if (streq(name, "CAP_SYS_MODULE") == 1) { return CAP_SYS_MODULE; }
+    if (streq(name, "CAP_SYS_RAWIO") == 1) { return CAP_SYS_RAWIO; }
+    if (streq(name, "CAP_SYS_CHROOT") == 1) { return CAP_SYS_CHROOT; }
+    if (streq(name, "CAP_SYS_PTRACE") == 1) { return CAP_SYS_PTRACE; }
+    if (streq(name, "CAP_SYS_PACCT") == 1) { return CAP_SYS_PACCT; }
+    if (streq(name, "CAP_SYS_ADMIN") == 1) { return CAP_SYS_ADMIN; }
+    if (streq(name, "CAP_SYS_BOOT") == 1) { return CAP_SYS_BOOT; }
+    if (streq(name, "CAP_SYS_NICE") == 1) { return CAP_SYS_NICE; }
+    if (streq(name, "CAP_SYS_RESOURCE") == 1) { return CAP_SYS_RESOURCE; }
+    if (streq(name, "CAP_SYS_TIME") == 1) { return CAP_SYS_TIME; }
+    if (streq(name, "CAP_SYS_TTY_CONFIG") == 1) { return CAP_SYS_TTY_CONFIG; }
+    if (streq(name, "CAP_MKNOD") == 1) { return CAP_MKNOD; }
+    if (streq(name, "CAP_LEASE") == 1) { return CAP_LEASE; }
+    if (streq(name, "CAP_AUDIT_WRITE") == 1) { return CAP_AUDIT_WRITE; }
+    if (streq(name, "CAP_AUDIT_CONTROL") == 1) { return CAP_AUDIT_CONTROL; }
+    if (streq(name, "CAP_SETFCAP") == 1) { return CAP_SETFCAP; }
+    if (streq(name, "CAP_MAC_OVERRIDE") == 1) { return CAP_MAC_OVERRIDE; }
+    if (streq(name, "CAP_MAC_ADMIN") == 1) { return CAP_MAC_ADMIN; }
+    if (streq(name, "CAP_SYSLOG") == 1) { return CAP_SYSLOG; }
+    if (streq(name, "CAP_WAKE_ALARM") == 1) { return CAP_WAKE_ALARM; }
+    if (streq(name, "CAP_BLOCK_SUSPEND") == 1) { return CAP_BLOCK_SUSPEND; }
+    if (streq(name, "CAP_AUDIT_READ") == 1) { return CAP_AUDIT_READ; }
+    if (streq(name, "CAP_PERFMON") == 1) { return CAP_PERFMON; }
+    if (streq(name, "CAP_BPF") == 1) { return CAP_BPF; }
+    if (streq(name, "CAP_CHECKPOINT_RESTORE") == 1) { return CAP_CHECKPOINT_RESTORE; }
+    return 0 - 1;
+}
+
+# ── caps_bit_to_name ────────────────────
+# Reverse map, for audit logging. Returns "" for an out-of-range bit.
+fn caps_bit_to_name(bit) {
+    if (bit == CAP_CHOWN) { return "CAP_CHOWN"; }
+    if (bit == CAP_DAC_OVERRIDE) { return "CAP_DAC_OVERRIDE"; }
+    if (bit == CAP_DAC_READ_SEARCH) { return "CAP_DAC_READ_SEARCH"; }
+    if (bit == CAP_FOWNER) { return "CAP_FOWNER"; }
+    if (bit == CAP_FSETID) { return "CAP_FSETID"; }
+    if (bit == CAP_KILL) { return "CAP_KILL"; }
+    if (bit == CAP_SETGID) { return "CAP_SETGID"; }
+    if (bit == CAP_SETUID) { return "CAP_SETUID"; }
+    if (bit == CAP_SETPCAP) { return "CAP_SETPCAP"; }
+    if (bit == CAP_LINUX_IMMUTABLE) { return "CAP_LINUX_IMMUTABLE"; }
+    if (bit == CAP_NET_BIND_SERVICE) { return "CAP_NET_BIND_SERVICE"; }
+    if (bit == CAP_NET_BROADCAST) { return "CAP_NET_BROADCAST"; }
+    if (bit == CAP_NET_ADMIN) { return "CAP_NET_ADMIN"; }
+    if (bit == CAP_NET_RAW) { return "CAP_NET_RAW"; }
+    if (bit == CAP_IPC_LOCK) { return "CAP_IPC_LOCK"; }
+    if (bit == CAP_IPC_OWNER) { return "CAP_IPC_OWNER"; }
+    if (bit == CAP_SYS_MODULE) { return "CAP_SYS_MODULE"; }
+    if (bit == CAP_SYS_RAWIO) { return "CAP_SYS_RAWIO"; }
+    if (bit == CAP_SYS_CHROOT) { return "CAP_SYS_CHROOT"; }
+    if (bit == CAP_SYS_PTRACE) { return "CAP_SYS_PTRACE"; }
+    if (bit == CAP_SYS_PACCT) { return "CAP_SYS_PACCT"; }
+    if (bit == CAP_SYS_ADMIN) { return "CAP_SYS_ADMIN"; }
+    if (bit == CAP_SYS_BOOT) { return "CAP_SYS_BOOT"; }
+    if (bit == CAP_SYS_NICE) { return "CAP_SYS_NICE"; }
+    if (bit == CAP_SYS_RESOURCE) { return "CAP_SYS_RESOURCE"; }
+    if (bit == CAP_SYS_TIME) { return "CAP_SYS_TIME"; }
+    if (bit == CAP_SYS_TTY_CONFIG) { return "CAP_SYS_TTY_CONFIG"; }
+    if (bit == CAP_MKNOD) { return "CAP_MKNOD"; }
+    if (bit == CAP_LEASE) { return "CAP_LEASE"; }
+    if (bit == CAP_AUDIT_WRITE) { return "CAP_AUDIT_WRITE"; }
+    if (bit == CAP_AUDIT_CONTROL) { return "CAP_AUDIT_CONTROL"; }
+    if (bit == CAP_SETFCAP) { return "CAP_SETFCAP"; }
+    if (bit == CAP_MAC_OVERRIDE) { return "CAP_MAC_OVERRIDE"; }
+    if (bit == CAP_MAC_ADMIN) { return "CAP_MAC_ADMIN"; }
+    if (bit == CAP_SYSLOG) { return "CAP_SYSLOG"; }
+    if (bit == CAP_WAKE_ALARM) { return "CAP_WAKE_ALARM"; }
+    if (bit == CAP_BLOCK_SUSPEND) { return "CAP_BLOCK_SUSPEND"; }
+    if (bit == CAP_AUDIT_READ) { return "CAP_AUDIT_READ"; }
+    if (bit == CAP_PERFMON) { return "CAP_PERFMON"; }
+    if (bit == CAP_BPF) { return "CAP_BPF"; }
+    if (bit == CAP_CHECKPOINT_RESTORE) { return "CAP_CHECKPOINT_RESTORE"; }
+    return "";
+}
+
+# ── caps_parse_set ────────────────────
+# Fold a vec of capability-name cstrings into a single i64 bitmask
+# (bit n set ⇒ capability n granted). Returns 0 - 1 if ANY name is
+# unrecognised — fail closed: a policy naming a bogus cap is rejected
+# wholesale rather than silently granting a subset.
+fn caps_parse_set(names) {
+    var mask = 0;
+    var n = vec_len(names);
+    var i = 0;
+    while (i < n) {
+        var bit = caps_name_to_bit(vec_get(names, i));
+        if (bit < 0) { return 0 - 1; }
+        mask = mask | (1 << bit);
+        i = i + 1;
+    }
+    return mask;
+}
+
+# ── caps_mask_lo / caps_mask_hi ────────────────────
+# Split the i64 mask into the two u32 words the capset(2) v3 data
+# structure expects: lo = caps 0..31, hi = caps 32..63.
+fn caps_mask_lo(mask) { return mask & 4294967295; }
+fn caps_mask_hi(mask) { return (mask >> 32) & 4294967295; }
+
+# ── Syscall plumbing (privilege drop) ────────────────────
+# These perform the actual capset(2)/prctl(2) calls used by the
+# capability-aware exec path (ADR-007). All are return-checked by the
+# caller and fail closed — a negative return must abort before execve.
+
+# caps_keepcaps(on): retain the permitted set across a setuid() away
+# from uid 0. Must be called BEFORE setuid. on=1 enable, 0 disable.
+fn caps_keepcaps(on) { return sys_prctl(PR_SET_KEEPCAPS, on, 0, 0, 0); }
+
+# caps_capset(mask): set effective = permitted = inheritable = mask for
+# the calling thread (pid 0) via the v3 (64-bit) capset interface.
+# Inheritable is set so the caps can subsequently be raised into the
+# ambient set. Returns the syscall result (0 ok, negative errno).
+fn caps_capset(mask) {
+    var hdr = alloc(8);
+    if (hdr == 0) { return 0 - 1; }
+    store32(hdr + 0, LINUX_CAPABILITY_VERSION_3);
+    store32(hdr + 4, 0);                 # pid 0 = calling thread
+    var data = alloc(24);
+    if (data == 0) { return 0 - 1; }
+    var lo = caps_mask_lo(mask);
+    var hi = caps_mask_hi(mask);
+    # data[0] = caps 0..31: effective, permitted, inheritable
+    store32(data + 0, lo);
+    store32(data + 4, lo);
+    store32(data + 8, lo);
+    # data[1] = caps 32..63
+    store32(data + 12, hi);
+    store32(data + 16, hi);
+    store32(data + 20, hi);
+    return syscall(SYS_CAPSET, hdr, data);
+}
+
+# caps_bset_drop_complement(mask): drop from the bounding set every
+# capability NOT in mask. Must run while CAP_SETPCAP is still in the
+# effective set (i.e. as root, before capset narrows it). Prevents the
+# target — and any setuid/file-cap binary it execs — from regaining a
+# dropped cap. Returns 0 on success, or the first negative prctl result.
+fn caps_bset_drop_complement(mask) {
+    var c = 0;
+    while (c <= CAP_LAST_CAP) {
+        if ((mask & (1 << c)) == 0) {
+            var r = sys_prctl(PR_CAPBSET_DROP, c, 0, 0, 0);
+            if (r < 0) { return r; }
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# caps_ambient_raise_set(mask): raise each capability in mask into the
+# ambient set, which is the set preserved across execve of an ordinary
+# (non-setuid, no-file-caps) binary. Each cap must already be in
+# permitted ∩ inheritable (caps_capset establishes that). Returns 0 on
+# success, or the first negative prctl result.
+fn caps_ambient_raise_set(mask) {
+    var c = 0;
+    while (c <= CAP_LAST_CAP) {
+        if ((mask & (1 << c)) != 0) {
+            var r = sys_prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, c, 0, 0);
+            if (r < 0) { return r; }
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# ── caps_describe ────────────────────
+# Human-readable cstr for the audit trail: a comma-separated list of the
+# capability names in mask, or "ALL" for the empty set (full-uid drop —
+# today's behaviour). Returned buffer is null-terminated (str_data of a
+# built Str), safe to pass as an audit_log reason.
+fn caps_describe(mask) {
+    if (mask == 0) { return "ALL"; }
+    var sb = str_builder_new();
+    var c = 0;
+    var first = 1;
+    while (c <= CAP_LAST_CAP) {
+        if ((mask & (1 << c)) != 0) {
+            if (first == 0) { str_builder_add_cstr(sb, ","); }
+            str_builder_add_cstr(sb, caps_bit_to_name(c));
+            first = 0;
+        }
+        c = c + 1;
+    }
+    return str_data(str_builder_build(sb));
+}

@@ -35,6 +35,20 @@ to cyrius's per-arch `SysNr` enum (v5.4.11 expanded it significantly)
 or add a shakti-side arch selector mirroring cyrius's
 `lib/syscalls.cyr` pattern.
 
+`src/caps.cyr` (ADR-007) hand-declares `SYS_CAPGET = 125` /
+`SYS_CAPSET = 126` (x86_64; aarch64 is 90/91). Same cross-arch caveat.
+
+### Linux capability ABI
+
+`src/caps.cyr` pins the `CAP_*` bit table to `CAP_LAST_CAP = 40`
+(`CAP_CHECKPOINT_RESTORE`, the last cap as of Linux 6.x) and uses
+`_LINUX_CAPABILITY_VERSION_3` (`0x20080522` = 537396514) for `capset(2)`.
+Capability bit numbers are a stable kernel ABI; the watch item is purely
+*additive* — a future kernel introducing `CAP_<41+>` would need a table
+bump (and a name↔bit/`caps_describe` entry) before policies could name
+it. Ambient capabilities require Linux ≥ 4.3; `CAP_BPF`/`CAP_PERFMON`/
+`CAP_CHECKPOINT_RESTORE` require ≥ 5.8. No drift risk on existing names.
+
 ### `/etc/passwd` + `/etc/group` format
 
 `src/identity.cyr` parses both directly (colon-delimited,

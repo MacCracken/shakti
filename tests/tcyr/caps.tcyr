@@ -1,0 +1,95 @@
+# caps.tcyr — tests for src/caps.cyr
+#
+# Pure name↔bit mapping and mask construction. No privilege required —
+# the live capset/prctl drop is verified by a root-capable integration
+# job, not here.
+
+include "src/lib.cyr"
+
+fn t_name_to_bit_known() {
+    assert_eq(caps_name_to_bit("CAP_CHOWN"), 0, "CAP_CHOWN is bit 0");
+    assert_eq(caps_name_to_bit("CAP_SETPCAP"), 8, "CAP_SETPCAP is bit 8");
+    assert_eq(caps_name_to_bit("CAP_NET_BIND_SERVICE"), 10,
+    "CAP_NET_BIND_SERVICE is bit 10");
+    assert_eq(caps_name_to_bit("CAP_MAC_OVERRIDE"), 32, "CAP_MAC_OVERRIDE is bit 32");
+    assert_eq(caps_name_to_bit("CAP_CHECKPOINT_RESTORE"), 40,
+    "CAP_CHECKPOINT_RESTORE is bit 40 (CAP_LAST_CAP)");
+}
+
+fn t_name_to_bit_unknown() {
+    # Fail closed: unknown/empty/wrong-case names must return 0 - 1.
+    assert_eq(caps_name_to_bit("CAP_BOGUS"), 0 - 1, "unknown cap name rejected");
+    assert_eq(caps_name_to_bit(""), 0 - 1, "empty cap name rejected");
+    assert_eq(caps_name_to_bit("CAP_NET_BIND_SERVICE "), 0 - 1,
+    "trailing space rejected (exact match only)");
+    assert_eq(caps_name_to_bit("net_bind_service"), 0 - 1, "lowercase rejected");
+}
+
+fn t_bit_to_name_roundtrip() {
+    assert_eq(streq(caps_bit_to_name(0), "CAP_CHOWN"), 1, "bit 0 -> CAP_CHOWN");
+    assert_eq(streq(caps_bit_to_name(40), "CAP_CHECKPOINT_RESTORE"), 1,
+    "bit 40 -> CAP_CHECKPOINT_RESTORE");
+    # Round-trip a mid-table name through both directions.
+    var b = caps_name_to_bit("CAP_SYS_ADMIN");
+    assert_eq(streq(caps_bit_to_name(b), "CAP_SYS_ADMIN"), 1, "CAP_SYS_ADMIN round-trips");
+    assert_eq(streq(caps_bit_to_name(41), ""), 1, "out-of-range bit -> empty");
+}
+
+fn t_parse_set() {
+    # Empty set -> mask 0 (the full-uid default path).
+    var empty = vec_new();
+    assert_eq(caps_parse_set(empty), 0, "empty names -> mask 0");
+
+    # Two caps -> OR of their bits. NET_BIND_SERVICE(10)=1024, NET_RAW(13)=8192.
+    var v = vec_new();
+    vec_push(v, "CAP_NET_BIND_SERVICE");
+    vec_push(v, "CAP_NET_RAW");
+    assert_eq(caps_parse_set(v), 9216, "two caps OR to 1024|8192=9216");
+
+    # Any bad name fails the whole set closed.
+    var bad = vec_new();
+    vec_push(bad, "CAP_NET_BIND_SERVICE");
+    vec_push(bad, "CAP_NONSENSE");
+    assert_eq(caps_parse_set(bad), 0 - 1, "one bad name fails the set closed");
+}
+
+fn t_mask_split() {
+    # CAP_NET_BIND_SERVICE(10) lives in the low word.
+    var lo_set = 1 << 10;
+    assert_eq(caps_mask_lo(lo_set), 1024, "low-word cap in lo");
+    assert_eq(caps_mask_hi(lo_set), 0, "low-word cap absent from hi");
+
+    # CAP_MAC_OVERRIDE(32) lives in the high word (bit 0 of hi).
+    var hi_set = 1 << 32;
+    assert_eq(caps_mask_lo(hi_set), 0, "high-word cap absent from lo");
+    assert_eq(caps_mask_hi(hi_set), 1, "high-word cap is bit 0 of hi");
+}
+
+fn t_describe() {
+    # Empty set = full uid drop = "ALL" in the audit trail.
+    assert_eq(streq(caps_describe(0), "ALL"), 1, "mask 0 -> ALL");
+    # Single cap.
+    assert_eq(streq(caps_describe(1 << 10), "CAP_NET_BIND_SERVICE"), 1,
+    "single cap describes by name");
+    # Multiple caps, comma-joined in bit order.
+    var m = (1 << 10) | (1 << 13);
+    assert_eq(streq(caps_describe(m), "CAP_NET_BIND_SERVICE,CAP_NET_RAW"), 1,
+    "two caps comma-joined in bit order");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("caps name/bit/mask");
+    t_name_to_bit_known();
+    t_name_to_bit_unknown();
+    t_bit_to_name_roundtrip();
+    t_parse_set();
+    t_mask_split();
+    t_describe();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

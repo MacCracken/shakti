@@ -54,6 +54,18 @@
 - [x] `scripts/version-bump.sh` for version-surface lockstep; `cyrius.lock`
       committed
 
+## Completed (v0.5)
+
+- [x] Real PAM authentication via `unix_chkpwd(8)` (ADR-006); `/usr/bin/su`
+      demoted to helper-missing fallback
+- [x] Capability-based privilege — per-rule `capabilities = [...]` drops
+      the target to a chosen `CAP_*` set instead of full root (ADR-007).
+      `src/caps.cyr` (name↔bit table, capset/prctl plumbing); bounding-set
+      drop → KEEPCAPS → uid drop → capset → ambient raise in
+      `_exec_target`. Opt-in, non-breaking; audited as `CAPS=`. Live drop
+      verified by `tests/integration/caps_drop.sh` (unprivileged userns +
+      root tiers).
+
 ## Cyrius port regressions (close before v1.0)
 
 Tracked here to keep them visible against the v1.0 criteria below.
@@ -102,44 +114,6 @@ the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.31.
   `SSL_connect` deadlock fix, so any HTTPS path inherits the
   helper-trust requirement above. Defer until bite 2b's threat
   model is settled.
-
-## Next up (queued for 0.3.1, paused)
-
-**Capability-based privilege (CAP_* instead of full root)** —
-parked at the start of 0.3.1 on 2026-04-28 to be resumed in a
-fresh session. Drop to a per-rule capability set at exec instead
-of uid=0; uses `prctl(PR_CAPBSET_DROP, …)` + `capset(2)` direct
-syscalls. No fdlopen dependency.
-
-When resuming, the open design questions are:
-
-- **Policy schema extension**: where does the capability set
-  live? Per-rule (`capabilities = ["CAP_NET_BIND_SERVICE", …]`)
-  is the obvious shape. New field is non-breaking — rules
-  without it fall back to today's full-uid drop.
-- **Compatibility default**: a rule with no `capabilities`
-  field must keep working exactly as today (full-uid drop). The
-  cap-drop path is opt-in per rule.
-- **Capability name → bit mapping**: hand-rolled table in
-  shakti vs reaching for a stdlib lookup. Linux capability
-  names are stable; embed the table in `src/main.cyr` or split
-  into `src/caps.cyr`.
-- **Audit log shape**: emit the dropped cap set in
-  `audit_log` so postmortem/forensics can see what the target
-  ran with. Extends the existing audit format.
-- **Test coverage**: verify cap drop via `/proc/self/status`
-  CapBnd / CapEff lines after a synthetic exec (or via a
-  dedicated test binary that prints its caps). Distro-portable.
-
-Pre-flight before opening 0.3.1:
-
-1. Confirm cyrius pin is current (we shipped 5.7.33 in 0.2.3).
-2. Re-read `src/main.cyr:_exec_target` — the cap-drop must
-   happen between `setuid` and `execve`, after the
-   getuid/getgid post-condition checks. Order matters.
-3. Sanity-check `prctl` / `capset` syscall numbers in
-   `lib/syscalls_x86_64_linux.cyr` (or define locally if
-   absent, like `SYS_LSTAT` in `timestamp.cyr`).
 
 ## Future (v0.3+)
 

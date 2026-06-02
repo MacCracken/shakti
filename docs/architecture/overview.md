@@ -109,8 +109,35 @@ run_as = "root"               # Target user ("*" for any)
 commands = ["/usr/bin/systemctl restart *"]  # Allowed commands (empty = all)
 deny_commands = ["/usr/bin/systemctl stop firewall"]  # Deny overrides allow
 require_auth = true           # Per-rule auth override
+capabilities = []             # Optional CAP_* set (empty = full root). See below.
 description = "Service management"
 ```
+
+### Capability-based privilege (ADR-007)
+
+By default an authorized command runs as `run_as` with the **full** root
+capability set. A rule may instead grant a least-privilege subset via the
+optional `capabilities` list:
+
+```toml
+[[rules]]
+user = "deploy"
+run_as = "nginx"
+commands = ["/usr/sbin/nginx"]
+capabilities = ["CAP_NET_BIND_SERVICE"]   # bind :80/:443 — nothing else
+```
+
+- Names are the kernel's `CAP_*` spelling (uppercase). An **unknown name
+  is a hard error** — shakti refuses to exec (fail closed).
+- **Absent or empty `capabilities` = today's behaviour exactly** (drop to
+  `run_as` with the full set). The cap path is strictly opt-in.
+- At exec, shakti narrows the bounding set, preserves the chosen caps
+  across the uid drop (`PR_SET_KEEPCAPS` + `capset`), and raises them into
+  the **ambient** set so they survive `execve`. The granted set is
+  recorded in the audit trail as `CAPS=…` (`CAPS=ALL` for the full set).
+- Kernel notes: ambient capabilities need Linux ≥ 4.3; `CAP_BPF`/
+  `CAP_PERFMON`/`CAP_CHECKPOINT_RESTORE` need ≥ 5.8. The bit table pins
+  `CAP_LAST_CAP = 40`.
 
 ### Command Patterns
 

@@ -108,6 +108,34 @@ fn t_parse_empty() {
     assert_eq(vec_len(policy_rules(p)), 0, "no rules");
 }
 
+# ── capabilities field (ADR-007) ────────────────────
+
+fn t_capabilities_absent_is_empty() {
+    # No capabilities field = empty set = full-uid drop (default path).
+    var p = _parse_src("[[rules]]\nuser = \"bob\"\ncommands = [\"/usr/bin/id\"]\n");
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(vec_len(rule_capabilities(r)), 0, "absent capabilities -> empty vec");
+}
+
+fn t_capabilities_parsed() {
+    var p = _parse_src("[[rules]]\nuser = \"net\"\ncommands = [\"/usr/bin/nginx\"]\ncapabilities = [\"CAP_NET_BIND_SERVICE\", \"CAP_NET_RAW\"]\n");
+    var r = vec_get(policy_rules(p), 0);
+    var caps = rule_capabilities(r);
+    assert_eq(vec_len(caps), 2, "two capability names parsed");
+    assert_eq(streq(vec_get(caps, 0), "CAP_NET_BIND_SERVICE"), 1, "first cap name");
+    assert_eq(streq(vec_get(caps, 1), "CAP_NET_RAW"), 1, "second cap name");
+    # The names resolve to a mask via caps_parse_set (foundation module).
+    assert_eq(caps_parse_set(caps), 9216, "names resolve to bitmask 1024|8192");
+}
+
+fn t_capabilities_bad_name_fails_closed() {
+    # A bogus name parses as a string but caps_parse_set rejects the set.
+    var p = _parse_src("[[rules]]\nuser = \"x\"\ncapabilities = [\"CAP_NONSENSE\"]\n");
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(caps_parse_set(rule_capabilities(r)), 0 - 1,
+    "unknown cap name fails the set closed");
+}
+
 fn t_parse_include_dir() {
     var p = _parse_src("[defaults]\ninclude_dir = \"/etc/agnos/sudoers.d\"\n[[rules]]\nuser = \"a\"\n");
     var d = policy_defaults(p);
@@ -314,6 +342,9 @@ fn main() {
     t_timestamp_ttl_overflow_rejected();
     t_parse_minimal_rule();
     t_parse_empty();
+    t_capabilities_absent_is_empty();
+    t_capabilities_parsed();
+    t_capabilities_bad_name_fails_closed();
     t_parse_include_dir();
 
     test_group("check_authorization");

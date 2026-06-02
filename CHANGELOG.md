@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-01
+
+Least-privilege execution: a policy rule can now run an authorized command
+with a chosen Linux capability set instead of full root. Minor bump for a
+new, opt-in, non-breaking policy field (`capabilities`); existing policies
+behave exactly as before.
+
+### Added
+
+- **Capability-based privilege — per-rule `CAP_*` drop (ADR-007).** A
+  policy rule may now carry an optional `capabilities` list, e.g.
+  `capabilities = ["CAP_NET_BIND_SERVICE"]`. When present, the authorized
+  command runs as the target user with **exactly** those Linux
+  capabilities instead of the full root set — least-privilege for the
+  highest-value path in the tool. New `src/caps.cyr` provides the
+  verified `CAP_*` bit table (0–40, `CAP_LAST_CAP = 40`), name↔bit
+  mapping, and the `capset(2)`/`prctl(2)` plumbing.
+- **Audit records the granted capability set.** The `AUDIT_COMMAND` line
+  now carries `CAPS=<comma-separated names>` (or `CAPS=ALL` for the
+  full-uid default), so forensics can see what the target ran with.
+- **`tests/integration/caps_drop.sh` + `cap_probe.cyr`** — verify the
+  live drop by reading `/proc/self/status` Cap* fields. Runs in an
+  unprivileged user namespace (real CI coverage of the capset/ambient/
+  bounding wrappers) or the full exec path under root; SKIPs otherwise.
+
+### Changed
+
+- **`_exec_target` gained a capability-aware drop sequence.** For a
+  non-empty cap set: drop the bounding set of every unwanted cap (while
+  `CAP_SETPCAP` is still effective as root) → `PR_SET_KEEPCAPS` →
+  `setgroups`/`setgid`/`setuid` → `capset` (permitted=inheritable=
+  effective=set) → raise each into the ambient set → `execve`. An empty
+  cap set takes the **unchanged** full-uid drop path — no behavioural
+  change for existing policies. Every new syscall is return-checked and
+  fails closed (abort before `execve`).
+- The policy `Rule` struct and `Evaluation` gained a capabilities field;
+  the matched rule's set threads through `check_authorization` →
+  `evaluate()` → `_exec_target`. An unknown capability name is a hard
+  policy error — shakti refuses to exec (fail closed) before prompting
+  for a password.
+
+### Security
+
+- **Least-privilege execution.** Rules can now grant a single capability
+  (e.g. `CAP_NET_BIND_SERVICE`) instead of full uid-0, shrinking the
+  blast radius of an authorized command. Opt-in and non-breaking: a rule
+  without `capabilities` drops to the target uid with the full set
+  exactly as before. The bounding-set narrowing also blocks the target
+  (and anything it execs) from re-acquiring dropped caps via setuid or
+  file-capability binaries.
+
 ## [0.4.2] - 2026-06-01
 
 Closes the headline cyrius-port regression: real PAM authentication is
