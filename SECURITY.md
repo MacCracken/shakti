@@ -10,8 +10,9 @@ Please report security issues privately via GitHub Security Advisories or email 
 
 | Version | Supported | Notes |
 |---|---|---|
-| 0.2.x   | Yes | Cyrius port (current). Real PAM regressed; su shim in use until cyrius 5.5.x ships the NSS dispatch bootstrap. |
-| 0.1.x   | No  | Rust build, preserved in `rust-old/` for reference. No security backports. |
+| 0.6.x   | Yes | Current. Real PAM auth (`unix_chkpwd`, ADR-006), capability drop (ADR-007), session logging (ADR-008), SELinux/AppArmor exec contexts (ADR-009). |
+| 0.3.x–0.5.x | No | Superseded Cyrius-port releases; upgrade to 0.6.x. |
+| 0.1.x–0.2.x | No  | Early Rust build (`rust-old/`) and initial Cyrius port. No security backports. |
 
 ## Security Properties
 

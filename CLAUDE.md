@@ -7,7 +7,7 @@
 - **Type**: Cyrius binary + library (ships `build/shakti` CLI + `dist/shakti.cyr` consumer bundle)
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer 0.1.0
+- **Version**: SemVer — current in `VERSION` (0.6.2), the single source of truth
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

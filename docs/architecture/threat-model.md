@@ -11,8 +11,13 @@ escalation tool. It accepts a command from an unprivileged caller,
 authorises it against a TOML policy, authenticates the caller, and
 execs the command as a target user (typically root).
 
-This document covers shakti 0.2.x (cyrius port). The Rust 0.1.x line
-is preserved in `rust-old/` for reference and is not in scope.
+This document covers shakti 0.6.x (cyrius port). The T1–T11 vectors below
+were written against the core auth/policy/exec surface; the newer
+exec-path features — capability drop (ADR-007), session-logging PTY relay
+(ADR-008), and SELinux/AppArmor exec contexts (ADR-009) — are reviewed in
+[`../audit/2026-06-02-internal-review.md`](../audit/2026-06-02-internal-review.md)
+and get a dedicated CVE/0-day pass in 0.7.0. The Rust 0.1.x line is
+preserved in `rust-old/` for reference and is not in scope.
 
 ## Attacker classes
 
@@ -316,11 +321,15 @@ are real usage and do expose this.
    the `legacy_tiocsti` sysctl or `LEGACY_TIOCSTI` build option.
    Document this in the operations guide; rely on it as a kernel-
    level backstop.
-2. Longer-term: allocate a new pty per invocation via `openpty` +
-   proxy I/O. Tracked under "Session logging / I/O recording" in
-   v0.3+ roadmap. PTY allocation naturally defeats TIOCSTI
-   injection because the parent never holds a writable fd against
-   the caller's original tty.
+2. **Shipped (0.5.1, ADR-008):** when a rule sets `log_session`, shakti
+   allocates a per-invocation PTY and relays I/O, which naturally
+   defeats TIOCSTI injection — the target runs on a fresh slave and the
+   parent holds the master, never a writable fd against the caller's
+   original tty. This mitigation applies **only when session logging is
+   enabled**; the default direct-exec path still shares the caller's tty,
+   so residual-risk #1 (the `legacy_tiocsti` sysctl backstop) remains the
+   mitigation there. Making the PTY path unconditional is a candidate for
+   the 0.7.0 CVE-audit review.
 
 **Test coverage**: none today (the CVE class has no unit-testable
 equivalent without pty setup). Absence-of-mitigation documented in
@@ -340,18 +349,19 @@ OpenDoas CVE-2023-28339 row.
   is the target user's responsibility.
 - **Kernel-level confidentiality.** Against A6 no userspace
   mitigation applies.
-- **Replay of the full command history.** Audit logs record the
-  authorised command (`src/audit.cyr:audit_log`), not stdin/stdout
-  of the resulting process. Session logging is a v0.3+ roadmap item.
+- **Replay of the full command history (by default).** Audit logs
+  always record the authorised command (`src/audit.cyr:audit_log`). Full
+  stdin/stdout transcript recording is available per-rule via
+  `log_session` / `log_input` (ADR-008, shipped 0.5.1/0.6.2) but is
+  off by default.
 
 ## Open gaps (tracked)
 
 | Gap | Where tracked | Blocks v1.0? |
 |---|---|---|
-| LDAP / sssd group resolution | `docs/development/roadmap.md` port-regressions + [ADR-005](../adr/005-identity-backend-port-to-cyrius.md) | Yes — revisit cyrius 5.5.x |
-| Real PAM via `dlopen("libpam.so.0")` | port-regressions + `src/auth.cyr` comment | Yes — revisit cyrius 5.5.x |
-| External security audit | roadmap v1.0 Criteria | Yes — this document is input |
-| Consumer integration (argonaut/agnoshi/daimon/ark) | roadmap v1.0 Criteria | Yes — consumer-side work |
+| LDAP / sssd **group** resolution (`getgrouplist` via `fdlopen`) | roadmap 0.6.3 + [ADR-005](../adr/005-identity-backend-port-to-cyrius.md); blocked on the cyrius helper-trust proposal | Maybe — descopable from v1.0 |
+| Internal CVE/0-day audit | roadmap 0.7.0 + [v1.0 Criteria] | Yes — this document is input |
+| Consumer integration (argonaut/agnoshi/daimon/ark) | roadmap 0.9.x + v1.0 Criteria | Yes — consumer-side work |
 
 ## Related documents
 

@@ -19,7 +19,7 @@ to track. Update when shakti cuts a new tag.
 ```toml
 [deps.shakti]
 git = "https://github.com/MacCracken/shakti.git"
-tag = "0.4.0"
+tag = "0.6.2"
 modules = ["dist/shakti.cyr"]
 
 # shakti's audit path uses sakshi; Cyrius does not resolve transitive
@@ -83,16 +83,20 @@ matters — each module references symbols defined in earlier modules.
 ```toml
 [deps.shakti]
 git = "https://github.com/MacCracken/shakti.git"
-tag = "0.4.0"
+tag = "0.6.2"
 modules = [
     "src/lib.cyr",        # SHK_ERR_* enum + constants (REQUIRED first;
-                          # includes lib/sakshi.cyr → needs [deps.sakshi])
+                          # includes lib/sakshi.cyr + lib/pam.cyr → needs
+                          # [deps.sakshi] and "pam" in [deps].stdlib)
     "src/validate.cyr",   # validate_username, validate_command, command_matches
+    # "src/caps.cyr"      # capability name↔bit + capset/prctl drop — pull if needed
+    # "src/session.cyr"   # PTY relay + session/keystroke log — pull if needed
+    # "src/lsm.cyr"       # SELinux/AppArmor exec-context — pull if needed
     "src/env.cyr",        # is_unsafe_env, is_safe_env, sanitize_environment
     # "src/identity.cyr"  # uid/gid/group lookups — pull if needed
     # "src/timestamp.cyr" # credential cache — pull if needed
     # "src/audit.cyr"     # audit_log (uses sakshi_*) — pull if needed
-    # "src/auth.cyr"      # pam/su shim — pull if needed
+    # "src/auth.cyr"      # PAM (unix_chkpwd) + su fallback — pull if needed
     # "src/policy.cyr"    # parse_policy, check_authorization, lint_policy
     # "src/api.cyr"       # ShaktiConfig / Evaluation / evaluate()
 ]

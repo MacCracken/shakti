@@ -11,11 +11,20 @@ the original Rust implementation preserved in `rust-old/`.
 
 ## Security Properties
 
+- Real PAM authentication via Linux-PAM's `unix_chkpwd(8)` helper
+  (honours `/etc/shadow` + NSS: files, LDAP, SSSD); `su` only as a
+  helper-missing fallback
 - All attempts (success and failure) are audit-logged
 - Environment is sanitized before exec (LD_*, BASH_FUNC_*, interpreter
   injection vectors all blocked)
 - Command arguments are validated against shell metacharacters
 - Policy supports per-user, per-group, and per-command rules
+- **Capability-based privilege** — a rule can grant a specific `CAP_*`
+  set instead of full root (least-privilege drop)
+- **Session logging** — optional per-rule PTY transcript of the session,
+  with opt-in keystroke capture (typed secrets redacted)
+- **SELinux / AppArmor exec contexts** — a rule can launch the target
+  under a specific MAC domain/profile
 - Per-TTY credential cache with root-ownership + symlink tamper checks
 - Timestamps use `O_NOFOLLOW` to close the create-open TOCTOU window
 - Rate-limited authentication (max 3 attempts)
@@ -27,8 +36,10 @@ cyrius build src/main.cyr build/shakti
 cyrius distlib                  # regenerate dist/shakti.cyr bundle
 ```
 
-Requires [Cyrius 5.4.11](https://github.com/MacCracken/cyrius) or later.
-Stdlib is vendored under `lib/` for reproducible builds.
+Requires the [Cyrius](https://github.com/MacCracken/cyrius) toolchain
+pinned in `cyrius.cyml` (`[package].cyrius`). The stdlib and the `sakshi`
+dep are resolved into `lib/` by `cyrius deps` (gitignored, not vendored);
+`cyrius.lock` pins their hashes for reproducible builds.
 
 ## Install
 
@@ -59,10 +70,13 @@ src/
   main.cyr        entry point: CLI parsing, signal masking, exec flow
   lib.cyr         shared error codes, constants, module includes
   validate.cyr    username / command validation + pattern matching
+  caps.cyr        Linux capability name↔bit table + capset/prctl drop
+  session.cyr     PTY allocation, raw termios, poll relay + session log
+  lsm.cyr         SELinux / AppArmor exec-context (/proc/self/attr/exec)
   env.cyr         environment sanitization (unsafe/safe lists)
   timestamp.cyr   credential cache with TTY isolation + O_NOFOLLOW
-  audit.cyr      audit logging (file + stderr)
-  auth.cyr        authentication (su shim; PAM stubbed for future dynlib work)
+  audit.cyr       audit logging (file + stderr)
+  auth.cyr        authentication (PAM via unix_chkpwd; su fallback)
   policy.cyr      mini-TOML parser + authz engine + linter
   api.cyr         consumer API (ShaktiConfig / evaluate)
 ```

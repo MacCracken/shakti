@@ -29,7 +29,7 @@ User space (untrusted)
 [Authorization engine]     -- per-user/group/command rules with deny-first eval
   |
   v
-[Authentication]           -- /usr/bin/su shim, rate-limited to 3 attempts (real PAM blocked on cyrius NSS bootstrap, tracked for cyrius 5.5.x)
+[Authentication]           -- real PAM via unix_chkpwd(8) (ADR-006), rate-limited to 3 attempts; /usr/bin/su only as a helper-missing fallback
   |
   v
 [Timestamp cache]          -- per-TTY, root-owned, symlink-resistant, O_NOFOLLOW
@@ -58,7 +58,7 @@ As a setuid-root binary, Shakti is a high-value attack target. The security desi
 | Password echo on terminal | termios `ECHO` bit cleared via `TCSETS`, original saved and restored |
 | Path traversal in usernames | `/`, `..`, null byte, empty rejection in `validate_username` |
 | Policy file tampering | Root-ownership check (stat uid == 0), world-writable mode bit rejected |
-| Group membership resolution | `/etc/group` parsing in `src/identity.cyr` (local-files only for 0.2.x). LDAP / sssd support via `getgrouplist(3)` is tracked for cyrius 5.5.x when the NSS dispatch bootstrap lands. |
+| Group membership resolution | `/etc/group` parsing in `src/identity.cyr` (local files). LDAP / sssd group resolution via `getgrouplist(3)` needs `fdlopen` and is tracked for 0.6.3, blocked on the cyrius setuid-safe helper-trust proposal. (Auth-side NSS already works via `unix_chkpwd`, ADR-006.) |
 
 ## Authentication Flow
 
@@ -71,9 +71,10 @@ As a setuid-root binary, Shakti is a high-value attack target. The security desi
 6. If auth required and no valid timestamp:
    a. Mask SIGINT/SIGTSTP/SIGQUIT
    b. Prompt for password (termios ECHO cleared)
-   c. `authenticate(user, password)` — `pam_authenticate` returns
-      `SHK_ERR_PAM_UNAVAILABLE` (stub), caller falls through to
-      `su_authenticate`, which pipes password to `/usr/bin/su -c true`
+   c. `authenticate(user, password)` — `pam_authenticate` forks
+      `unix_chkpwd(8)` (ADR-006) to verify against `/etc/shadow`; only
+      if the helper is missing does it return `SHK_ERR_PAM_UNAVAILABLE`
+      and fall through to `su_authenticate` (`/usr/bin/su -c true`)
    d. `memset(&pbuf, 0, PW_BUF_CAP)` between attempts;
       `secret var` zeroise fires on every function-return path
    e. Restore signal mask
@@ -251,7 +252,10 @@ Files in `include_dir` (e.g., `/etc/agnos/sudoers.d/*.toml`) are loaded in lexic
 | `identity.cyr` | ✓ | `/etc/passwd` / `/etc/group` lookups (uid → name, name → uid, group membership, supplementary GID vector) |
 | `timestamp.cyr` | ✓ | Credential caching with per-TTY isolation and tamper detection |
 | `audit.cyr` | ✓ | File-locked audit trail (`/var/log/agnos/sudo.log`) plus structured, level-filterable logging via sakshi (ALLOWED→INFO, DENIED/failure→WARN) |
-| `auth.cyr` | ✓ | `/usr/bin/su` shim; PAM stub reserved for cyrius-5.5.x libpam binding |
+| `auth.cyr` | ✓ | Real PAM auth via `unix_chkpwd(8)` (ADR-006); `/usr/bin/su` as helper-missing fallback |
+| `caps.cyr` | ✓ | Linux capability name↔bit table + `capset`/`prctl` least-privilege drop (ADR-007) |
+| `session.cyr` | ✓ | PTY allocation, raw termios, `poll` I/O relay, session/keystroke log writer (ADR-008) |
+| `lsm.cyr` | ✓ | SELinux / AppArmor exec-context transitions via `/proc/self/attr/exec` (ADR-009) |
 | `policy.cyr` | ✓ | TOML parsing, fragment loading (`include_dir`), authorization engine, policy linter |
 | `api.cyr` | ✓ | High-level consumer API (`ShaktiConfig`, `Evaluation`, `evaluate`, `evaluate_with_policy`) |
 | `main.cyr` | ✗ | CLI entry — argument parsing, interactive password prompt, exec drop, `syscall(SYS_EXIT, rc)`. Binary-only; excluded from the bundle. |
@@ -323,13 +327,13 @@ the git tag would otherwise compile against stale symbols.
 
 The bundle is not versioned separately from the source — shakti's
 `VERSION` file drives everything. Consumers pin the git tag (e.g.
-`tag = "0.2.0"`), which is cut from the same commit that carries
+`tag = "0.6.2"`), which is cut from the same commit that carries
 the matching `dist/shakti.cyr`.
 
-Cyrius toolchain floor for consumers of 0.2.x: **5.4.11+**
-(`secret var` from v5.3.5, arch-dispatched `Stat` enum from v5.4.11,
-hashmap stdlib from v5.1.x, `${file:VERSION}` cyml expansion from
-v5.1.13).
+Cyrius toolchain for consumers: the version pinned in `cyrius.cyml`
+(`[package].cyrius`, currently **6.0.33**). Consumers must also carry
+`"pam"` in their stdlib list and declare the `sakshi` dep (see
+README § Dependencies).
 
 ## Consumer API
 
