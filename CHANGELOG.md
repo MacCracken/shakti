@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-02
+
+Session logging: shakti can now record a PTY transcript of a privileged
+session, opt-in per rule. The default (non-logged) exec path is unchanged.
+Also bumps the cyrius toolchain pin 6.0.31 → 6.0.32 (point release; no
+source changes).
+
+### Added
+
+- **Session logging — per-rule PTY I/O recording (ADR-008).** With
+  `log_session = true` (a `[defaults]` value rules inherit, or a per-rule
+  override), shakti records a transcript of the privileged session. New
+  `src/session.cyr` provides PTY allocation (`/dev/ptmx`, `TIOCGPTN`/
+  `TIOCSPTLCK`), a raw-termios transform, a `poll(2)` relay loop, and the
+  log header/footer writers. Policy gains `log_session` (tri-state
+  per-rule: unset = inherit) and `session_log_dir`
+  (default `/var/log/agnos/sessions`).
+- **Audit `SESSION_LOG=on|off`** on the `AUDIT_COMMAND` record.
+- **`tests/integration/session_log.sh` + `session_probe.cyr`** — verify
+  the relay + log capture unprivileged (PTY probe) and, under root, the
+  full shakti logged-exec path.
+
+### Changed
+
+- **The exec path forks when session logging is enabled.** `_exec_target`
+  was refactored: the privilege drop is now a shared `_drop_privileges()`
+  helper. The default (non-logged) path is **unchanged** — a direct,
+  in-process `execve`, no fork, no PTY. The logged path forks: the child
+  drops privilege and execs the target on a PTY slave
+  (`setsid`/`TIOCSCTTY`/`dup2`), while shakti stays alive as the relay
+  parent, tees output to the transcript, and exits with the child's
+  status.
+- **Cyrius toolchain pin 6.0.31 → 6.0.32.** Point-release bump aligning
+  the pin with the current toolchain (the auto-updated 6.0.32 was drifting
+  against the 6.0.31 pin). No source changes; `cyrius.lock` regenerated.
+
+### Security
+
+- **Session transcripts are written fail-closed to a trusted location.**
+  `session_log_dir` must be root-owned and not world-writable (the same
+  check `load_policy` applies); the per-session file is opened
+  `O_EXCL|O_NOFOLLOW`, mode `0600`. If logging is requested but the log
+  cannot be created securely, shakti refuses to run rather than execute
+  unlogged. The relay parent retains root only to write the root-owned
+  transcript and copy the PTY; it never interprets the byte stream.
+
 ## [0.5.0] - 2026-06-01
 
 Least-privilege execution: a policy rule can now run an authorized command

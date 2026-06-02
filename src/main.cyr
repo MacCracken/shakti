@@ -274,25 +274,38 @@ fn _check_policy(policy) {
 
 # ── exec target command ────────────────────
 
-fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid, cap_mask) {
-    # Close fds > stderr to prevent leaking inherited fds to child
-    syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # close_range is available on modern kernels; ignore error
+# Marshal a vec of cstr pointers into a freshly-allocated, NULL-terminated
+# pointer array suitable for execve's argv/envp.
+fn _build_ptr_array(vec) {
+    var n = vec_len(vec);
+    var arr = alloc((n + 1) * 8);
+    var i = 0;
+    while (i < n) {
+        store64(arr + i * 8, vec_get(vec, i));
+        i = i + 1;
+    }
+    store64(arr + n * 8, 0);
+    return arr;
+}
 
+# Drop privilege to the target user, applying the optional capability set
+# (ADR-007). Runs either in the shakti process (direct exec) or in the
+# forked child (session-logged exec). On ANY failure it hard-exits
+# (sys_exit) rather than returning — a partial drop must never reach
+# execve. Returns 0 on full success. The caller does close_range + execve.
+fn _drop_privileges(target_user, target_uid, target_gid, cap_mask) {
     # Populate supplementary groups for the target user (initgroups
     # parity). Always at least the primary GID; /etc/group entries
-    # naming target_user are appended, deduplicated.
-    # MAX_SUPP_GIDS == 256 — well above any realistic per-user count
-    # while keeping the on-stack array small (1 KiB).
+    # naming target_user are appended, deduplicated. 256 is well above
+    # any realistic per-user count while keeping the array small (1 KiB).
     var supp_gids[1024];
     var ngids = identity_lookup_gids(target_user, target_gid, &supp_gids, 256);
 
     # Capability mode (ADR-007): cap_mask != 0 means the matched rule
-    # named a capability set, so the target runs with exactly those caps
-    # instead of full root. The bounding-set narrowing happens HERE,
+    # named a capability set. The bounding-set narrowing happens HERE,
     # before the uid drop, because PR_CAPBSET_DROP needs CAP_SETPCAP in
     # the effective set (which we have as root) — and PR_SET_KEEPCAPS
     # must precede setuid so the permitted set survives the uid change.
-    # Empty mask falls through to the unchanged full-uid drop below.
     if (cap_mask != 0) {
         if (caps_bset_drop_complement(cap_mask) < 0) {
             _write_line(2, "shakti: capability bounding-set drop failed; aborting\n");
@@ -304,15 +317,9 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
         }
     }
 
-    # setgroups → setgid → setuid (must be in this order).
-    # Every drop is return-checked: any failure (SELinux/AppArmor/
-    # seccomp/NO_NEW_PRIVS denial, exotic capability state) means
-    # the process retains its pre-drop uid. If we proceeded to
-    # execve, the target would run with elevated privileges — the
-    # exact outcome the drop was supposed to prevent. Abort with a
-    # hard exit on any negative return from the drop syscalls, and
-    # verify the post-condition via getuid/getgid after setuid
-    # nominally succeeds.
+    # setgroups → setgid → setuid (must be in this order). Every drop is
+    # return-checked: any failure means the process retains its pre-drop
+    # uid; proceeding to execve would leak privilege, so abort hard.
     if (sys_setgroups(ngids, &supp_gids) < 0) {
         _write_line(2, "shakti: setgroups failed; aborting to avoid privilege leak\n");
         sys_exit(1);
@@ -325,8 +332,8 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
         _write_line(2, "shakti: setuid failed; aborting to avoid privilege leak\n");
         sys_exit(1);
     }
-    # Post-condition verify — defence against kernel states where
-    # the drop returns 0 but the uid/gid didn't actually change.
+    # Post-condition verify — defence against kernel states where the
+    # drop returns 0 but the uid/gid didn't actually change.
     if (sys_getuid() != target_uid) {
         _write_line(2, "shakti: getuid post-check != target; aborting\n");
         sys_exit(1);
@@ -336,13 +343,10 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
         sys_exit(1);
     }
 
-    # Capability mode (ADR-007), part 2 — now that we are the target uid
-    # with the permitted set preserved (KEEPCAPS), narrow permitted /
-    # inheritable / effective to exactly the requested caps, then raise
-    # each into the ambient set so it survives execve of an ordinary
-    # binary. Fail closed: a partial capability state must never reach
-    # the target. We are already non-root here, so aborting cannot leak
-    # more privilege than the target uid itself.
+    # Capability mode part 2 — now the target uid with permitted preserved
+    # (KEEPCAPS): narrow permitted/inheritable/effective to the requested
+    # caps, then raise each into the ambient set so it survives execve.
+    # We are already non-root here, so aborting cannot leak more privilege.
     if (cap_mask != 0) {
         if (caps_capset(cap_mask) < 0) {
             _write_line(2, "shakti: capset failed; aborting to avoid privilege leak\n");
@@ -353,31 +357,127 @@ fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid
             sys_exit(1);
         }
     }
+    return 0;
+}
 
-    # Build null-terminated argv array
-    var ac = vec_len(argv_vec);
-    var argv_arr = alloc((ac + 1) * 8);
-    var i = 0;
-    while (i < ac) {
-        store64(argv_arr + i * 8, vec_get(argv_vec, i));
-        i = i + 1;
-    }
-    store64(argv_arr + ac * 8, 0);
+# Direct exec path (no session logging): drop privilege in-process and
+# execve, replacing shakti. Unchanged behaviour from before ADR-008.
+fn _exec_target(resolved, argv_vec, env_vec, target_user, target_uid, target_gid, cap_mask) {
+    # Close fds > stderr to prevent leaking inherited fds to the child.
+    syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # available on modern kernels; ignore error
 
-    # Build null-terminated envp array
-    var ec = vec_len(env_vec);
-    var envp_arr = alloc((ec + 1) * 8);
-    i = 0;
-    while (i < ec) {
-        store64(envp_arr + i * 8, vec_get(env_vec, i));
-        i = i + 1;
-    }
-    store64(envp_arr + ec * 8, 0);
+    _drop_privileges(target_user, target_uid, target_gid, cap_mask);
 
+    var argv_arr = _build_ptr_array(argv_vec);
+    var envp_arr = _build_ptr_array(env_vec);
     sys_execve(resolved, argv_arr, envp_arr);
     file_write(2, "shakti: exec failed\n", 20);
     sys_exit(127);
     return 0;
+}
+
+# Open a per-session transcript file under `dir` (ADR-008). The directory
+# must be root-owned and not world-writable — the same trust check
+# load_policy applies — or we refuse (return a negative fd): a transcript
+# an unprivileged user could read or pre-create is worthless. The file is
+# <ts>-<caller>-<pid>.log, opened O_EXCL|O_NOFOLLOW (no clobber, no symlink
+# follow), mode 0600. Returns the fd, or a negative value on any error.
+fn _open_session_log(dir, caller) {
+    var stbuf = alloc(STAT_BUFSZ);
+    if (stbuf == 0) { return 0 - 1; }
+    if (syscall(SYS_STAT, dir, stbuf) < 0) { return 0 - 1; }
+    var mode = load32(stbuf + STAT_MODE);
+    if ((mode & S_IFMT) != S_IFDIR) { return 0 - 1; }
+    if (load32(stbuf + STAT_UID) != 0) { return 0 - 1; }
+    if ((mode & 2) != 0) { return 0 - 1; }          # world-writable → refuse
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, dir);
+    str_builder_add_cstr(sb, "/");
+    str_builder_add_int(sb, _shk_now_secs());
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_cstr(sb, caller);
+    str_builder_add_cstr(sb, "-");
+    str_builder_add_int(sb, syscall(SYS_GETPID));
+    str_builder_add_cstr(sb, ".log");
+    var path = str_data(str_builder_build(sb));
+
+    return syscall(SYS_OPEN, path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+}
+
+# Session-logged exec path (ADR-008). shakti stays alive as the relay
+# parent; a forked child drops privilege and execs the target on a PTY
+# slave, while the parent tees the terminal output to `logfd`. Returns the
+# child's exit status for shk_run to propagate. `logfd` must already be
+# open (see _open_session_log); the caller owns closing it on early error.
+fn _exec_target_logged(resolved, argv_vec, env_vec, target_user, target_uid,
+target_gid, cap_mask, logfd, caller) {
+    var start = _shk_now_secs();
+    session_log_header(logfd, caller, target_user, resolved, _shk_tty_session(), start);
+
+    var master = session_openpt();
+    if (master < 0) {
+        _write_line(2, "shakti: could not allocate pty for session logging; aborting\n");
+        return 1;
+    }
+
+    var pid = sys_fork();
+    if (pid < 0) {
+        _write_line(2, "shakti: fork failed; aborting\n");
+        return 1;
+    }
+
+    if (pid == 0) {
+        # Child: become a session leader, adopt the slave as controlling
+        # tty, wire it to stdio, shed every other fd (master, logfd), then
+        # drop privilege and exec.
+        sys_setsid();
+        var slave = session_open_slave(master);
+        if (slave < 0) { sys_exit(127); }
+        syscall(SYS_IOCTL, slave, TIOCSCTTY, 0);
+        sys_dup2(slave, 0);
+        sys_dup2(slave, 1);
+        sys_dup2(slave, 2);
+        syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # drops master, extra slave, logfd
+        _drop_privileges(target_user, target_uid, target_gid, cap_mask);
+        var argv_arr = _build_ptr_array(argv_vec);
+        var envp_arr = _build_ptr_array(env_vec);
+        sys_execve(resolved, argv_arr, envp_arr);
+        sys_exit(127);
+    }
+
+    # Parent: put the real terminal in raw mode so keystrokes pass through
+    # to the master verbatim, relay until the child closes the slave, then
+    # restore the terminal and reap.
+    var orig = alloc(TERMIOS_SIZE);
+    var have_tty = 0;
+    if (orig != 0) {
+        if (session_tty_get(0, orig) >= 0) {
+            have_tty = 1;
+            var raw = alloc(TERMIOS_SIZE);
+            if (raw != 0) {
+                session_termios_make_raw(orig, raw);
+                session_tty_set(0, raw);
+            }
+        }
+    }
+
+    session_relay(master, logfd);
+
+    var stbuf = alloc(8);
+    if (stbuf != 0) { store64(stbuf, 0); }
+    sys_waitpid(pid, stbuf, 0);
+    var status = 0;
+    if (stbuf != 0) { status = load32(stbuf); }
+
+    if (have_tty == 1) { session_tty_set(0, orig); }
+
+    var rc = 1;
+    if (WIFEXITED(status) == 1) { rc = WEXITSTATUS(status); }
+    session_log_footer(logfd, rc, start, _shk_now_secs());
+    sys_close(logfd);
+    sys_close(master);
+    return rc;
 }
 
 # ── shk_run ────────────────────
@@ -505,14 +605,6 @@ fn shk_run() {
         }
     }
 
-    # Audit the granted capability set so forensics can see what the
-    # target ran with (ADR-007). Empty set logs as CAPS=ALL (full uid).
-    var areason = str_builder_new();
-    str_builder_add_cstr(areason, "authorized ; CAPS=");
-    str_builder_add_cstr(areason, caps_describe(cap_mask));
-    audit_log(AUDIT_COMMAND, caller, target,
-    eval_resolved_command(eval), 1, str_data(str_builder_build(areason)));
-
     # Resolve target uid / gid
     var t_uid_ptr = alloc(8);
     var t_gid_ptr = alloc(8);
@@ -524,6 +616,39 @@ fn shk_run() {
     }
     var target_uid = load64(t_uid_ptr);
     var target_gid = load64(t_gid_ptr);
+
+    # Open the session transcript if the matched rule requested logging
+    # (ADR-008). Fail closed: if logging is required but the log can't be
+    # securely created, refuse rather than run the command unlogged.
+    var do_log = eval_log_session(eval);
+    var logfd = 0 - 1;
+    if (do_log == 1) {
+        logfd = _open_session_log(def_session_log_dir(policy_defaults(policy)), caller);
+        if (logfd < 0) {
+            audit_log(AUDIT_COMMAND, caller, target, eval_resolved_command(eval), 0,
+            "session logging required but log could not be opened");
+            _write_line(2, "shakti: cannot open session log (session_log_dir must be root-owned); refusing\n");
+            return 1;
+        }
+    }
+
+    # Audit the authorized command, the granted capability set (ADR-007),
+    # and whether the session is being recorded (ADR-008). Empty cap set
+    # logs as CAPS=ALL (full uid).
+    var areason = str_builder_new();
+    str_builder_add_cstr(areason, "authorized ; CAPS=");
+    str_builder_add_cstr(areason, caps_describe(cap_mask));
+    str_builder_add_cstr(areason, " ; SESSION_LOG=");
+    if (do_log == 1) { str_builder_add_cstr(areason, "on"); }
+    else { str_builder_add_cstr(areason, "off"); }
+    audit_log(AUDIT_COMMAND, caller, target,
+    eval_resolved_command(eval), 1, str_data(str_builder_build(areason)));
+
+    if (do_log == 1) {
+        return _exec_target_logged(eval_resolved_command(eval),
+        load64(cli + CLI_ARGV), eval_environment(eval),
+        target, target_uid, target_gid, cap_mask, logfd, caller);
+    }
 
     _exec_target(eval_resolved_command(eval),
     load64(cli + CLI_ARGV), eval_environment(eval),

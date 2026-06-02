@@ -38,6 +38,15 @@ or add a shakti-side arch selector mirroring cyrius's
 `src/caps.cyr` (ADR-007) hand-declares `SYS_CAPGET = 125` /
 `SYS_CAPSET = 126` (x86_64; aarch64 is 90/91). Same cross-arch caveat.
 
+`src/session.cyr` (ADR-008) hand-declares `SYS_POLL = 7` (x86_64; aarch64
+has no `poll`, uses `ppoll = 73`) and the PTY/termios ioctls
+(`TIOCGPTN`/`TIOCSPTLCK`/`TIOCSCTTY`/`TIOCGWINSZ`/`TIOCSWINSZ`,
+`TCGETS`/`TCSETS`). ioctl numbers and the termios struct layout
+(`c_lflag @12`, `c_cc @17`) are a stable kernel ABI; cross-arch is the
+only caveat (the `_IOC`-encoded `TIOCGPTN`/`TIOCSPTLCK` values differ on
+MIPS/PowerPC/Alpha, not on x86_64/arm). All constants were verified
+against the kernel headers via cpp before use.
+
 ### Linux capability ABI
 
 `src/caps.cyr` pins the `CAP_*` bit table to `CAP_LAST_CAP = 40`

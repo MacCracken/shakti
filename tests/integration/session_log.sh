@@ -58,6 +58,56 @@ assert_contains "writes session footer"     "session end status=0"
 
 rm -f "$LOG"
 
+# ── Root tier: the FULL shakti logged exec path ──────────────────────────
+# Under real root, drive shakti end-to-end with a log_session policy and
+# confirm it writes a transcript containing the command's output. Needs a
+# root-owned policy + session dir, so it only runs as root.
+BIN="${1:-build/shakti}"
+if [ "$(id -u)" = "0" ] && [ -x "$BIN" ]; then
+    GREP=""
+    for cand in /usr/bin/grep /bin/grep; do [ -x "$cand" ] && { GREP="$cand"; break; }; done
+    if [ -n "$GREP" ]; then
+        TARGET="root"
+        id nobody >/dev/null 2>&1 && TARGET="nobody"
+        DIR="$(mktemp -d /tmp/shakti-sess-XXXXXX)"
+        POL="$(mktemp /tmp/shakti-sesspol-XXXXXX.toml)"
+        chown root:root "$DIR" "$POL"
+        chmod 0700 "$DIR"
+        chmod 0644 "$POL"
+        cat > "$POL" <<EOF
+[defaults]
+require_auth = false
+audit_log = false
+log_session = true
+session_log_dir = "$DIR"
+
+[[rules]]
+user = "root"
+run_as = "$TARGET"
+commands = ["$GREP *"]
+require_auth = false
+EOF
+        # echo a marker via grep so it lands in the transcript.
+        echo "SESSION-MARKER-9137" > "$DIR/marker.txt"
+        chmod 0644 "$DIR/marker.txt"
+        "$BIN" -p "$POL" -u "$TARGET" -- "$GREP" SESSION-MARKER "$DIR/marker.txt" </dev/null >/dev/null 2>&1
+        transcript=$(cat "$DIR"/*.log 2>/dev/null)
+        case "$transcript" in
+            *"SESSION-MARKER-9137"*) PASS=$((PASS + 1)) ;;
+            *)
+                FAIL=$((FAIL + 1))
+                echo "FAIL: root full-path transcript missing command output"
+                echo "  transcript: ${transcript:-<none>}"
+                ;;
+        esac
+        case "$transcript" in
+            *"=== shakti session "*) PASS=$((PASS + 1)) ;;
+            *) FAIL=$((FAIL + 1)); echo "FAIL: root full-path transcript missing header" ;;
+        esac
+        rm -rf "$DIR" "$POL"
+    fi
+fi
+
 echo "session_log: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
 exit 0

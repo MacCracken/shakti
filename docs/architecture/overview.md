@@ -101,6 +101,8 @@ audit_log = true              # Log all commands
 env_keep = ["EDITOR"]         # Additional safe env vars to preserve
 max_command_len = 4096        # Max total command length in bytes
 include_dir = "/etc/agnos/sudoers.d"  # Optional fragment directory
+log_session = false           # Record an I/O transcript per session (default off)
+session_log_dir = "/var/log/agnos/sessions"  # Where transcripts are written
 
 [[rules]]
 user = "admin"                # Username or "*" for all
@@ -138,6 +140,38 @@ capabilities = ["CAP_NET_BIND_SERVICE"]   # bind :80/:443 — nothing else
 - Kernel notes: ambient capabilities need Linux ≥ 4.3; `CAP_BPF`/
   `CAP_PERFMON`/`CAP_CHECKPOINT_RESTORE` need ≥ 5.8. The bit table pins
   `CAP_LAST_CAP = 40`.
+
+### Session logging (ADR-008)
+
+With `log_session = true` (per-rule, or as a default rules inherit), shakti
+records an I/O transcript of the session:
+
+```toml
+[defaults]
+log_session = false                          # global default
+session_log_dir = "/var/log/agnos/sessions"  # must be root-owned, mode 0700
+
+[[rules]]
+user = "oncall"
+run_as = "root"
+commands = ["/bin/bash"]
+log_session = true                           # record this (per-rule override)
+```
+
+- When enabled, shakti allocates a PTY and **stays alive as a relay
+  parent**: a forked child drops privilege and `execve`s the target on the
+  PTY slave, while the parent copies terminal I/O and tees the output to a
+  transcript. When disabled (the default) shakti `execve`s directly with no
+  fork or PTY — identical to pre-0.5.1 behaviour.
+- Per rule, `log_session` is tri-state: unset inherits `[defaults]`, `true`
+  forces on, `false` forces off.
+- Transcripts are written to `session_log_dir` as
+  `<ts>-<caller>-<pid>.log`, mode `0600`. The directory **must be
+  root-owned and not world-writable** (same trust check as the policy
+  file); shakti refuses to run (fail closed) if a requested log cannot be
+  created securely. The audit record carries `SESSION_LOG=on|off`.
+- v1 records the **output** stream (what the command displayed); keystroke
+  capture is intentionally deferred (it is the more sensitive half).
 
 ### Command Patterns
 

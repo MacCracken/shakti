@@ -66,6 +66,17 @@
       verified by `tests/integration/caps_drop.sh` (unprivileged userns +
       root tiers).
 
+## Completed (v0.5.1)
+
+- [x] Session logging / I/O recording (ADR-008) — per-rule
+      `log_session` records a PTY transcript of the session.
+      `src/session.cyr` (PTY alloc, raw termios, `poll` relay, log
+      writer); exec path forks into a relay parent + privilege-dropping
+      child when enabled, unchanged direct `execve` when off. Transcripts
+      are root-owned `0600` under `session_log_dir`, fail-closed. Verified
+      by `tests/integration/session_log.sh` (unprivileged relay probe +
+      root full-path tier).
+
 ## Cyrius port regressions (close before v1.0)
 
 Tracked here to keep them visible against the v1.0 criteria below.
@@ -120,8 +131,11 @@ the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.31.
 Larger features that are NOT blocked on cyrius. Pick up in the
 order consumers demand them.
 
-- Session logging / I/O recording (openpty-based) — direct Linux
-  syscalls; no fdlopen dependency.
+- Session logging keystroke (input) capture — v1 (0.5.1) records the
+  output stream only; input capture needs a redaction design for typed
+  secrets before it ships.
+- Live `SIGWINCH` window-resize propagation during a logged session —
+  0.5.1 copies the window size at session start only.
 - SELinux / AppArmor context transitions
   (`/proc/self/attr/exec`, feature-gated by distro). Direct file
   write; no fdlopen dependency.

@@ -144,7 +144,7 @@ fi
 # ── session logging (ADR-008) ──────────────────────────
 # Delegated to session_log.sh: PTY relay + log capture via session_probe
 # (unprivileged), SKIPs where /dev/ptmx is unavailable.
-if sh "$SCRIPT_DIR/session_log.sh"; then
+if sh "$SCRIPT_DIR/session_log.sh" "$BIN"; then
     PASS=$((PASS + 1))
 else
     FAIL=$((FAIL + 1))
