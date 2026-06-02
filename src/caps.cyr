@@ -225,6 +225,22 @@ fn caps_capset(mask) {
     return syscall(SYS_CAPSET, hdr, data);
 }
 
+# Read the calling thread's current EFFECTIVE capability set via
+# capget(2), returned as a combined i64 mask (lo = caps 0..31, hi = caps
+# 32..63). Returns 0 - 1 on error. Used as a post-drop verification.
+fn caps_capget_effective() {
+    var hdr = alloc(8);
+    if (hdr == 0) { return 0 - 1; }
+    store32(hdr + 0, LINUX_CAPABILITY_VERSION_3);
+    store32(hdr + 4, 0);                 # pid 0 = calling thread
+    var data = alloc(24);
+    if (data == 0) { return 0 - 1; }
+    if (syscall(SYS_CAPGET, hdr, data) < 0) { return 0 - 1; }
+    var lo = load32(data + 0) & 4294967295;     # data[0].effective
+    var hi = load32(data + 12) & 4294967295;    # data[1].effective
+    return (hi << 32) | lo;
+}
+
 # caps_bset_drop_complement(mask): drop from the bounding set every
 # capability NOT in mask. Must run while CAP_SETPCAP is still in the
 # effective set (i.e. as root, before capset narrows it). Prevents the

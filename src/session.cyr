@@ -152,6 +152,7 @@ fn session_relay(master, logfd) {
     var buf = alloc(4096);
     if (buf == 0) { return 0 - 1; }
     var pfds = alloc(16);          # 2 pollfd structs
+    if (pfds == 0) { return 0 - 1; }
     var stdin_open = 1;
     var done = 0;
 
@@ -173,16 +174,27 @@ fn session_relay(master, logfd) {
         }
 
         var mrev = (load32(pfds + 4) >> 16) & 65535;
+        var hup = 0;
+        if ((mrev & (POLLHUP | POLLERR)) != 0) { hup = 1; }
         if ((mrev & POLLIN) != 0) {
-            var n = sys_read(master, buf, 4096);
-            if (n <= 0) { done = 1; }
-            else {
-                _session_full_write(1, buf, n);
-                if (logfd >= 0) { _session_full_write(logfd, buf, n); }
+            # When the slave is gone (HUP), drain the master fully so a
+            # final burst larger than one buffer isn't truncated from the
+            # transcript — reads return buffered data then EOF without
+            # blocking. Without HUP, read once per wake (the next poll
+            # signals more) so a blocking read can't stall the relay.
+            var reading = 1;
+            while (reading == 1) {
+                var n = sys_read(master, buf, 4096);
+                if (n <= 0) { done = 1; reading = 0; }
+                else {
+                    _session_full_write(1, buf, n);
+                    if (logfd >= 0) { _session_full_write(logfd, buf, n); }
+                    if (hup == 0) { reading = 0; }
+                }
             }
         }
         # Master closed (child exited) — stop relaying.
-        if ((mrev & (POLLHUP | POLLERR)) != 0) { done = 1; }
+        if (hup == 1) { done = 1; }
 
         if (stdin_open == 1) {
             var srev = (load32(pfds + 12) >> 16) & 65535;

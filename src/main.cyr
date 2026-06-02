@@ -24,6 +24,17 @@ include "src/cli.cyr"
 
 # ── Additional syscalls used only by the CLI ────────────────────
 var SYS_CLOSE_RANGE = 436;
+# openat/fstatat for the TOCTOU-safe session-log dir check. The stdlib
+# enum's SYS_OPENAT/SYS_NEWFSTATAT carry the aarch64 numbers (56/79);
+# x86_64 differs, so declare them locally like the other x86_64-only
+# syscalls (SYS_LSTAT etc.). AT_FDCWD/SYS numbers are declared locally
+# because the binary build doesn't see the stdlib syscalls enum here.
+var SYS_OPENAT_X64 = 257;
+var SYS_NEWFSTATAT_X64 = 262;
+var AT_FDCWD_LOCAL = 0 - 100;   # universal across arches
+var O_DIRECTORY = 65536;     # 0o200000
+var O_PATH = 2097152;        # 0o10000000
+var AT_EMPTY_PATH = 4096;    # fstatat the dirfd itself
 
 # TTY/termios constants (TCGETS, TCSETS, TERMIOS_SIZE, ECHO_FLAG) and the
 # termios layout now live in src/session.cyr (included via lib.cyr), shared
@@ -279,6 +290,10 @@ fn _check_policy(policy) {
 fn _build_ptr_array(vec) {
     var n = vec_len(vec);
     var arr = alloc((n + 1) * 8);
+    if (arr == 0) {
+        _write_line(2, "shakti: out of memory building exec arguments; aborting\n");
+        sys_exit(1);
+    }
     var i = 0;
     while (i < n) {
         store64(arr + i * 8, vec_get(vec, i));
@@ -356,6 +371,13 @@ fn _drop_privileges(target_user, target_uid, target_gid, cap_mask) {
             _write_line(2, "shakti: ambient capability raise failed; aborting\n");
             sys_exit(1);
         }
+        # Post-condition: verify the kernel actually narrowed the effective
+        # set to exactly the requested caps (mirrors the getuid/getgid
+        # post-checks). Defends against a silent partial application.
+        if (caps_capget_effective() != cap_mask) {
+            _write_line(2, "shakti: capability post-check mismatch; aborting\n");
+            sys_exit(1);
+        }
     }
     return 0;
 }
@@ -390,33 +412,42 @@ cap_mask, se_ctx, aa_prof) {
     return 0;
 }
 
-# Open a per-session transcript file under `dir` (ADR-008). The directory
-# must be root-owned and not world-writable — the same trust check
-# load_policy applies — or we refuse (return a negative fd): a transcript
-# an unprivileged user could read or pre-create is worthless. The file is
-# <ts>-<caller>-<pid>.log, opened O_EXCL|O_NOFOLLOW (no clobber, no symlink
-# follow), mode 0600. Returns the fd, or a negative value on any error.
+# Open a per-session transcript file under `dir` (ADR-008). Runs as root
+# before the privilege drop, so the directory trust check is TOCTOU- and
+# symlink-hardened: open `dir` as an O_PATH handle that refuses a symlinked
+# final component (O_NOFOLLOW) and must be a directory (O_DIRECTORY), fstat
+# the HANDLE (not a re-resolvable path string), and require it be owned by
+# root and not group/other-writable. The leaf <ts>-<caller>-<pid>.log is
+# then created RELATIVE to that validated fd via openat with
+# O_EXCL|O_NOFOLLOW (no clobber, no symlink), mode 0600 — the path string is
+# never resolved a second time. Returns the fd, or negative on any error.
 fn _open_session_log(dir, caller) {
+    var dfd = syscall(SYS_OPENAT_X64, AT_FDCWD_LOCAL, dir, O_PATH | O_DIRECTORY | O_NOFOLLOW, 0);
+    if (dfd < 0) { return 0 - 1; }
     var stbuf = alloc(STAT_BUFSZ);
-    if (stbuf == 0) { return 0 - 1; }
-    if (syscall(SYS_STAT, dir, stbuf) < 0) { return 0 - 1; }
+    if (stbuf == 0) { sys_close(dfd); return 0 - 1; }
+    if (syscall(SYS_NEWFSTATAT_X64, dfd, "", stbuf, AT_EMPTY_PATH) < 0) {
+        sys_close(dfd);
+        return 0 - 1;
+    }
     var mode = load32(stbuf + STAT_MODE);
-    if ((mode & S_IFMT) != S_IFDIR) { return 0 - 1; }
-    if (load32(stbuf + STAT_UID) != 0) { return 0 - 1; }
-    if ((mode & 2) != 0) { return 0 - 1; }          # world-writable → refuse
+    if ((mode & S_IFMT) != S_IFDIR) { sys_close(dfd); return 0 - 1; }
+    if (load32(stbuf + STAT_UID) != 0) { sys_close(dfd); return 0 - 1; }
+    if ((mode & 18) != 0) { sys_close(dfd); return 0 - 1; }   # group/other-writable → refuse
 
+    # Leaf filename only — no slashes (caller is a validated username).
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, dir);
-    str_builder_add_cstr(sb, "/");
     str_builder_add_int(sb, _shk_now_secs());
     str_builder_add_cstr(sb, "-");
     str_builder_add_cstr(sb, caller);
     str_builder_add_cstr(sb, "-");
     str_builder_add_int(sb, syscall(SYS_GETPID));
     str_builder_add_cstr(sb, ".log");
-    var path = str_data(str_builder_build(sb));
+    var fname = str_data(str_builder_build(sb));
 
-    return syscall(SYS_OPEN, path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+    var fd = syscall(SYS_OPENAT_X64, dfd, fname, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+    sys_close(dfd);
+    return fd;
 }
 
 # Session-logged exec path (ADR-008). shakti stays alive as the relay
@@ -434,24 +465,38 @@ target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
         _write_line(2, "shakti: could not allocate pty for session logging; aborting\n");
         return 1;
     }
+    # Open the slave in the PARENT (forkpty pattern). The child inherits
+    # this fd, so it is open across the whole child lifetime — meaning the
+    # master sees POLLHUP whenever the child exits, INCLUDING if the child
+    # dies during its pre-exec setup. (If only the child opened the slave,
+    # a child that failed before that open would leave the master with no
+    # slave opener and the parent's relay would block forever.)
+    var slave = session_open_slave(master);
+    if (slave < 0) {
+        _write_line(2, "shakti: could not open pty slave; aborting\n");
+        sys_close(master);
+        return 1;
+    }
 
     var pid = sys_fork();
     if (pid < 0) {
         _write_line(2, "shakti: fork failed; aborting\n");
+        sys_close(slave);
+        sys_close(master);
         return 1;
     }
 
     if (pid == 0) {
-        # Child: become a session leader, adopt the slave as controlling
-        # tty, wire it to stdio, shed every other fd (master, logfd), then
-        # drop privilege and exec.
+        # Child: become a session leader, adopt the inherited slave as
+        # controlling tty, wire it to stdio, shed every other fd (master,
+        # extra slave, logfd), then drop privilege and exec. Any failure
+        # exits 127 — the inherited slave closes on exit, HUP'ing the
+        # parent's relay.
         sys_setsid();
-        var slave = session_open_slave(master);
-        if (slave < 0) { sys_exit(127); }
         syscall(SYS_IOCTL, slave, TIOCSCTTY, 0);
-        sys_dup2(slave, 0);
-        sys_dup2(slave, 1);
-        sys_dup2(slave, 2);
+        if (sys_dup2(slave, 0) < 0) { sys_exit(127); }
+        if (sys_dup2(slave, 1) < 0) { sys_exit(127); }
+        if (sys_dup2(slave, 2) < 0) { sys_exit(127); }
         syscall(SYS_CLOSE_RANGE, 3, 0 - 1, 0);   # drops master, extra slave, logfd
         _drop_privileges(target_user, target_uid, target_gid, cap_mask);
         var argv_arr = _build_ptr_array(argv_vec);
@@ -460,6 +505,11 @@ target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
         sys_execve(resolved, argv_arr, envp_arr);
         sys_exit(127);
     }
+
+    # Parent: drop our copy of the slave so the child holds the only
+    # references — otherwise the master would never see HUP after the
+    # child exits and the relay would hang.
+    sys_close(slave);
 
     # Parent: put the real terminal in raw mode so keystrokes pass through
     # to the master verbatim, relay until the child closes the slave, then
@@ -487,8 +537,11 @@ target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
 
     if (have_tty == 1) { session_tty_set(0, orig); }
 
+    # Propagate the child's exit status faithfully: WEXITSTATUS on normal
+    # exit, 128+signal on signal death (shell/sudo convention).
     var rc = 1;
     if (WIFEXITED(status) == 1) { rc = WEXITSTATUS(status); }
+    elif (WIFSIGNALED(status) == 1) { rc = 128 + WTERMSIG(status); }
     session_log_footer(logfd, rc, start, _shk_now_secs());
     sys_close(logfd);
     sys_close(master);

@@ -16,11 +16,27 @@
 fn _selinux_exec_path() { return "/proc/self/attr/exec"; }
 fn _apparmor_exec_path() { return "/proc/self/attr/apparmor/exec"; }
 
-# Write `ctx` to the SELinux exec attribute. Returns 0 on success, or a
-# negative value if the node can't be opened or the write is rejected
-# (e.g. -EINVAL when SELinux is not the active LSM, or the context is
-# unparseable / the transition is denied).
+# Is `name` among the kernel's active LSMs (/sys/kernel/security/lsm)?
+# Returns 1 if present, 0 otherwise (including when the node is
+# unreadable). Used to ensure we only ever write a context to the node
+# owned by the LSM that actually owns it — never, e.g., AppArmor syntax
+# to SELinux's /proc/self/attr/exec.
+fn _lsm_active_has(name) {
+    var buf = alloc(256);
+    if (buf == 0) { return 0; }
+    var n = file_read_all("/sys/kernel/security/lsm", buf, 255);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    if (strstr(buf, name) >= 0) { return 1; }
+    return 0;
+}
+
+# Write `ctx` to the SELinux exec attribute (/proc/self/attr/exec).
+# Refuses (returns negative) unless SELinux is an active LSM, so a
+# selinux_context requested on a non-SELinux host fails closed cleanly
+# rather than writing to whatever owns that node. Returns 0 on success.
 fn lsm_set_selinux_exec(ctx) {
+    if (_lsm_active_has("selinux") == 0) { return 0 - 1; }
     var fd = syscall(SYS_OPEN, _selinux_exec_path(), O_WRONLY, 0);
     if (fd < 0) { return 0 - 1; }
     var n = strlen(ctx);
@@ -30,10 +46,12 @@ fn lsm_set_selinux_exec(ctx) {
     return 0;
 }
 
-# Write "exec <profile>" to the AppArmor exec attribute, trying the newer
-# /proc/self/attr/apparmor/exec node first and falling back to the legacy
-# /proc/self/attr/exec. Returns 0 on success, negative on failure.
+# Write "exec <profile>" to the AppArmor exec attribute. Refuses unless
+# AppArmor is active — which also makes the legacy /proc/self/attr/exec
+# fallback safe (on an AppArmor host that node IS AppArmor's; on a
+# SELinux host we never reach the fallback). Returns 0 on success.
 fn lsm_set_apparmor_exec(profile) {
+    if (_lsm_active_has("apparmor") == 0) { return 0 - 1; }
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "exec ");
     str_builder_add_cstr(sb, profile);

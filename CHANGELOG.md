@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-02
+
+Audit/hardening sweep over the exec-path features added in 0.5.0–0.6.0
+(capabilities, session logging, LSM contexts). Internal review (plus an
+adversarial pass over the new privilege-critical code) found and fixed the
+items below. No new features; the policy/API surface is unchanged.
+
+### Security
+
+- **Session-log directory check is now TOCTOU- and symlink-hardened.**
+  `_open_session_log` previously `stat`'d the dir (following symlinks) then
+  `open`'d a path string — a stat-then-open race, and intermediate-symlink
+  exposure, while running as root. It now opens the dir as an
+  `O_PATH|O_DIRECTORY|O_NOFOLLOW` handle, `fstat`s the *handle*, and creates
+  the transcript **relative to that fd** via `openat` (`O_EXCL|O_NOFOLLOW`,
+  0600). The path is never re-resolved.
+- **The dir trust check now rejects group-writable, not just
+  world-writable** (`mode & 0o22`) — a root-owned but group-writable
+  `session_log_dir` is no longer accepted.
+- **LSM exec-context writes are LSM-aware.** `lsm_set_selinux_exec` /
+  `lsm_set_apparmor_exec` now confirm the matching LSM is active
+  (`/sys/kernel/security/lsm`) before writing, so AppArmor syntax can
+  never be written to SELinux's `/proc/self/attr/exec` node (and a context
+  requested on a host without that LSM fails closed cleanly).
+- **Capability post-check.** After `capset` + ambient raise,
+  `_drop_privileges` reads the effective set back via `capget` and aborts
+  unless it exactly equals the requested mask — mirroring the existing
+  getuid/getgid post-checks.
+
+### Fixed
+
+- **Session-logging relay could hang if the child died during pre-exec
+  setup.** The child opened the PTY slave itself, so a failure before that
+  open left the master with no slave opener and the parent's relay blocked
+  forever. Switched to the forkpty pattern: the **parent** opens the slave
+  pre-fork (child inherits it; parent closes its copy), so the master
+  always sees `HUP` when the child exits, for any reason.
+- **x86_64 `openat`/`newfstatat` syscall numbers.** The stdlib enum
+  carries the aarch64 numbers (56/79); the new dir check needs the x86_64
+  values (257/262), now declared locally like shakti's other x86_64-only
+  syscalls.
+- **Relay could truncate the final output burst.** On the poll wake where
+  the master signals both data and `HUP`, the relay now drains the master
+  fully (safe — reads return buffered data then EOF without blocking)
+  before ending, so a large final write isn't lost from the transcript.
+- **Exit-status fidelity.** A session-logged target killed by a signal now
+  yields `128 + signum` (shell/sudo convention) instead of a flat `1`.
+- **Defensive null-checks** on the `execve` argv/envp allocation and the
+  relay pollfd buffer (consistent with the rest of the codebase).
+- `dup2`/setup failures in the session-logging child now `exit 127`
+  instead of proceeding with mis-wired stdio.
+
+### Changed
+
+- **Cyrius toolchain pin 6.0.32 → 6.0.33.** Aligns with the current
+  toolchain; no source changes. `cyrius.lock` regenerated.
+
 ## [0.6.0] - 2026-06-02
 
 Mandatory Access Control integration: a rule can launch its command under
