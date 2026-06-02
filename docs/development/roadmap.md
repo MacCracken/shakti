@@ -58,7 +58,7 @@
 
 Tracked here to keep them visible against the v1.0 criteria below.
 Each is a feature present in the Rust 0.1.x build that did not survive
-the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.3.
+the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.31.
 
 - [x] `initgroups` parity — populate target user's supplementary
       groups before privilege drop instead of `setgroups(0, NULL)`

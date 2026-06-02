@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cyrius toolchain pin 6.0.3 → 6.0.31.** Point-release bump aligning
+  the pin with the current toolchain; no breaking language change and no
+  source edits required. Eliminates the per-command "pins 6.0.3 but cycc
+  is 6.0.31 — toolchain drift" warning. `cyrius.lock` regenerated under
+  6.0.31 (the 6.0.x stdlib resolution set shifted — e.g. `toml.cyr`,
+  `regex.cyr`, `fs.cyr`, `freelist.cyr` — and is now deterministic
+  again); `dist/shakti.cyr` re-emitted (cosmetic: two blank lines
+  dropped). CI/release install the pinned version verbatim from the
+  `[package].cyrius` line, so the pin is the single source of truth.
+
 ## [0.4.0] - 2026-05-27
 
 Toolchain + ecosystem modernization, aligning shakti with its sibling
