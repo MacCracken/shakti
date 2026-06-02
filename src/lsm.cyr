@@ -68,21 +68,41 @@ fn lsm_set_apparmor_exec(profile) {
     return 0;
 }
 
-# Apply whichever exec-context fields are set (non-null, non-empty). A 0
-# pointer or empty string means "not requested" and is skipped. Returns 0
-# if every requested write succeeded (or nothing was requested), or a
-# negative value on the first failure — the caller must fail closed.
+# Apply the exec-context field(s) matching the host's ACTIVE LSM, so one
+# policy can carry both a selinux_context and an apparmor_profile and do
+# the right thing on each host (LSM-aware auto-selection, ADR-009). A 0
+# pointer or empty string means "not requested".
+#
+# Semantics:
+#   - Nothing requested → 0 (no-op).
+#   - A requested field whose LSM IS active → applied; a write failure
+#     fails closed (return negative).
+#   - A requested field whose LSM is NOT active → skipped (so a mixed-fleet
+#     policy isn't tripped by the inactive LSM's field).
+#   - Confinement requested but NO matching LSM active on this host → fail
+#     closed (return negative): the host can't honour the policy, so we
+#     refuse rather than run unconfined.
 fn lsm_apply_exec(selinux_ctx, apparmor_profile) {
-    if (selinux_ctx != 0) {
-        if (strlen(selinux_ctx) > 0) {
+    var se = 0;
+    if (selinux_ctx != 0) { if (strlen(selinux_ctx) > 0) { se = 1; } }
+    var aa = 0;
+    if (apparmor_profile != 0) { if (strlen(apparmor_profile) > 0) { aa = 1; } }
+    if (se == 0) { if (aa == 0) { return 0; } }
+
+    var applied = 0;
+    if (se == 1) {
+        if (_lsm_active_has("selinux") == 1) {
             if (lsm_set_selinux_exec(selinux_ctx) < 0) { return 0 - 1; }
+            applied = 1;
         }
     }
-    if (apparmor_profile != 0) {
-        if (strlen(apparmor_profile) > 0) {
+    if (aa == 1) {
+        if (_lsm_active_has("apparmor") == 1) {
             if (lsm_set_apparmor_exec(apparmor_profile) < 0) { return 0 - 1; }
+            applied = 1;
         }
     }
+    if (applied == 0) { return 0 - 1; }
     return 0;
 }
 

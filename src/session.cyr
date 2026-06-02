@@ -17,6 +17,12 @@ var POLLERR = 8;
 var POLLHUP = 16;
 var EINTR_ERRNO = 4;            # poll returns -EINTR on signal delivery
 
+# SIGWINCH live-resize handling via signalfd (no handler/restorer needed).
+var SIGWINCH = 28;
+var SFD_CLOEXEC_FLAG = 524288;
+var SFD_NONBLOCK_FLAG = 2048;
+var SIGINFO_SIZE = 128;         # sizeof(struct signalfd_siginfo)
+
 var TCGETS = 21505;             # 0x5401  — get termios
 var TCSETS = 21506;             # 0x5402  — set termios now
 var TIOCGPTN = 2147767344;      # 0x80045430 — get pty number (master)
@@ -139,19 +145,36 @@ fn session_copy_winsize(from_fd, to_fd) {
     return 0;
 }
 
+# Block SIGWINCH and return a signalfd that becomes readable on each
+# delivery, so the relay can propagate terminal resizes without a signal
+# handler (no x86_64 SA_RESTORER trampoline needed). Returns the fd, or a
+# negative value if setup fails — the caller degrades to start-size-only.
+# Called in the relay PARENT after the fork, so the child's signal mask
+# (inherited at fork) is unaffected and it gets normal SIGWINCH delivery.
+fn _session_sigwinch_fd() {
+    var set = alloc(8);
+    if (set == 0) { return 0 - 1; }
+    store64(set, 1 << (SIGWINCH - 1));
+    sys_sigprocmask(SIG_BLOCK, set, 0);
+    return sys_signalfd(0 - 1, set, SFD_CLOEXEC_FLAG | SFD_NONBLOCK_FLAG);
+}
+
 # Relay bytes between the real terminal (stdin fd 0 / stdout fd 1) and the
 # PTY `master`, teeing the master→stdout (command output) stream to
-# `logfd` (pass a negative fd to skip logging). Blocks until the master
-# reports EOF/HUP — i.e. the child closed the slave (exited). Returns 0.
+# `logfd` (pass a negative fd to skip logging). Also propagates terminal
+# resizes (SIGWINCH via a signalfd) so full-screen apps reflow. Blocks
+# until the master reports EOF/HUP — i.e. the child closed the slave
+# (exited). Returns 0.
 #
 # Uses poll(2). pollfd is packed as two u32s: fd at +0, (events |
 # revents<<16) at +4, so revents = high 16 bits of the +4 word.
 fn session_relay(master, logfd) {
     session_copy_winsize(0, master);
+    var winch_fd = _session_sigwinch_fd();
 
     var buf = alloc(4096);
     if (buf == 0) { return 0 - 1; }
-    var pfds = alloc(16);          # 2 pollfd structs
+    var pfds = alloc(24);          # 3 pollfd structs
     if (pfds == 0) { return 0 - 1; }
     var stdin_open = 1;
     var done = 0;
@@ -164,13 +187,29 @@ fn session_relay(master, logfd) {
         if (stdin_open == 1) { store32(pfds + 8, 0); }
         else { store32(pfds + 8, 0 - 1); }
         store32(pfds + 12, POLLIN);
+        # [2] SIGWINCH signalfd (fd -1 ignored if setup failed).
+        store32(pfds + 16, winch_fd);
+        store32(pfds + 20, POLLIN);
 
-        var pr = syscall(SYS_POLL, pfds, 2, 0 - 1);
+        var pr = syscall(SYS_POLL, pfds, 3, 0 - 1);
         if (pr < 0) {
-            # Re-poll on signal interruption (e.g. SIGWINCH/SIGCHLD);
-            # bail on any other error so we never spin.
+            # Re-poll on signal interruption; bail on any other error so we
+            # never spin.
             if (pr == 0 - EINTR_ERRNO) { continue; }
             return 0 - 1;
+        }
+
+        # SIGWINCH: drain the signalfd and re-copy the window size to the
+        # master so the child's tty reflows.
+        if (winch_fd >= 0) {
+            var wrev = (load32(pfds + 20) >> 16) & 65535;
+            if ((wrev & POLLIN) != 0) {
+                var dr = 1;
+                while (dr == 1) {
+                    if (sys_read(winch_fd, buf, SIGINFO_SIZE) <= 0) { dr = 0; }
+                }
+                session_copy_winsize(0, master);
+            }
         }
 
         var mrev = (load32(pfds + 4) >> 16) & 65535;
@@ -205,6 +244,7 @@ fn session_relay(master, logfd) {
             }
         }
     }
+    if (winch_fd >= 0) { sys_close(winch_fd); }
     return 0;
 }
 
