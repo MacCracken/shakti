@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-01
+
+Closes the headline cyrius-port regression: real PAM authentication is
+restored via Linux-PAM's `unix_chkpwd(8)` helper, demoting the
+`/usr/bin/su` shim to a fallback. The consumer authorization/auth API
+surface is unchanged; consumers must add `"pam"` to their stdlib list
+(see **Changed**).
+
 ### Added
 
 - **Real PAM authentication via `unix_chkpwd(8)`.** `src/auth.cyr::

@@ -34,7 +34,7 @@ fn t_pam_authenticate_rejects_bogus() {
     var r = pam_authenticate("root", "surely_not_root_password_xyz");
     assert_eq(r == 1, 0, "bogus password is not accepted by PAM");
     assert_eq(r == 0 || r == 0 - SHK_ERR_PAM_UNAVAILABLE, 1,
-        "pam_authenticate returns rejected (0) or unavailable seam");
+    "pam_authenticate returns rejected (0) or unavailable seam");
 }
 
 fn t_authenticate_rejects_bogus() {
