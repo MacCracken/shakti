@@ -58,6 +58,29 @@ assert_contains "writes session footer"     "session end status=0"
 
 rm -f "$LOG"
 
+# ── Keystroke capture (input log, echo-on path) ──────────────────────────
+# Feed a marker on stdin to `head -n 1` over the relay; with the slave's
+# default ECHO on, the marker must land in the input log. (Echo-OFF
+# redaction is unit-verified by the _session_slave_echo_on gate.)
+if [ -x /usr/bin/head ]; then
+    IN_BIN="build/input-probe"
+    INLOG="$(mktemp /tmp/shakti-inlog-XXXXXX.log)"
+    if cyrius build tests/integration/input_probe.cyr "$IN_BIN" >/dev/null 2>&1; then
+        printf 'INPUT-MARK-7731\n' | "$IN_BIN" "$INLOG" >/dev/null 2>&1
+        if grep -q "INPUT-MARK-7731" "$INLOG" 2>/dev/null; then
+            PASS=$((PASS + 1))
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL: keystroke not captured in input log"
+            echo "  input log: $(cat "$INLOG" 2>/dev/null)"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: input_probe did not compile"
+    fi
+    rm -f "$INLOG"
+fi
+
 # ── Root tier: the FULL shakti logged exec path ──────────────────────────
 # Under real root, drive shakti end-to-end with a log_session policy and
 # confirm it writes a transcript containing the command's output. Needs a

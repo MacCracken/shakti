@@ -159,16 +159,32 @@ fn _session_sigwinch_fd() {
     return sys_signalfd(0 - 1, set, SFD_CLOEXEC_FLAG | SFD_NONBLOCK_FLAG);
 }
 
+# Is the slave tty's ECHO bit currently set? Queried from the master fd
+# (TCGETS on a pty master returns the slave's termios). Used to redact
+# keystroke capture: when the child turns echo OFF it's reading a secret
+# (password prompt), so we must NOT log input during that window. Returns
+# 1 if echo is on, 0 otherwise — and fails SAFE to 0 (don't log) if the
+# termios can't be read.
+fn _session_slave_echo_on(master) {
+    var t = alloc(TERMIOS_SIZE);
+    if (t == 0) { return 0; }
+    if (syscall(SYS_IOCTL, master, TCGETS, t) < 0) { return 0; }
+    if ((load32(t + 12) & ECHO_FLAG) != 0) { return 1; }
+    return 0;
+}
+
 # Relay bytes between the real terminal (stdin fd 0 / stdout fd 1) and the
 # PTY `master`, teeing the master→stdout (command output) stream to
-# `logfd` (pass a negative fd to skip logging). Also propagates terminal
-# resizes (SIGWINCH via a signalfd) so full-screen apps reflow. Blocks
-# until the master reports EOF/HUP — i.e. the child closed the slave
-# (exited). Returns 0.
+# `logfd` (negative = skip). When `inlogfd` >= 0, ALSO record the user's
+# keystrokes (stdin→master) to it — but only while the slave tty has ECHO
+# on, so typed secrets during a password prompt are never written
+# (ADR-008 keystroke redaction). Also propagates terminal resizes
+# (SIGWINCH via a signalfd) so full-screen apps reflow. Blocks until the
+# master reports EOF/HUP — i.e. the child closed the slave (exited).
 #
 # Uses poll(2). pollfd is packed as two u32s: fd at +0, (events |
 # revents<<16) at +4, so revents = high 16 bits of the +4 word.
-fn session_relay(master, logfd) {
+fn session_relay(master, logfd, inlogfd) {
     session_copy_winsize(0, master);
     var winch_fd = _session_sigwinch_fd();
 
@@ -240,7 +256,16 @@ fn session_relay(master, logfd) {
             if ((srev & POLLIN) != 0) {
                 var n2 = sys_read(0, buf, 4096);
                 if (n2 <= 0) { stdin_open = 0; }       # EOF: stop polling stdin
-                else { _session_full_write(master, buf, n2); }
+                else {
+                    _session_full_write(master, buf, n2);
+                    # Keystroke capture, echo-off redacted: never record
+                    # input while the child has echo disabled (secret entry).
+                    if (inlogfd >= 0) {
+                        if (_session_slave_echo_on(master) == 1) {
+                            _session_full_write(inlogfd, buf, n2);
+                        }
+                    }
+                }
             }
         }
     }

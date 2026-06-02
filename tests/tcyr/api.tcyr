@@ -114,6 +114,20 @@ fn t_evaluate_threads_lsm_context() {
     assert_eq(streq(eval_apparmor_profile(eval), ""), 1, "apparmor empty when unset");
 }
 
+fn t_evaluate_threads_log_input() {
+    var s = "[defaults]\nrequire_auth = false\nlog_session = true\nlog_input = true\n[[rules]]\nuser = \"k\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\"]\n";
+    var pol = parse_policy(s, strlen(s));
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, pol, "k", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    assert_eq(eval_log_input(eval), 1, "log_input threaded (inherits default on)");
+    # Sample policy has no log_input → off.
+    var e2 = evaluate_with_policy(_skip_config(), _sample_policy(), "deploy", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_log_input(e2), 0, "log_input defaults off");
+}
+
 fn t_evaluate_default_no_capabilities() {
     # A rule without a capabilities field threads an empty set → mask 0
     # → the full-uid drop path is taken (no behavioural change).
@@ -236,6 +250,7 @@ fn main() {
     t_evaluate_threads_log_session();
     t_evaluate_default_no_log_session();
     t_evaluate_threads_lsm_context();
+    t_evaluate_threads_log_input();
     t_evaluate_denied();
     t_evaluate_invalid_username();
     t_evaluate_invalid_command();

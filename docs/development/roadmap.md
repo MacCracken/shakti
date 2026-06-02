@@ -1,28 +1,13 @@
 # Shakti Roadmap
 
 Shipped feature history lives in [CHANGELOG.md](../../CHANGELOG.md) — this
-roadmap tracks **open work only**. Current release: **0.6.1** (cyrius pin
+roadmap tracks **open work only**. Current release: **0.6.2** (cyrius pin
 6.0.33). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
 policy engine, env sanitization, command validation, timestamp caching,
 audit logging, real PAM auth (ADR-006), capability-based privilege
-(ADR-007), session logging (ADR-008), and SELinux/AppArmor exec contexts
-(ADR-009).
-
-## 0.6.2 — Linux feature completion
-
-Finish the 0.5–0.6 feature surfaces to their intended scope. All
-Linux-side, none blocked — doable now.
-
-- [ ] **Session-log keystroke (input) capture** (completes ADR-008) —
-      record the input stream alongside output, with a redaction design
-      for typed secrets (passwords, prompts) before it ships.
-- [ ] **Live `SIGWINCH` window-resize propagation** during a logged
-      session — today only the start-of-session window size is copied; the
-      relay should re-copy on resize so full-screen apps reflow.
-- [ ] **LSM-aware auto-selection for exec contexts** (completes ADR-009) —
-      apply only the active LSM's field so one policy can serve a mixed
-      SELinux/AppArmor fleet, instead of today's strict per-field
-      fail-closed. (`_lsm_active_has()` already exists from the 0.6.1 pass.)
+(ADR-007), session logging + keystroke capture (ADR-008), and
+SELinux/AppArmor exec contexts (ADR-009) — all Linux feature surfaces now
+complete.
 
 ## 0.6.3 — Proposal-blocked work (NSS + remote policy)
 

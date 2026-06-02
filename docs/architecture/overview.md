@@ -101,7 +101,8 @@ audit_log = true              # Log all commands
 env_keep = ["EDITOR"]         # Additional safe env vars to preserve
 max_command_len = 4096        # Max total command length in bytes
 include_dir = "/etc/agnos/sudoers.d"  # Optional fragment directory
-log_session = false           # Record an I/O transcript per session (default off)
+log_session = false           # Record an output transcript per session (default off)
+log_input = false             # Also capture keystrokes (echo-off redacted; default off)
 session_log_dir = "/var/log/agnos/sessions"  # Where transcripts are written
 
 [[rules]]
@@ -113,6 +114,7 @@ deny_commands = ["/usr/bin/systemctl stop firewall"]  # Deny overrides allow
 require_auth = true           # Per-rule auth override
 capabilities = []             # Optional CAP_* set (empty = full root). See below.
 log_session = false           # Optional per-rule I/O recording override
+log_input = false             # Optional per-rule keystroke-capture override
 selinux_context = ""          # Optional SELinux domain to transition into
 apparmor_profile = ""         # Optional AppArmor profile to transition into
 description = "Service management"
@@ -151,7 +153,8 @@ records an I/O transcript of the session:
 
 ```toml
 [defaults]
-log_session = false                          # global default
+log_session = false                          # global default (output transcript)
+log_input = false                            # global default (keystroke capture)
 session_log_dir = "/var/log/agnos/sessions"  # must be root-owned, mode 0700
 
 [[rules]]
@@ -159,6 +162,7 @@ user = "oncall"
 run_as = "root"
 commands = ["/bin/bash"]
 log_session = true                           # record this (per-rule override)
+log_input = true                             # also capture keystrokes
 ```
 
 - When enabled, shakti allocates a PTY and **stays alive as a relay
@@ -166,15 +170,23 @@ log_session = true                           # record this (per-rule override)
   PTY slave, while the parent copies terminal I/O and tees the output to a
   transcript. When disabled (the default) shakti `execve`s directly with no
   fork or PTY — identical to pre-0.5.1 behaviour.
-- Per rule, `log_session` is tri-state: unset inherits `[defaults]`, `true`
-  forces on, `false` forces off.
+- Per rule, `log_session` and `log_input` are tri-state: unset inherits
+  `[defaults]`, `true` forces on, `false` forces off.
 - Transcripts are written to `session_log_dir` as
   `<ts>-<caller>-<pid>.log`, mode `0600`. The directory **must be
-  root-owned and not world-writable** (same trust check as the policy
-  file); shakti refuses to run (fail closed) if a requested log cannot be
-  created securely. The audit record carries `SESSION_LOG=on|off`.
-- v1 records the **output** stream (what the command displayed); keystroke
-  capture is intentionally deferred (it is the more sensitive half).
+  root-owned and not group/other-writable** (same trust check as the
+  policy file, opened TOCTOU-safe); shakti refuses to run (fail closed) if
+  a requested log cannot be created securely. The audit record carries
+  `SESSION_LOG=on|off ; INPUT_LOG=on|off`.
+- The output transcript records the **output** stream (everything the
+  command displayed, including echoed keystrokes). Terminal resizes are
+  propagated live (SIGWINCH), so full-screen apps reflow.
+- **Keystroke capture (`log_input`)** is a separate opt-in switch that
+  rides the same relay (so it only applies when `log_session` is on). It
+  records the user's input to a companion `<ts>-<caller>-<pid>.input.log`
+  (also `0600`), and **redacts typed secrets**: input is never recorded
+  while the child's tty has `ECHO` disabled (password prompts), failing
+  safe to not-logging if the echo state can't be read.
 
 ### SELinux / AppArmor exec contexts (ADR-009)
 
@@ -196,11 +208,15 @@ selinux_context = "system_u:system_r:httpd_t:s0"   # SELinux hosts
   `/proc/self/attr/exec`) — both immediately before `execve`, after the
   privilege drop, on whichever process execs (the shakti process, or the
   forked child when session logging is on).
-- **Strict fail-closed:** if a context is requested but the write is
-  rejected (LSM inactive, context unparseable, or transition denied),
-  shakti aborts rather than run the target in the wrong (more privileged)
-  domain. So set the field that matches the LSM your host actually runs;
-  mixed-LSM fleets use per-host policy fragments.
+- **LSM-aware auto-selection:** shakti applies only the field whose LSM is
+  actually active on the host (read from `/sys/kernel/security/lsm`), so a
+  single policy can carry **both** `selinux_context` and `apparmor_profile`
+  and do the right thing across a mixed fleet — the inactive LSM's field is
+  skipped, not failed.
+- **Fail-closed otherwise:** if the active LSM's write is rejected (context
+  unparseable, transition denied), or confinement is requested but **no**
+  matching LSM is active on the host, shakti aborts rather than run the
+  target in the wrong (more privileged) domain.
 - Absent/empty fields → no transition (default). The audit record carries
   `LSM=selinux=…|apparmor=…|none`.
 

@@ -1,0 +1,56 @@
+# input_probe.cyr — end-to-end check of keystroke capture (ADR-008,
+# 0.6.2). Allocates a PTY, forks `head -n 1` on the slave (reads one line
+# then exits), and relays with an input log (argv[1]). The driver feeds a
+# marker on stdin; with the slave's default ECHO on, the relay must record
+# that input to the input log. Echo-OFF redaction is unit-verified
+# separately (the _session_slave_echo_on gate).
+
+include "src/lib.cyr"
+
+fn main() {
+    alloc_init();
+    args_init();
+    if (argc() < 2) { file_write(2, "usage: input_probe <inlogpath>\n", 31); return 2; }
+    var inlogpath = argv(1);
+
+    var master = session_openpt();
+    if (master < 0) { file_write(2, "input_probe: openpt failed\n", 27); return 1; }
+    var inlogfd = syscall(SYS_OPEN, inlogpath, O_WRONLY | O_CREAT | O_TRUNC, 384);
+    if (inlogfd < 0) { file_write(2, "input_probe: inlog open failed\n", 31); return 1; }
+
+    var slave = session_open_slave(master);
+    if (slave < 0) { file_write(2, "input_probe: slave failed\n", 26); return 1; }
+
+    var pid = sys_fork();
+    if (pid == 0) {
+        sys_setsid();
+        syscall(SYS_IOCTL, slave, TIOCSCTTY, 0);
+        sys_dup2(slave, 0);
+        sys_dup2(slave, 1);
+        sys_dup2(slave, 2);
+        sys_close(master);
+        if (slave > 2) { sys_close(slave); }
+        var argv_c = alloc(8 * 4);
+        store64(argv_c + 0, "/usr/bin/head");
+        store64(argv_c + 8, "-n");
+        store64(argv_c + 16, "1");
+        store64(argv_c + 24, 0);
+        var envp = alloc(8);
+        store64(envp, 0);
+        sys_execve("/usr/bin/head", argv_c, envp);
+        sys_exit(127);
+    }
+
+    sys_close(slave);
+    # logfd = -1 (no output transcript needed), inlogfd = the keystroke log.
+    session_relay(master, 0 - 1, inlogfd);
+    var st = alloc(8);
+    store64(st, 0);
+    sys_waitpid(pid, st, 0);
+    sys_close(inlogfd);
+    sys_close(master);
+    return 0;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

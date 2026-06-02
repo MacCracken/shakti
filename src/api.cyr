@@ -57,7 +57,8 @@ enum EvalOff {
     EV_LOG_SESSION = 72;
     EV_SELINUX = 80;
     EV_APPARMOR = 88;
-    EV_SZ = 96;
+    EV_LOG_INPUT = 96;
+    EV_SZ = 104;
 }
 
 fn eval_new() {
@@ -77,6 +78,8 @@ fn eval_new() {
     # LSM exec contexts of the matched rule ("" = none).
     store64(e + EV_SELINUX, "");
     store64(e + EV_APPARMOR, "");
+    # Effective keystroke-capture flag of the matched rule (0 = off).
+    store64(e + EV_LOG_INPUT, 0);
     return e;
 }
 
@@ -92,6 +95,7 @@ fn eval_capabilities(e) { return load64(e + EV_CAPABILITIES); }
 fn eval_log_session(e) { return load64(e + EV_LOG_SESSION); }
 fn eval_selinux_context(e) { return load64(e + EV_SELINUX); }
 fn eval_apparmor_profile(e) { return load64(e + EV_APPARMOR); }
+fn eval_log_input(e) { return load64(e + EV_LOG_INPUT); }
 
 # Build a joined "command args..." cstr from an argv vec.
 fn _shk_join_command(argv) {
@@ -275,6 +279,8 @@ groups, command_argv) {
     # Carry the LSM exec contexts to the exec path (ADR-009).
     store64(e + EV_SELINUX, authz_selinux(authz));
     store64(e + EV_APPARMOR, authz_apparmor(authz));
+    # Carry the keystroke-capture flag to the exec path (ADR-008).
+    store64(e + EV_LOG_INPUT, authz_log_input(authz));
 
     # Effective require-auth accounts for AuthMode::Skip
     var mode = cfg_auth_mode(config);

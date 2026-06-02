@@ -148,6 +148,20 @@ fn t_log_session_defaults() {
     assert_eq(rule_log_session(r), 0 - 1, "rule log_session defaults to inherit (-1)");
 }
 
+fn t_log_input_defaults_and_override() {
+    var p = _parse_src("[[rules]]\nuser = \"bob\"\n");
+    var d = policy_defaults(p);
+    assert_eq(def_log_input(d), 0, "log_input default off");
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(rule_log_input(r), 0 - 1, "rule log_input defaults to inherit (-1)");
+
+    var p2 = _parse_src("[defaults]\nlog_input = true\n[[rules]]\nuser = \"a\"\n[[rules]]\nuser = \"b\"\nlog_input = false\n");
+    var d2 = policy_defaults(p2);
+    assert_eq(def_log_input(d2), 1, "default log_input true parsed");
+    assert_eq(_shk_effective_log_input(vec_get(policy_rules(p2), 0), d2), 1, "rule a inherits on");
+    assert_eq(_shk_effective_log_input(vec_get(policy_rules(p2), 1), d2), 0, "rule b overrides off");
+}
+
 fn t_lsm_context_fields() {
     # ADR-009: per-rule selinux_context / apparmor_profile parse and
     # default to empty when absent.
@@ -384,6 +398,7 @@ fn main() {
     t_capabilities_bad_name_fails_closed();
     t_log_session_defaults();
     t_log_session_default_and_override();
+    t_log_input_defaults_and_override();
     t_lsm_context_fields();
     t_parse_include_dir();
 

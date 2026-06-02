@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-02
+
+Linux feature-completion milestone: finishes the session-logging and LSM
+surfaces to their intended scope. All opt-in and non-breaking.
+
+### Added
+
+- **Keystroke capture (`log_input`).** A separate opt-in switch (per-rule
+  tri-state, or a `[defaults]`) records the user's input to a companion
+  `<ts>-<caller>-<pid>.input.log` (mode 0600) alongside the output
+  transcript. It rides the same PTY relay, so it only applies when
+  `log_session` is also on. **Typed secrets are redacted**: input is never
+  written while the child's tty has `ECHO` disabled (password prompts),
+  failing safe to not-logging if the echo state can't be read. The audit
+  record gains `INPUT_LOG=on|off`.
+- **Live `SIGWINCH` window-resize propagation** during a logged session.
+  The relay now watches a `signalfd` for `SIGWINCH` (no signal handler /
+  x86_64 `SA_RESTORER` trampoline needed) and re-copies the window size to
+  the PTY master, so full-screen apps reflow on resize. Previously only the
+  start-of-session size was copied.
+
+### Changed
+
+- **LSM exec contexts are now auto-selected by active LSM (completes
+  ADR-009).** `lsm_apply_exec` applies only the field whose LSM is active
+  on the host (`/sys/kernel/security/lsm`), so one policy can carry both a
+  `selinux_context` and an `apparmor_profile` and serve a mixed fleet — the
+  inactive LSM's field is skipped rather than failing closed. Confinement
+  requested with **no** matching active LSM still fails closed.
+
 ## [0.6.1] - 2026-06-02
 
 Audit/hardening sweep over the exec-path features added in 0.5.0–0.6.0

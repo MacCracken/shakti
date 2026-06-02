@@ -52,7 +52,7 @@ fn main() {
         sys_exit(127);
     }
 
-    session_relay(master, logfd);
+    session_relay(master, logfd, 0 - 1);   # no input log in this probe
     var st = alloc(8);
     store64(st, 0);
     sys_waitpid(pid, st, 0);

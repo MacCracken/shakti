@@ -420,8 +420,10 @@ cap_mask, se_ctx, aa_prof) {
 # root and not group/other-writable. The leaf <ts>-<caller>-<pid>.log is
 # then created RELATIVE to that validated fd via openat with
 # O_EXCL|O_NOFOLLOW (no clobber, no symlink), mode 0600 — the path string is
-# never resolved a second time. Returns the fd, or negative on any error.
-fn _open_session_log(dir, caller) {
+# never resolved a second time. `suffix` is the filename extension
+# (".log" for the output transcript, ".input.log" for the keystroke log).
+# Returns the fd, or negative on any error.
+fn _open_session_log(dir, caller, suffix) {
     var dfd = syscall(SYS_OPENAT_X64, AT_FDCWD_LOCAL, dir, O_PATH | O_DIRECTORY | O_NOFOLLOW, 0);
     if (dfd < 0) { return 0 - 1; }
     var stbuf = alloc(STAT_BUFSZ);
@@ -442,7 +444,7 @@ fn _open_session_log(dir, caller) {
     str_builder_add_cstr(sb, caller);
     str_builder_add_cstr(sb, "-");
     str_builder_add_int(sb, syscall(SYS_GETPID));
-    str_builder_add_cstr(sb, ".log");
+    str_builder_add_cstr(sb, suffix);
     var fname = str_data(str_builder_build(sb));
 
     var fd = syscall(SYS_OPENAT_X64, dfd, fname, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
@@ -456,9 +458,12 @@ fn _open_session_log(dir, caller) {
 # child's exit status for shk_run to propagate. `logfd` must already be
 # open (see _open_session_log); the caller owns closing it on early error.
 fn _exec_target_logged(resolved, argv_vec, env_vec, target_user, target_uid,
-target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
+target_gid, cap_mask, logfd, inlogfd, caller, se_ctx, aa_prof) {
     var start = _shk_now_secs();
     session_log_header(logfd, caller, target_user, resolved, _shk_tty_session(), start);
+    if (inlogfd >= 0) {
+        session_log_header(inlogfd, caller, target_user, resolved, _shk_tty_session(), start);
+    }
 
     var master = session_openpt();
     if (master < 0) {
@@ -527,7 +532,7 @@ target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
         }
     }
 
-    session_relay(master, logfd);
+    session_relay(master, logfd, inlogfd);
 
     var stbuf = alloc(8);
     if (stbuf != 0) { store64(stbuf, 0); }
@@ -542,8 +547,13 @@ target_gid, cap_mask, logfd, caller, se_ctx, aa_prof) {
     var rc = 1;
     if (WIFEXITED(status) == 1) { rc = WEXITSTATUS(status); }
     elif (WIFSIGNALED(status) == 1) { rc = 128 + WTERMSIG(status); }
-    session_log_footer(logfd, rc, start, _shk_now_secs());
+    var end = _shk_now_secs();
+    session_log_footer(logfd, rc, start, end);
     sys_close(logfd);
+    if (inlogfd >= 0) {
+        session_log_footer(inlogfd, rc, start, end);
+        sys_close(inlogfd);
+    }
     sys_close(master);
     return rc;
 }
@@ -688,26 +698,44 @@ fn shk_run() {
     # Open the session transcript if the matched rule requested logging
     # (ADR-008). Fail closed: if logging is required but the log can't be
     # securely created, refuse rather than run the command unlogged.
+    var sess_dir = def_session_log_dir(policy_defaults(policy));
     var do_log = eval_log_session(eval);
     var logfd = 0 - 1;
+    # Keystroke capture rides the same PTY relay, so it only applies when
+    # session logging is on (its own opt-in switch, log_input).
+    var do_input = 0;
+    if (do_log == 1) { if (eval_log_input(eval) == 1) { do_input = 1; } }
+    var inlogfd = 0 - 1;
     if (do_log == 1) {
-        logfd = _open_session_log(def_session_log_dir(policy_defaults(policy)), caller);
+        logfd = _open_session_log(sess_dir, caller, ".log");
         if (logfd < 0) {
             audit_log(AUDIT_COMMAND, caller, target, eval_resolved_command(eval), 0,
             "session logging required but log could not be opened");
             _write_line(2, "shakti: cannot open session log (session_log_dir must be root-owned); refusing\n");
             return 1;
         }
+        if (do_input == 1) {
+            inlogfd = _open_session_log(sess_dir, caller, ".input.log");
+            if (inlogfd < 0) {
+                audit_log(AUDIT_COMMAND, caller, target, eval_resolved_command(eval), 0,
+                "keystroke logging required but input log could not be opened");
+                _write_line(2, "shakti: cannot open keystroke log; refusing\n");
+                return 1;
+            }
+        }
     }
 
     # Audit the authorized command, the granted capability set (ADR-007),
-    # and whether the session is being recorded (ADR-008). Empty cap set
-    # logs as CAPS=ALL (full uid).
+    # whether the session/keystrokes are recorded (ADR-008), and the LSM
+    # context (ADR-009). Empty cap set logs as CAPS=ALL (full uid).
     var areason = str_builder_new();
     str_builder_add_cstr(areason, "authorized ; CAPS=");
     str_builder_add_cstr(areason, caps_describe(cap_mask));
     str_builder_add_cstr(areason, " ; SESSION_LOG=");
     if (do_log == 1) { str_builder_add_cstr(areason, "on"); }
+    else { str_builder_add_cstr(areason, "off"); }
+    str_builder_add_cstr(areason, " ; INPUT_LOG=");
+    if (do_input == 1) { str_builder_add_cstr(areason, "on"); }
     else { str_builder_add_cstr(areason, "off"); }
     str_builder_add_cstr(areason, " ; LSM=");
     str_builder_add_cstr(areason,
@@ -721,7 +749,7 @@ fn shk_run() {
     if (do_log == 1) {
         return _exec_target_logged(eval_resolved_command(eval),
         load64(cli + CLI_ARGV), eval_environment(eval),
-        target, target_uid, target_gid, cap_mask, logfd, caller, se_ctx, aa_prof);
+        target, target_uid, target_gid, cap_mask, logfd, inlogfd, caller, se_ctx, aa_prof);
     }
 
     _exec_target(eval_resolved_command(eval),

@@ -26,7 +26,8 @@ enum DefOff {
     DEF_INCLUDE_DIR = 40;
     DEF_LOG_SESSION = 48;
     DEF_SESSION_LOG_DIR = 56;
-    DEF_SZ = 64;
+    DEF_LOG_INPUT = 64;
+    DEF_SZ = 72;
 }
 
 enum RuleOff {
@@ -41,7 +42,8 @@ enum RuleOff {
     RU_LOG_SESSION = 64;
     RU_SELINUX_CONTEXT = 72;
     RU_APPARMOR_PROFILE = 80;
-    RU_SZ = 88;
+    RU_LOG_INPUT = 88;
+    RU_SZ = 96;
 }
 
 enum AuthzOff {
@@ -51,7 +53,8 @@ enum AuthzOff {
     AZ_LOG_SESSION = 24;
     AZ_SELINUX = 32;
     AZ_APPARMOR = 40;
-    AZ_SZ = 48;
+    AZ_LOG_INPUT = 48;
+    AZ_SZ = 56;
 }
 
 enum AuthzStatus { AZ_DENIED = 0; AZ_ALLOWED = 1; }
@@ -79,6 +82,9 @@ fn defaults_new() {
     # Session logging off by default; default transcript directory.
     store64(d + DEF_LOG_SESSION, 0);
     store64(d + DEF_SESSION_LOG_DIR, "/var/log/agnos/sessions");
+    # Keystroke (input) capture off by default (ADR-008). Only takes
+    # effect when log_session is also on — it rides the same PTY relay.
+    store64(d + DEF_LOG_INPUT, 0);
     return d;
 }
 
@@ -90,6 +96,7 @@ fn def_max_cmd_len(d) { return load64(d + DEF_MAX_CMD_LEN); }
 fn def_include_dir(d) { return load64(d + DEF_INCLUDE_DIR); }
 fn def_log_session(d) { return load64(d + DEF_LOG_SESSION); }
 fn def_session_log_dir(d) { return load64(d + DEF_SESSION_LOG_DIR); }
+fn def_log_input(d) { return load64(d + DEF_LOG_INPUT); }
 
 fn rule_new() {
     var r = alloc(RU_SZ);
@@ -109,6 +116,8 @@ fn rule_new() {
     # LSM exec contexts: "" = unset → no transition. See ADR-009.
     store64(r + RU_SELINUX_CONTEXT, "");
     store64(r + RU_APPARMOR_PROFILE, "");
+    # log_input tri-state: -1 = inherit [defaults], 0 = off, 1 = on.
+    store64(r + RU_LOG_INPUT, 0 - 1);
     return r;
 }
 
@@ -123,6 +132,7 @@ fn rule_capabilities(r) { return load64(r + RU_CAPABILITIES); }
 fn rule_log_session(r) { return load64(r + RU_LOG_SESSION); }
 fn rule_selinux_context(r) { return load64(r + RU_SELINUX_CONTEXT); }
 fn rule_apparmor_profile(r) { return load64(r + RU_APPARMOR_PROFILE); }
+fn rule_log_input(r) { return load64(r + RU_LOG_INPUT); }
 
 fn authz_new(status, aux) {
     var a = alloc(AZ_SZ);
@@ -136,6 +146,8 @@ fn authz_new(status, aux) {
     # LSM exec contexts of the matched rule ("" = none).
     store64(a + AZ_SELINUX, "");
     store64(a + AZ_APPARMOR, "");
+    # Effective keystroke-capture flag of the matched rule (0 = off).
+    store64(a + AZ_LOG_INPUT, 0);
     return a;
 }
 
@@ -145,6 +157,7 @@ fn authz_caps(a) { return load64(a + AZ_CAPS); }
 fn authz_log_session(a) { return load64(a + AZ_LOG_SESSION); }
 fn authz_selinux(a) { return load64(a + AZ_SELINUX); }
 fn authz_apparmor(a) { return load64(a + AZ_APPARMOR); }
+fn authz_log_input(a) { return load64(a + AZ_LOG_INPUT); }
 
 # Resolve a rule's tri-state log_session (-1 = inherit) against the
 # policy defaults. Returns 0 or 1.
@@ -152,6 +165,13 @@ fn _shk_effective_log_session(r, defaults) {
     var ls = rule_log_session(r);
     if (ls < 0) { return def_log_session(defaults); }
     return ls;
+}
+
+# Resolve a rule's tri-state log_input (-1 = inherit) against defaults.
+fn _shk_effective_log_input(r, defaults) {
+    var li = rule_log_input(r);
+    if (li < 0) { return def_log_input(defaults); }
+    return li;
 }
 
 # ── Mini TOML loader ────────────────────
@@ -339,6 +359,11 @@ fn _shk_def_set(d, key, raw_val) {
         store64(d + DEF_SESSION_LOG_DIR, _shk_unquote(raw_val));
         return 0;
     }
+    if (streq(key, "log_input") == 1) {
+        var bi = _shk_parse_bool(raw_val);
+        if (bi >= 0) { store64(d + DEF_LOG_INPUT, bi); }
+        return 0;
+    }
     return 0;
 }
 
@@ -392,6 +417,11 @@ fn _shk_rule_set(r, key, raw_val) {
     }
     if (streq(key, "apparmor_profile") == 1) {
         store64(r + RU_APPARMOR_PROFILE, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "log_input") == 1) {
+        var bi = _shk_parse_bool(raw_val);
+        if (bi >= 0) { store64(r + RU_LOG_INPUT, bi); }
         return 0;
     }
     return 0;
@@ -741,6 +771,7 @@ fn check_authorization(policy, caller, groups, target, command) {
                     store64(az0 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
                     store64(az0 + AZ_SELINUX, rule_selinux_context(r));
                     store64(az0 + AZ_APPARMOR, rule_apparmor_profile(r));
+                    store64(az0 + AZ_LOG_INPUT, _shk_effective_log_input(r, defaults));
                     return az0;
                 }
                 var ci = 0;
@@ -752,6 +783,7 @@ fn check_authorization(policy, caller, groups, target, command) {
                         store64(az1 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
                         store64(az1 + AZ_SELINUX, rule_selinux_context(r));
                         store64(az1 + AZ_APPARMOR, rule_apparmor_profile(r));
+                        store64(az1 + AZ_LOG_INPUT, _shk_effective_log_input(r, defaults));
                         return az1;
                     }
                     ci = ci + 1;
