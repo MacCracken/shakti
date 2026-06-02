@@ -1,0 +1,49 @@
+# lsm.tcyr — tests for src/lsm.cyr
+#
+# Pure logic only: the audit-description formatting and the
+# nothing-requested no-op. The actual /proc/self/attr/exec write is
+# environment-dependent (needs SELinux/AppArmor to succeed, returns EINVAL
+# otherwise) and is exercised by the integration probe, not here.
+
+include "src/lib.cyr"
+
+fn t_describe_none() {
+    assert_eq(streq(lsm_describe(0, 0), "none"), 1, "no context -> none");
+    assert_eq(streq(lsm_describe("", ""), "none"), 1, "empty strings -> none");
+}
+
+fn t_describe_selinux() {
+    assert_eq(streq(lsm_describe("system_u:system_r:httpd_t:s0", 0),
+    "selinux=system_u:system_r:httpd_t:s0"), 1, "selinux only");
+}
+
+fn t_describe_apparmor() {
+    assert_eq(streq(lsm_describe(0, "nginx"), "apparmor=nginx"), 1, "apparmor only");
+}
+
+fn t_describe_both() {
+    assert_eq(streq(lsm_describe("u:r:t:s0", "nginx"), "selinux=u:r:t:s0 apparmor=nginx"),
+    1, "both joined by space");
+}
+
+fn t_apply_none_is_noop() {
+    # Nothing requested → success without touching /proc.
+    assert_eq(lsm_apply_exec(0, 0), 0, "apply with no context is a no-op success");
+    assert_eq(lsm_apply_exec("", ""), 0, "apply with empty context is a no-op success");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("lsm exec-context");
+    t_describe_none();
+    t_describe_selinux();
+    t_describe_apparmor();
+    t_describe_both();
+    t_apply_none_is_noop();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

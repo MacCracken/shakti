@@ -1,0 +1,33 @@
+# lsm_probe.cyr — exercises src/lsm.cyr's exec-context writer (ADR-009)
+# against the live kernel and reports machine-readable return codes:
+#   lsm-noop: <rc>       (lsm_apply_exec with nothing requested → must be 0)
+#   lsm-selinux: <rc>    (writing an SELinux context to /proc/self/attr/exec)
+#   lsm-apparmor: <rc>   (writing an AppArmor profile)
+#
+# On a host without the relevant LSM the kernel rejects the write
+# (-EINVAL) and lsm_apply_exec returns negative — the fail-closed signal
+# shakti relies on. On an LSM-enabled host the write may succeed (0). The
+# driver (lsm_ctx.sh) interprets these against the host's active LSMs.
+
+include "src/lib.cyr"
+
+fn _emit(label, rc) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, label);
+    str_builder_add_int(sb, rc);
+    str_builder_add_cstr(sb, "\n");
+    var s = str_builder_build(sb);
+    file_write(1, str_data(s), str_len(s));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _emit("lsm-noop: ", lsm_apply_exec(0, 0));
+    _emit("lsm-selinux: ", lsm_apply_exec("system_u:system_r:httpd_t:s0", 0));
+    _emit("lsm-apparmor: ", lsm_apply_exec(0, "shakti-probe-profile"));
+    return 0;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

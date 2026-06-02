@@ -39,7 +39,9 @@ enum RuleOff {
     RU_DESCRIPTION = 48;
     RU_CAPABILITIES = 56;
     RU_LOG_SESSION = 64;
-    RU_SZ = 72;
+    RU_SELINUX_CONTEXT = 72;
+    RU_APPARMOR_PROFILE = 80;
+    RU_SZ = 88;
 }
 
 enum AuthzOff {
@@ -47,7 +49,9 @@ enum AuthzOff {
     AZ_AUX = 8;
     AZ_CAPS = 16;
     AZ_LOG_SESSION = 24;
-    AZ_SZ = 32;
+    AZ_SELINUX = 32;
+    AZ_APPARMOR = 40;
+    AZ_SZ = 48;
 }
 
 enum AuthzStatus { AZ_DENIED = 0; AZ_ALLOWED = 1; }
@@ -102,6 +106,9 @@ fn rule_new() {
     # log_session tri-state: -1 = inherit [defaults], 0 = off, 1 = on.
     # See ADR-008.
     store64(r + RU_LOG_SESSION, 0 - 1);
+    # LSM exec contexts: "" = unset → no transition. See ADR-009.
+    store64(r + RU_SELINUX_CONTEXT, "");
+    store64(r + RU_APPARMOR_PROFILE, "");
     return r;
 }
 
@@ -114,6 +121,8 @@ fn rule_require_auth(r) { return load64(r + RU_REQUIRE_AUTH); }
 fn rule_description(r) { return load64(r + RU_DESCRIPTION); }
 fn rule_capabilities(r) { return load64(r + RU_CAPABILITIES); }
 fn rule_log_session(r) { return load64(r + RU_LOG_SESSION); }
+fn rule_selinux_context(r) { return load64(r + RU_SELINUX_CONTEXT); }
+fn rule_apparmor_profile(r) { return load64(r + RU_APPARMOR_PROFILE); }
 
 fn authz_new(status, aux) {
     var a = alloc(AZ_SZ);
@@ -124,6 +133,9 @@ fn authz_new(status, aux) {
     store64(a + AZ_CAPS, 0);
     # Effective session-logging flag of the matched rule (0 = off).
     store64(a + AZ_LOG_SESSION, 0);
+    # LSM exec contexts of the matched rule ("" = none).
+    store64(a + AZ_SELINUX, "");
+    store64(a + AZ_APPARMOR, "");
     return a;
 }
 
@@ -131,6 +143,8 @@ fn authz_status(a) { return load64(a + AZ_STATUS); }
 fn authz_aux(a) { return load64(a + AZ_AUX); }
 fn authz_caps(a) { return load64(a + AZ_CAPS); }
 fn authz_log_session(a) { return load64(a + AZ_LOG_SESSION); }
+fn authz_selinux(a) { return load64(a + AZ_SELINUX); }
+fn authz_apparmor(a) { return load64(a + AZ_APPARMOR); }
 
 # Resolve a rule's tri-state log_session (-1 = inherit) against the
 # policy defaults. Returns 0 or 1.
@@ -370,6 +384,14 @@ fn _shk_rule_set(r, key, raw_val) {
         # Tri-state: a present bool overrides the inherit sentinel (-1).
         var b = _shk_parse_bool(raw_val);
         if (b >= 0) { store64(r + RU_LOG_SESSION, b); }
+        return 0;
+    }
+    if (streq(key, "selinux_context") == 1) {
+        store64(r + RU_SELINUX_CONTEXT, _shk_unquote(raw_val));
+        return 0;
+    }
+    if (streq(key, "apparmor_profile") == 1) {
+        store64(r + RU_APPARMOR_PROFILE, _shk_unquote(raw_val));
         return 0;
     }
     return 0;
@@ -717,6 +739,8 @@ fn check_authorization(policy, caller, groups, target, command) {
                     var az0 = authz_new(AZ_ALLOWED, ra_flag);
                     store64(az0 + AZ_CAPS, rule_capabilities(r));
                     store64(az0 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
+                    store64(az0 + AZ_SELINUX, rule_selinux_context(r));
+                    store64(az0 + AZ_APPARMOR, rule_apparmor_profile(r));
                     return az0;
                 }
                 var ci = 0;
@@ -726,6 +750,8 @@ fn check_authorization(policy, caller, groups, target, command) {
                         var az1 = authz_new(AZ_ALLOWED, ra_flag2);
                         store64(az1 + AZ_CAPS, rule_capabilities(r));
                         store64(az1 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
+                        store64(az1 + AZ_SELINUX, rule_selinux_context(r));
+                        store64(az1 + AZ_APPARMOR, rule_apparmor_profile(r));
                         return az1;
                     }
                     ci = ci + 1;

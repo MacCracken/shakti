@@ -77,6 +77,17 @@
       by `tests/integration/session_log.sh` (unprivileged relay probe +
       root full-path tier).
 
+## Completed (v0.6.0)
+
+- [x] SELinux / AppArmor exec-context transitions (ADR-009) — per-rule
+      `selinux_context` / `apparmor_profile` write the kernel's
+      `/proc/self/attr/exec` (and `…/apparmor/exec`) just before
+      `execve`, on both the direct and session-logged paths. `src/lsm.cyr`;
+      direct `/proc` writes, no libselinux/libapparmor dependency. Strict
+      fail-closed; audited as `LSM=`. Verified by
+      `tests/integration/lsm_ctx.sh` (fail-closed signal on a no-LSM host;
+      real enforcement gated to an LSM CI job).
+
 ## Cyrius port regressions (close before v1.0)
 
 Tracked here to keep them visible against the v1.0 criteria below.
@@ -136,9 +147,10 @@ order consumers demand them.
   secrets before it ships.
 - Live `SIGWINCH` window-resize propagation during a logged session —
   0.5.1 copies the window size at session start only.
-- SELinux / AppArmor context transitions
-  (`/proc/self/attr/exec`, feature-gated by distro). Direct file
-  write; no fdlopen dependency.
+- LSM-aware auto-selection for exec contexts — 0.6.0 applies exactly the
+  `selinux_context` / `apparmor_profile` fields set (strict fail-closed);
+  reading `/sys/kernel/security/lsm` to apply only the active LSM's field
+  would let one policy serve a mixed-LSM fleet.
 
 ## Audit deferrals
 

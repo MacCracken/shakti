@@ -34,6 +34,7 @@ modules = [
     "src/validate.cyr",
     "src/caps.cyr",
     "src/session.cyr",
+    "src/lsm.cyr",
     "src/env.cyr",
     "src/identity.cyr",
     "src/timestamp.cyr",

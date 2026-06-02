@@ -112,6 +112,9 @@ commands = ["/usr/bin/systemctl restart *"]  # Allowed commands (empty = all)
 deny_commands = ["/usr/bin/systemctl stop firewall"]  # Deny overrides allow
 require_auth = true           # Per-rule auth override
 capabilities = []             # Optional CAP_* set (empty = full root). See below.
+log_session = false           # Optional per-rule I/O recording override
+selinux_context = ""          # Optional SELinux domain to transition into
+apparmor_profile = ""         # Optional AppArmor profile to transition into
 description = "Service management"
 ```
 
@@ -172,6 +175,34 @@ log_session = true                           # record this (per-rule override)
   created securely. The audit record carries `SESSION_LOG=on|off`.
 - v1 records the **output** stream (what the command displayed); keystroke
   capture is intentionally deferred (it is the more sensitive half).
+
+### SELinux / AppArmor exec contexts (ADR-009)
+
+On a system running a MAC LSM, a rule can launch the target under a
+specific security domain rather than inheriting shakti's:
+
+```toml
+[[rules]]
+user = "webadmin"
+run_as = "root"
+commands = ["/usr/sbin/nginx"]
+selinux_context = "system_u:system_r:httpd_t:s0"   # SELinux hosts
+# apparmor_profile = "nginx"                         # AppArmor hosts
+```
+
+- Set the field matching your host's LSM. `selinux_context` is written to
+  `/proc/self/attr/exec`; `apparmor_profile` is written as
+  `exec <profile>` to `/proc/self/attr/apparmor/exec` (fallback
+  `/proc/self/attr/exec`) — both immediately before `execve`, after the
+  privilege drop, on whichever process execs (the shakti process, or the
+  forked child when session logging is on).
+- **Strict fail-closed:** if a context is requested but the write is
+  rejected (LSM inactive, context unparseable, or transition denied),
+  shakti aborts rather than run the target in the wrong (more privileged)
+  domain. So set the field that matches the LSM your host actually runs;
+  mixed-LSM fleets use per-host policy fragments.
+- Absent/empty fields → no transition (default). The audit record carries
+  `LSM=selinux=…|apparmor=…|none`.
 
 ### Command Patterns
 

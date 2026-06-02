@@ -148,6 +148,19 @@ fn t_log_session_defaults() {
     assert_eq(rule_log_session(r), 0 - 1, "rule log_session defaults to inherit (-1)");
 }
 
+fn t_lsm_context_fields() {
+    # ADR-009: per-rule selinux_context / apparmor_profile parse and
+    # default to empty when absent.
+    var p = _parse_src("[[rules]]\nuser = \"a\"\ncommands = [\"/usr/bin/id\"]\n[[rules]]\nuser = \"web\"\nselinux_context = \"system_u:system_r:httpd_t:s0\"\napparmor_profile = \"nginx\"\n");
+    var ra = vec_get(policy_rules(p), 0);
+    assert_eq(streq(rule_selinux_context(ra), ""), 1, "absent selinux_context = empty");
+    assert_eq(streq(rule_apparmor_profile(ra), ""), 1, "absent apparmor_profile = empty");
+    var rb = vec_get(policy_rules(p), 1);
+    assert_eq(streq(rule_selinux_context(rb), "system_u:system_r:httpd_t:s0"), 1,
+    "selinux_context parsed");
+    assert_eq(streq(rule_apparmor_profile(rb), "nginx"), 1, "apparmor_profile parsed");
+}
+
 fn t_log_session_default_and_override() {
     var p = _parse_src("[defaults]\nlog_session = true\nsession_log_dir = \"/var/log/x\"\n[[rules]]\nuser = \"a\"\n[[rules]]\nuser = \"b\"\nlog_session = false\n");
     var d = policy_defaults(p);
@@ -371,6 +384,7 @@ fn main() {
     t_capabilities_bad_name_fails_closed();
     t_log_session_defaults();
     t_log_session_default_and_override();
+    t_lsm_context_fields();
     t_parse_include_dir();
 
     test_group("check_authorization");

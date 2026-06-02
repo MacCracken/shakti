@@ -151,6 +151,16 @@ else
     echo "FAIL: session_log.sh reported a session-logging failure"
 fi
 
+# ── LSM exec-context (ADR-009) ──────────────────────────
+# Delegated to lsm_ctx.sh: verifies the fail-closed write behaviour
+# against the host's active LSMs (no root needed).
+if sh "$SCRIPT_DIR/lsm_ctx.sh"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: lsm_ctx.sh reported an LSM exec-context failure"
+fi
+
 echo
 echo "Integration: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi

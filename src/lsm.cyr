@@ -1,0 +1,94 @@
+# lsm.cyr — SELinux / AppArmor exec-context transitions (ADR-009).
+#
+# Stages a Mandatory Access Control security context to take effect at the
+# next execve, by writing the per-process "exec" attribute the kernel LSM
+# exposes:
+#   - SELinux:  write the context to /proc/self/attr/exec  (setexeccon(3))
+#   - AppArmor: write "exec <profile>" to
+#               /proc/self/attr/apparmor/exec (newer) or
+#               /proc/self/attr/exec (older)   (aa_change_onexec(3))
+#
+# Direct /proc writes — no libselinux/libapparmor dependency. Callers
+# invoke lsm_apply_exec() right before execve, after the privilege drop,
+# and MUST treat a negative return as fail-closed (abort): a requested but
+# unenforceable confinement is a security downgrade.
+
+fn _selinux_exec_path() { return "/proc/self/attr/exec"; }
+fn _apparmor_exec_path() { return "/proc/self/attr/apparmor/exec"; }
+
+# Write `ctx` to the SELinux exec attribute. Returns 0 on success, or a
+# negative value if the node can't be opened or the write is rejected
+# (e.g. -EINVAL when SELinux is not the active LSM, or the context is
+# unparseable / the transition is denied).
+fn lsm_set_selinux_exec(ctx) {
+    var fd = syscall(SYS_OPEN, _selinux_exec_path(), O_WRONLY, 0);
+    if (fd < 0) { return 0 - 1; }
+    var n = strlen(ctx);
+    var w = sys_write(fd, ctx, n);
+    sys_close(fd);
+    if (w != n) { return 0 - 1; }
+    return 0;
+}
+
+# Write "exec <profile>" to the AppArmor exec attribute, trying the newer
+# /proc/self/attr/apparmor/exec node first and falling back to the legacy
+# /proc/self/attr/exec. Returns 0 on success, negative on failure.
+fn lsm_set_apparmor_exec(profile) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "exec ");
+    str_builder_add_cstr(sb, profile);
+    var s = str_builder_build(sb);
+    var data = str_data(s);
+    var n = str_len(s);
+
+    var fd = syscall(SYS_OPEN, _apparmor_exec_path(), O_WRONLY, 0);
+    if (fd < 0) { fd = syscall(SYS_OPEN, _selinux_exec_path(), O_WRONLY, 0); }
+    if (fd < 0) { return 0 - 1; }
+    var w = sys_write(fd, data, n);
+    sys_close(fd);
+    if (w != n) { return 0 - 1; }
+    return 0;
+}
+
+# Apply whichever exec-context fields are set (non-null, non-empty). A 0
+# pointer or empty string means "not requested" and is skipped. Returns 0
+# if every requested write succeeded (or nothing was requested), or a
+# negative value on the first failure — the caller must fail closed.
+fn lsm_apply_exec(selinux_ctx, apparmor_profile) {
+    if (selinux_ctx != 0) {
+        if (strlen(selinux_ctx) > 0) {
+            if (lsm_set_selinux_exec(selinux_ctx) < 0) { return 0 - 1; }
+        }
+    }
+    if (apparmor_profile != 0) {
+        if (strlen(apparmor_profile) > 0) {
+            if (lsm_set_apparmor_exec(apparmor_profile) < 0) { return 0 - 1; }
+        }
+    }
+    return 0;
+}
+
+# Human-readable description of the requested context(s) for the audit
+# trail. Returns a null-terminated cstr: "selinux=<ctx>", "apparmor=<p>",
+# both joined by " ", or "none".
+fn lsm_describe(selinux_ctx, apparmor_profile) {
+    var has_se = 0;
+    if (selinux_ctx != 0) { if (strlen(selinux_ctx) > 0) { has_se = 1; } }
+    var has_aa = 0;
+    if (apparmor_profile != 0) { if (strlen(apparmor_profile) > 0) { has_aa = 1; } }
+    if (has_se == 0) { if (has_aa == 0) { return "none"; } }
+
+    var sb = str_builder_new();
+    var wrote = 0;
+    if (has_se == 1) {
+        str_builder_add_cstr(sb, "selinux=");
+        str_builder_add_cstr(sb, selinux_ctx);
+        wrote = 1;
+    }
+    if (has_aa == 1) {
+        if (wrote == 1) { str_builder_add_cstr(sb, " "); }
+        str_builder_add_cstr(sb, "apparmor=");
+        str_builder_add_cstr(sb, apparmor_profile);
+    }
+    return str_data(str_builder_build(sb));
+}

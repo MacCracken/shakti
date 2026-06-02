@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-02
+
+Mandatory Access Control integration: a rule can launch its command under
+a specific SELinux domain or AppArmor profile. Minor bump for new, opt-in,
+non-breaking policy fields; existing policies are unaffected.
+
+### Added
+
+- **SELinux / AppArmor exec-context transitions (ADR-009).** A rule may
+  carry `selinux_context = "system_u:system_r:httpd_t:s0"` and/or
+  `apparmor_profile = "nginx"`. Immediately before `execve` (after the
+  privilege drop, on both the direct and session-logged paths), shakti
+  stages the context via the kernel's per-process exec attribute:
+  `selinux_context` → `/proc/self/attr/exec` (`setexeccon`-equivalent);
+  `apparmor_profile` → `exec <profile>` to `/proc/self/attr/apparmor/exec`
+  (fallback `/proc/self/attr/exec`, `aa_change_onexec`-equivalent). New
+  `src/lsm.cyr`; direct `/proc` writes, no libselinux/libapparmor
+  dependency.
+- **Audit `LSM=…`** on the `AUDIT_COMMAND` record (`selinux=<ctx>` /
+  `apparmor=<profile>` / `none`).
+- **`tests/integration/lsm_ctx.sh` + `lsm_probe.cyr`** — verify the
+  fail-closed write behaviour against the host's active LSMs.
+
+### Changed
+
+- The policy `Rule` and `Evaluation` gained `selinux_context` /
+  `apparmor_profile`; the matched rule's values thread through
+  `check_authorization` → `evaluate()` → the exec path, like the
+  capability and session-logging fields.
+
+### Security
+
+- **MAC-confined execution, strict fail-closed.** Rules can launch the
+  target in its intended SELinux domain / AppArmor profile instead of
+  shakti's. If a context is requested but cannot be applied (LSM inactive,
+  unparseable, or transition denied), shakti **aborts before `execve`**
+  rather than run the command in a more privileged domain. Opt-in and
+  non-breaking: absent fields preserve today's behaviour.
+
 ## [0.5.1] - 2026-06-02
 
 Session logging: shakti can now record a PTY transcript of a privileged
