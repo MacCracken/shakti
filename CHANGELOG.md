@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-01
+
+Toolchain pin maintenance. No source, API, or behavior change — the
+binary, library API, and audit format are byte-for-byte equivalent to
+0.4.0 apart from the embedded version string.
+
 ### Changed
 
 - **Cyrius toolchain pin 6.0.3 → 6.0.31.** Point-release bump aligning
