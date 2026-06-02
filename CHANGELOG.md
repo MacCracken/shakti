@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Real PAM authentication via `unix_chkpwd(8)`.** `src/auth.cyr::
+  pam_authenticate` now forks Linux-PAM's setuid-root `unix_chkpwd`
+  helper through the stdlib's `lib/pam.cyr::pam_unix_authenticate`
+  (added `include "lib/pam.cyr"` in `src/lib.cyr`). This is the
+  mechanism `pam_unix.so` itself uses from an unprivileged process; it
+  verifies against `/etc/shadow` with a normal glibc lookup on the root
+  side. New ADR-006 records the decision (and why we did **not** dlopen
+  libpam directly — that path is still blocked on cyrius's NSS /
+  helper-trust model).
+
+### Changed
+
+- **`/usr/bin/su` is demoted from primary auth backend to the
+  helper-missing degradation path.** When `unix_chkpwd` is present (the
+  common case) it is the authoritative backend; su is reached only when
+  the helper is absent or hits a transient pipe/fork/exec error
+  (`SHK_ERR_PAM_UNAVAILABLE` seam). A *rejected* password is never
+  retried through su. Consumer authorization/auth API surface is
+  unchanged.
+- **`cyrius.cyml`: added `"pam"` to the `[deps].stdlib` list.** The
+  distlib bundle now references `pam_unix_authenticate` as an unresolved
+  symbol (like `sakshi_*`), so consumers of `dist/shakti.cyr` must carry
+  `"pam"` in their own stdlib list. Documented in README § Dependencies;
+  the integration consumer-probe enforces it.
+
+### Security
+
+- **Closes the headline cyrius-port regression: real PAM authentication
+  is restored.** Since 0.2.0 the cyrius port authenticated through a
+  `/usr/bin/su -c true` shim because `pam_authenticate` was a stub. Auth
+  now goes through the distro's setuid-root `unix_chkpwd`, which honours
+  every configured NSS backend (files, LDAP, SSSD, …) — closing the
+  auth-side NSS gap from ADR-005 without touching the still-blocked
+  `fdlopen` helper-trust path. Group-side NSS resolution
+  (`src/identity.cyr`) remains local-files-only (bite 2b, still blocked).
+  All auth paths (PAM success, PAM reject, su degradation) remain audit-
+  logged unchanged.
+
 ## [0.4.1] - 2026-06-01
 
 Toolchain pin maintenance. No source, API, or behavior change — the

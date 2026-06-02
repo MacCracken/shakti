@@ -17,7 +17,7 @@ items are load-bearing for shakti:
 
 | Cyrius milestone | Affects shakti | Status |
 |---|---|---|
-| NSS dispatch bootstrap | Unblocks bite 2 (`getgrouplist` via `dlopen`) and bite 3 (real PAM via `dlopen("libpam.so.0")`). | Roadmapped for cyrius 5.5.x; smoke-probe before committing. |
+| NSS dispatch bootstrap | Unblocks bite 2b (`getgrouplist` via `dlopen` for LDAP/sssd **group** resolution). Auth-side real PAM is already shipped via `unix_chkpwd` (ADR-006), so it no longer depends on this. | Blocked on setuid-safe helper-trust model; smoke-probe before committing. |
 | `cyrius build --strict` (v5.4.12+) | Escalates `undefined function` warnings to hard errors — would catch a category of bugs shakti's current dead-code warnings mask. | Queued. |
 
 ### Linux syscall ABI
@@ -44,10 +44,20 @@ surface: any distro that stops maintaining `/etc/group` entries
 deployments need the NSS-via-`dlopen` path that's blocked on cyrius
 5.5.x.
 
-### `/usr/bin/su` semantics
+### `unix_chkpwd(8)` helper
 
-Auth falls through to `/usr/bin/su -c true <user>` while real PAM is
-blocked. Depends on `su` behaviour being:
+Primary auth backend as of 0.4.x (ADR-006): `pam_authenticate` forks
+Linux-PAM's setuid-root `unix_chkpwd` via `lib/pam.cyr`. Depends on the
+helper being present at `/usr/sbin/unix_chkpwd` or `/usr/bin/unix_chkpwd`
+and setuid-root (shipped by the distro's pam/linux-pam package).
+Failure mode: a minimal system without linux-pam ships no helper —
+`pam_unix_available()` returns 0 and auth degrades to the su shim below.
+Tracked because it is now load-bearing for the auth path.
+
+### `/usr/bin/su` semantics (degradation path only)
+
+When `unix_chkpwd` is absent or unusable, auth falls through to
+`/usr/bin/su -c true <user>`. Depends on `su` behaviour being:
 1. Accept password on stdin.
 2. Run `-c true` (succeed-or-fail with zero arg side-effects).
 3. Exit 0 iff password matched the user's.
@@ -55,13 +65,15 @@ blocked. Depends on `su` behaviour being:
 All three are POSIX-ish stable. util-linux `su(1)` and GNU coreutils
 `su(1)` both satisfy them today. Failure mode: a distro replaces
 `su` with one that prompts interactively instead of reading stdin
-(e.g. a `doas`-symlinked variant). Low probability but tracked here.
+(e.g. a `doas`-symlinked variant). Low probability, and now reached only
+on systems lacking `unix_chkpwd`, but tracked here.
 
 ### PAM service config (`etc/pam.d/shakti`)
 
-Shipped in the repo for eventual real-PAM wiring. Unused today. When
-cyrius 5.5.x lands the NSS bootstrap and we resume bite 3, this file
-becomes load-bearing. No current drift risk.
+Informational under the `unix_chkpwd` backend — the helper consults
+`pam_unix.so`'s `/etc/shadow` directly and does not read a per-service
+stack. It would become load-bearing only under a future dlopen-libpam
+backend (blocked on the NSS/helper-trust model). No current drift risk.
 
 ### TOML policy format
 

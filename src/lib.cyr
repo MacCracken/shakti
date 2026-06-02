@@ -83,6 +83,10 @@ fn default_timestamp_dir() { return "/var/run/agnos/sudo"; }
 # sakshi: structured logging used by src/audit.cyr — must precede it.
 include "lib/sakshi.cyr"
 
+# pam: non-root password verification via unix_chkpwd(8), used by
+# src/auth.cyr's pam_authenticate() — must precede it.
+include "lib/pam.cyr"
+
 include "src/validate.cyr"
 include "src/env.cyr"
 include "src/identity.cyr"

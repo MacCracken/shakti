@@ -57,6 +57,7 @@ stdlib = [
     "toml",
     "regex",
     "grp",
+    "pam",
     "tagged",
     "process",
     "assert",

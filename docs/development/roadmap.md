@@ -72,13 +72,16 @@ the port to Cyrius in 0.2.0. Toolchain now pinned to Cyrius 6.0.31.
       style `/etc/group` parser that bypasses NSS entirely, same as
       the code it replaced. Real NSS dispatch is bite 2b, blocked
       below.
-- [ ] Real PAM authentication — replaces the `/usr/bin/su` fallback
-      in `src/auth.cyr`. cyrius v5.5.27 shipped
-      `lib/pam.cyr::pam_unix_authenticate` (forks Linux-PAM's
-      `unix_chkpwd` setuid helper). Migration is tractable feature
-      work; unblocked from cyrius's side. Consumes the same
-      threat-model review as bite 2b below if we want LDAP/sssd
-      coverage on auth too.
+- [x] Real PAM authentication — `src/auth.cyr::pam_authenticate` now
+      forks Linux-PAM's `unix_chkpwd` setuid helper via
+      `lib/pam.cyr::pam_unix_authenticate` (shipped cyrius v5.5.27).
+      The `/usr/bin/su` shim is demoted to the helper-missing
+      degradation path only. Because `unix_chkpwd` does a normal glibc
+      lookup on the root side, the **auth** path now honours LDAP/sssd
+      automatically — closing the auth-side NSS gap without touching the
+      blocked `fdlopen` path. See
+      [ADR-006](../adr/006-pam-auth-via-unix-chkpwd.md). Group-side NSS
+      (bite 2b) remains blocked below.
 
 ## Blocked (later)
 
@@ -179,9 +182,9 @@ single source of truth for "not currently shipping".
 
 - [x] All backlog items complete
 - [x] Real PAM integration (not `/usr/bin/su` shim) — shipped in
-      Rust 0.1.x; regressed in 0.2.0 cyrius port. Revisit at cyrius
-      5.5.x when the NSS dispatch bootstrap lands (port-regressions
-      section tracks the block).
+      Rust 0.1.x; regressed in 0.2.0 cyrius port; **reshipped in 0.4.x**
+      via `unix_chkpwd` (ADR-006). su is now the helper-missing
+      degradation path only.
 - [x] Full test coverage of all security-critical paths (252 `.tcyr`
       unit assertions in 0.2.x, up from 130 in Rust 0.1.x; +20,101
       property-fuzz assertions per run)

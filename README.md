@@ -92,6 +92,12 @@ modules = ["dist/sakshi.cyr"]
 
 Keep the tag in sync with shakti's `cyrius.cyml` if it moves.
 
+The bundle also references the stdlib `pam` module (`pam_unix_authenticate`,
+for `unix_chkpwd`-based password verification — see ADR-006). Unlike
+sakshi this is part of the cyrius stdlib, not a git dep, so a consumer
+only needs `"pam"` present in its `[deps].stdlib` list (shakti's own list
+in `cyrius.cyml` is the reference).
+
 Four AGNOS consumers integrate via `src/api.cyr`:
 
 - **argonaut** (init system): uses `AUTH_SKIP` — already authenticated at boot

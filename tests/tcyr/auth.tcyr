@@ -1,8 +1,16 @@
 # auth.tcyr — tests for src/auth.cyr
-# Real authentication requires a running system with known credentials
-# and PAM config, so we cover only the API surface here. The integration
-# path (authenticate → PAM → su fallback) is exercised by tests that
-# require root in a CI job, not by this unit test harness.
+#
+# Real authentication (a password that actually verifies) requires a
+# running system with known credentials, so these unit tests cover only
+# the API contract and the *negative* path: a bogus password must never
+# authenticate, and every backend must return a defined value rather than
+# panicking. The positive path (a correct password → exit 0) is exercised
+# by a root-requiring CI job, not by this harness.
+#
+# Note: pam_authenticate now forks unix_chkpwd(8) when the helper is
+# present (it is on most systems). Its result therefore depends on the
+# environment, so the assertions below are deliberately environment-
+# independent: they pin the *shape* of the contract, not a fixed code.
 
 include "src/lib.cyr"
 
@@ -10,19 +18,31 @@ fn t_pam_service_name() {
     assert_eq(streq(pam_service_name(), "shakti"), 1, "service name is 'shakti'");
 }
 
-fn t_pam_authenticate_reports_unavailable() {
-    # PAM is stubbed in this port — must signal unavailability so the
-    # authenticate() wrapper falls through to su.
-    var r = pam_authenticate("root", "any");
-    assert_eq(r, 0 - SHK_ERR_PAM_UNAVAILABLE, "pam_authenticate reports unavailable");
+fn t_pam_unix_available_is_bool() {
+    # pam_unix_available() probes for the unix_chkpwd helper. Whatever the
+    # environment, it must return a clean boolean — never a stray value.
+    var a = pam_unix_available();
+    assert_eq(a == 0 || a == 1, 1, "pam_unix_available returns 0 or 1");
 }
 
-fn t_authenticate_falls_through() {
-    # With PAM stubbed, authenticate() must delegate to su_authenticate.
-    # As non-root with an obviously wrong password, su should fail
-    # (return 0 or negative), never panic.
+fn t_pam_authenticate_rejects_bogus() {
+    # A wrong password for root must never authenticate. Depending on
+    # whether unix_chkpwd is present, pam_authenticate returns either
+    #   0                          (helper present → password rejected), or
+    #   0 - SHK_ERR_PAM_UNAVAILABLE (helper missing → degrade to su).
+    # It must NEVER return 1, and must NEVER crash.
+    var r = pam_authenticate("root", "surely_not_root_password_xyz");
+    assert_eq(r == 1, 0, "bogus password is not accepted by PAM");
+    assert_eq(r == 0 || r == 0 - SHK_ERR_PAM_UNAVAILABLE, 1,
+        "pam_authenticate returns rejected (0) or unavailable seam");
+}
+
+fn t_authenticate_rejects_bogus() {
+    # The authenticate() wrapper (PAM, then su fallback) must also reject a
+    # bogus password. It returns 0 on rejection; su spawn failure in a
+    # constrained sandbox may surface as a negative SHK_ERR_*. Either way
+    # it must never authenticate and never panic.
     var r = authenticate("root", "surely_not_root_password_xyz");
-    assert_eq(r >= 0, 1, "authenticate returns a defined value, not an error propagation");
     assert_eq(r == 1, 0, "bogus password does not authenticate");
 }
 
@@ -31,8 +51,9 @@ fn main() {
 
     test_group("auth API");
     t_pam_service_name();
-    t_pam_authenticate_reports_unavailable();
-    t_authenticate_falls_through();
+    t_pam_unix_available_is_bool();
+    t_pam_authenticate_rejects_bogus();
+    t_authenticate_rejects_bogus();
 
     return assert_summary();
 }
