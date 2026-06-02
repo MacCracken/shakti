@@ -141,6 +141,16 @@ else
     echo "FAIL: caps_drop.sh reported a capability-drop failure"
 fi
 
+# ── session logging (ADR-008) ──────────────────────────
+# Delegated to session_log.sh: PTY relay + log capture via session_probe
+# (unprivileged), SKIPs where /dev/ptmx is unavailable.
+if sh "$SCRIPT_DIR/session_log.sh"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: session_log.sh reported a session-logging failure"
+fi
+
 echo
 echo "Integration: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then exit 1; fi

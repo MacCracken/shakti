@@ -77,6 +77,28 @@ fn t_evaluate_threads_capabilities() {
     assert_eq(caps_parse_set(caps), 1024, "resolves to CAP_NET_BIND_SERVICE mask");
 }
 
+fn _logsession_policy() {
+    var s = "[defaults]\nrequire_auth = false\nlog_session = true\n[[rules]]\nuser = \"sess\"\nrun_as = \"root\"\ncommands = [\"/usr/bin/env\"]\n";
+    return parse_policy(s, strlen(s));
+}
+
+fn t_evaluate_threads_log_session() {
+    # Rule inherits the default log_session=true; it must reach the eval.
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _logsession_policy(), "sess", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_authorized(eval), 1, "authorized");
+    assert_eq(eval_log_session(eval), 1, "log_session threaded (inherits default on)");
+}
+
+fn t_evaluate_default_no_log_session() {
+    # Sample policy has no log_session anywhere → off.
+    var cfg = _skip_config();
+    var eval = evaluate_with_policy(cfg, _sample_policy(), "deploy", 1000, 1000,
+    _groups_empty(), _argv1("/usr/bin/env"));
+    assert_eq(eval_log_session(eval), 0, "log_session defaults off");
+}
+
 fn t_evaluate_default_no_capabilities() {
     # A rule without a capabilities field threads an empty set → mask 0
     # → the full-uid drop path is taken (no behavioural change).
@@ -196,6 +218,8 @@ fn main() {
     t_evaluate_authorized_with_auth();
     t_evaluate_threads_capabilities();
     t_evaluate_default_no_capabilities();
+    t_evaluate_threads_log_session();
+    t_evaluate_default_no_log_session();
     t_evaluate_denied();
     t_evaluate_invalid_username();
     t_evaluate_invalid_command();

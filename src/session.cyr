@@ -1,0 +1,235 @@
+# session.cyr — pseudo-terminal allocation + terminal mode helpers for
+# session logging (ADR-008).
+#
+# This module owns shakti's TTY/PTY constants and the low-level helpers:
+#   - PTY master allocation + slave resolution (/dev/ptmx, TIOCGPTN, …)
+#   - termios get/set and the raw-mode transform for the relay parent
+# The relay loop and log writer build on these (next bite). The
+# privilege drop and fork live in src/main.cyr's exec path.
+#
+# All ioctl/termios constants verified against <sys/ioctl.h>,
+# <termios.h>, <asm-generic/termbits.h> on Linux x86_64.
+
+# ── ioctl numbers ────────────────────
+var SYS_POLL = 7;               # x86_64 poll(2); not in the stdlib enum
+var POLLIN = 1;
+var POLLERR = 8;
+var POLLHUP = 16;
+var EINTR_ERRNO = 4;            # poll returns -EINTR on signal delivery
+
+var TCGETS = 21505;             # 0x5401  — get termios
+var TCSETS = 21506;             # 0x5402  — set termios now
+var TIOCGPTN = 2147767344;      # 0x80045430 — get pty number (master)
+var TIOCSPTLCK = 1074025521;    # 0x40045431 — (un)lock pty slave
+var TIOCSCTTY = 21518;          # 0x540E  — set controlling tty
+var TIOCGWINSZ = 21523;         # 0x5413  — get window size
+var TIOCSWINSZ = 21524;         # 0x5414  — set window size
+
+# open(2) flag the stdlib enum doesn't expose (O_RDWR/O_NONBLOCK do).
+var O_NOCTTY = 256;             # don't acquire controlling tty on open
+
+# ── termios layout (asm-generic/termbits.h, Linux x86_64) ──
+#   c_iflag @0, c_oflag @4, c_cflag @8, c_lflag @12, c_line @16,
+#   c_cc[19] @17. Kernel struct is ~36 bytes; we use 64 to be safe.
+var TERMIOS_SIZE = 64;
+var ECHO_FLAG = 8;              # 0o10 — ECHO (used by the password reader)
+
+# c_cc subscripts (offsets within c_cc, which starts at byte 17).
+var VTIME_CC = 5;
+var VMIN_CC = 6;
+
+# Raw-mode flag masks (values verified via cpp):
+#   iflag: IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL|IXON
+#          = 1|2|8|32|64|128|256|1024 = 1515
+#   lflag: ECHO|ECHONL|ICANON|ISIG|IEXTEN = 8|64|2|1|32768 = 32843
+#   oflag: OPOST = 1 ; cflag: clear CSIZE(48), set CS8(48)
+var IFLAG_RAW_CLEAR = 1515;
+var LFLAG_RAW_CLEAR = 32843;
+var OPOST_FLAG = 1;
+var CSIZE_MASK = 48;
+var CS8_FLAG = 48;
+
+# ── PTY allocation ────────────────────
+
+# Open a new PTY master. Returns the master fd, or a negative value on
+# error. O_NOCTTY so opening the master never makes it our ctty.
+fn session_openpt() {
+    return syscall(SYS_OPEN, "/dev/ptmx", O_RDWR | O_NOCTTY, 0);
+}
+
+# Unlock the slave side of `master` (TIOCSPTLCK with 0). Must be called
+# before opening the slave. Returns the ioctl result.
+fn session_unlock(master) {
+    var zero = alloc(4);
+    if (zero == 0) { return 0 - 1; }
+    store32(zero, 0);
+    return syscall(SYS_IOCTL, master, TIOCSPTLCK, zero);
+}
+
+# Resolve the slave device path ("/dev/pts/N") for `master`. Returns a
+# null-terminated cstr, or 0 on error.
+fn session_slave_path(master) {
+    var ptn = alloc(4);
+    if (ptn == 0) { return 0; }
+    if (syscall(SYS_IOCTL, master, TIOCGPTN, ptn) < 0) { return 0; }
+    var n = load32(ptn);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/dev/pts/");
+    str_builder_add_int(sb, n);
+    return str_data(str_builder_build(sb));
+}
+
+# Open the slave for `master`: unlock, resolve the path, open it.
+# Returns the slave fd, or a negative value on error.
+fn session_open_slave(master) {
+    if (session_unlock(master) < 0) { return 0 - 1; }
+    var path = session_slave_path(master);
+    if (path == 0) { return 0 - 1; }
+    return syscall(SYS_OPEN, path, O_RDWR | O_NOCTTY, 0);
+}
+
+# ── termios helpers ────────────────────
+
+# Read fd's termios into buf (must be >= TERMIOS_SIZE). Returns the
+# ioctl result (>= 0 on success).
+fn session_tty_get(fd, buf) { return syscall(SYS_IOCTL, fd, TCGETS, buf); }
+
+# Apply buf as fd's termios immediately. Returns the ioctl result.
+fn session_tty_set(fd, buf) { return syscall(SYS_IOCTL, fd, TCSETS, buf); }
+
+# Fill `dst` (>= TERMIOS_SIZE) from a copy of `src` with raw-mode flags
+# applied: no canonical processing, echo, signals, output post-processing
+# or special-char handling — every byte passes through verbatim, which is
+# what the relay parent wants on the real terminal. `x & (0 - 1 - mask)`
+# clears `mask`'s bits (two's-complement ~mask).
+fn session_termios_make_raw(src, dst) {
+    memcpy(dst, src, TERMIOS_SIZE);
+    store32(dst + 0, load32(dst + 0) & (0 - 1 - IFLAG_RAW_CLEAR));
+    store32(dst + 4, load32(dst + 4) & (0 - 1 - OPOST_FLAG));
+    store32(dst + 12, load32(dst + 12) & (0 - 1 - LFLAG_RAW_CLEAR));
+    var cflag = load32(dst + 8) & (0 - 1 - CSIZE_MASK);
+    store32(dst + 8, cflag | CS8_FLAG);
+    store8(dst + 17 + VMIN_CC, 1);    # VMIN = 1
+    store8(dst + 17 + VTIME_CC, 0);   # VTIME = 0
+    return 0;
+}
+
+# ── I/O relay ────────────────────
+
+# Write exactly `n` bytes from buf to fd, retrying short writes. Returns
+# 0 on success, negative on a write error.
+fn _session_full_write(fd, buf, n) {
+    var off = 0;
+    while (off < n) {
+        var w = sys_write(fd, buf + off, n - off);
+        if (w <= 0) { return 0 - 1; }
+        off = off + w;
+    }
+    return 0;
+}
+
+# Copy the window size from `from_fd` (a real terminal) onto `to_fd` (the
+# PTY master), so the child's slave reports the right dimensions. Best
+# effort — a non-tty `from_fd` simply leaves the master at its default.
+fn session_copy_winsize(from_fd, to_fd) {
+    var ws = alloc(8);   # struct winsize = 4x u16
+    if (ws == 0) { return 0 - 1; }
+    if (syscall(SYS_IOCTL, from_fd, TIOCGWINSZ, ws) < 0) { return 0; }
+    syscall(SYS_IOCTL, to_fd, TIOCSWINSZ, ws);
+    return 0;
+}
+
+# Relay bytes between the real terminal (stdin fd 0 / stdout fd 1) and the
+# PTY `master`, teeing the master→stdout (command output) stream to
+# `logfd` (pass a negative fd to skip logging). Blocks until the master
+# reports EOF/HUP — i.e. the child closed the slave (exited). Returns 0.
+#
+# Uses poll(2). pollfd is packed as two u32s: fd at +0, (events |
+# revents<<16) at +4, so revents = high 16 bits of the +4 word.
+fn session_relay(master, logfd) {
+    session_copy_winsize(0, master);
+
+    var buf = alloc(4096);
+    if (buf == 0) { return 0 - 1; }
+    var pfds = alloc(16);          # 2 pollfd structs
+    var stdin_open = 1;
+    var done = 0;
+
+    while (done == 0) {
+        # [0] master: always polled for input.
+        store32(pfds + 0, master);
+        store32(pfds + 4, POLLIN);
+        # [1] stdin: fd -1 (ignored by poll) once stdin hits EOF.
+        if (stdin_open == 1) { store32(pfds + 8, 0); }
+        else { store32(pfds + 8, 0 - 1); }
+        store32(pfds + 12, POLLIN);
+
+        var pr = syscall(SYS_POLL, pfds, 2, 0 - 1);
+        if (pr < 0) {
+            # Re-poll on signal interruption (e.g. SIGWINCH/SIGCHLD);
+            # bail on any other error so we never spin.
+            if (pr == 0 - EINTR_ERRNO) { continue; }
+            return 0 - 1;
+        }
+
+        var mrev = (load32(pfds + 4) >> 16) & 65535;
+        if ((mrev & POLLIN) != 0) {
+            var n = sys_read(master, buf, 4096);
+            if (n <= 0) { done = 1; }
+            else {
+                _session_full_write(1, buf, n);
+                if (logfd >= 0) { _session_full_write(logfd, buf, n); }
+            }
+        }
+        # Master closed (child exited) — stop relaying.
+        if ((mrev & (POLLHUP | POLLERR)) != 0) { done = 1; }
+
+        if (stdin_open == 1) {
+            var srev = (load32(pfds + 12) >> 16) & 65535;
+            if ((srev & POLLIN) != 0) {
+                var n2 = sys_read(0, buf, 4096);
+                if (n2 <= 0) { stdin_open = 0; }       # EOF: stop polling stdin
+                else { _session_full_write(master, buf, n2); }
+            }
+        }
+    }
+    return 0;
+}
+
+# ── Session log header / footer ────────────────────
+
+# Write the session-log header. Format (one line):
+#   === shakti session <ts> caller=<c> target=<t> tty=<tty> cmd=<cmd> ===
+fn session_log_header(logfd, caller, target, command, tty, start_secs) {
+    if (logfd < 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "=== shakti session ");
+    str_builder_add_int(sb, start_secs);
+    str_builder_add_cstr(sb, " caller=");
+    str_builder_add_cstr(sb, caller);
+    str_builder_add_cstr(sb, " target=");
+    str_builder_add_cstr(sb, target);
+    str_builder_add_cstr(sb, " tty=");
+    if (strlen(tty) > 0) { str_builder_add_cstr(sb, tty); }
+    else { str_builder_add_cstr(sb, "none"); }
+    str_builder_add_cstr(sb, " cmd=");
+    str_builder_add_cstr(sb, command);
+    str_builder_add_cstr(sb, " ===\n");
+    var s = str_builder_build(sb);
+    _session_full_write(logfd, str_data(s), str_len(s));
+    return 0;
+}
+
+# Write the session-log footer with exit status and wall-clock duration.
+fn session_log_footer(logfd, status, start_secs, end_secs) {
+    if (logfd < 0) { return 0; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n=== shakti session end status=");
+    str_builder_add_int(sb, status);
+    str_builder_add_cstr(sb, " duration=");
+    str_builder_add_int(sb, end_secs - start_secs);
+    str_builder_add_cstr(sb, "s ===\n");
+    var s = str_builder_build(sb);
+    _session_full_write(logfd, str_data(s), str_len(s));
+    return 0;
+}

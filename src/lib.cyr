@@ -89,6 +89,7 @@ include "lib/pam.cyr"
 
 include "src/validate.cyr"
 include "src/caps.cyr"
+include "src/session.cyr"
 include "src/env.cyr"
 include "src/identity.cyr"
 include "src/timestamp.cyr"

@@ -24,7 +24,9 @@ enum DefOff {
     DEF_ENV_KEEP = 24;
     DEF_MAX_CMD_LEN = 32;
     DEF_INCLUDE_DIR = 40;
-    DEF_SZ = 48;
+    DEF_LOG_SESSION = 48;
+    DEF_SESSION_LOG_DIR = 56;
+    DEF_SZ = 64;
 }
 
 enum RuleOff {
@@ -36,14 +38,16 @@ enum RuleOff {
     RU_REQUIRE_AUTH = 40;
     RU_DESCRIPTION = 48;
     RU_CAPABILITIES = 56;
-    RU_SZ = 64;
+    RU_LOG_SESSION = 64;
+    RU_SZ = 72;
 }
 
 enum AuthzOff {
     AZ_STATUS = 0;
     AZ_AUX = 8;
     AZ_CAPS = 16;
-    AZ_SZ = 24;
+    AZ_LOG_SESSION = 24;
+    AZ_SZ = 32;
 }
 
 enum AuthzStatus { AZ_DENIED = 0; AZ_ALLOWED = 1; }
@@ -68,6 +72,9 @@ fn defaults_new() {
     store64(d + DEF_ENV_KEEP, vec_new());
     store64(d + DEF_MAX_CMD_LEN, MAX_COMMAND_LEN_DEFAULT);
     store64(d + DEF_INCLUDE_DIR, 0);
+    # Session logging off by default; default transcript directory.
+    store64(d + DEF_LOG_SESSION, 0);
+    store64(d + DEF_SESSION_LOG_DIR, "/var/log/agnos/sessions");
     return d;
 }
 
@@ -77,6 +84,8 @@ fn def_audit_log(d) { return load64(d + DEF_AUDIT_LOG); }
 fn def_env_keep(d) { return load64(d + DEF_ENV_KEEP); }
 fn def_max_cmd_len(d) { return load64(d + DEF_MAX_CMD_LEN); }
 fn def_include_dir(d) { return load64(d + DEF_INCLUDE_DIR); }
+fn def_log_session(d) { return load64(d + DEF_LOG_SESSION); }
+fn def_session_log_dir(d) { return load64(d + DEF_SESSION_LOG_DIR); }
 
 fn rule_new() {
     var r = alloc(RU_SZ);
@@ -90,6 +99,9 @@ fn rule_new() {
     # Empty capability set = full-uid drop (today's default). Opt-in
     # least-privilege when the policy names caps. See ADR-007.
     store64(r + RU_CAPABILITIES, vec_new());
+    # log_session tri-state: -1 = inherit [defaults], 0 = off, 1 = on.
+    # See ADR-008.
+    store64(r + RU_LOG_SESSION, 0 - 1);
     return r;
 }
 
@@ -101,6 +113,7 @@ fn rule_deny_commands(r) { return load64(r + RU_DENY); }
 fn rule_require_auth(r) { return load64(r + RU_REQUIRE_AUTH); }
 fn rule_description(r) { return load64(r + RU_DESCRIPTION); }
 fn rule_capabilities(r) { return load64(r + RU_CAPABILITIES); }
+fn rule_log_session(r) { return load64(r + RU_LOG_SESSION); }
 
 fn authz_new(status, aux) {
     var a = alloc(AZ_SZ);
@@ -109,12 +122,23 @@ fn authz_new(status, aux) {
     # Capability set of the matched rule (0 = none/denied → full-uid
     # drop). Set by the AZ_ALLOWED return sites in check_authorization.
     store64(a + AZ_CAPS, 0);
+    # Effective session-logging flag of the matched rule (0 = off).
+    store64(a + AZ_LOG_SESSION, 0);
     return a;
 }
 
 fn authz_status(a) { return load64(a + AZ_STATUS); }
 fn authz_aux(a) { return load64(a + AZ_AUX); }
 fn authz_caps(a) { return load64(a + AZ_CAPS); }
+fn authz_log_session(a) { return load64(a + AZ_LOG_SESSION); }
+
+# Resolve a rule's tri-state log_session (-1 = inherit) against the
+# policy defaults. Returns 0 or 1.
+fn _shk_effective_log_session(r, defaults) {
+    var ls = rule_log_session(r);
+    if (ls < 0) { return def_log_session(defaults); }
+    return ls;
+}
 
 # ── Mini TOML loader ────────────────────
 
@@ -292,6 +316,15 @@ fn _shk_def_set(d, key, raw_val) {
         store64(d + DEF_INCLUDE_DIR, _shk_unquote(raw_val));
         return 0;
     }
+    if (streq(key, "log_session") == 1) {
+        var b = _shk_parse_bool(raw_val);
+        if (b >= 0) { store64(d + DEF_LOG_SESSION, b); }
+        return 0;
+    }
+    if (streq(key, "session_log_dir") == 1) {
+        store64(d + DEF_SESSION_LOG_DIR, _shk_unquote(raw_val));
+        return 0;
+    }
     return 0;
 }
 
@@ -331,6 +364,12 @@ fn _shk_rule_set(r, key, raw_val) {
         # (caps_name_to_bit) when the set is resolved to a bitmask at
         # exec time, so a bogus name fails closed there. See ADR-007.
         store64(r + RU_CAPABILITIES, _shk_parse_str_array(raw_val));
+        return 0;
+    }
+    if (streq(key, "log_session") == 1) {
+        # Tri-state: a present bool overrides the inherit sentinel (-1).
+        var b = _shk_parse_bool(raw_val);
+        if (b >= 0) { store64(r + RU_LOG_SESSION, b); }
         return 0;
     }
     return 0;
@@ -677,6 +716,7 @@ fn check_authorization(policy, caller, groups, target, command) {
                     var ra_flag = rule_require_auth(r) & def_req;
                     var az0 = authz_new(AZ_ALLOWED, ra_flag);
                     store64(az0 + AZ_CAPS, rule_capabilities(r));
+                    store64(az0 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
                     return az0;
                 }
                 var ci = 0;
@@ -685,6 +725,7 @@ fn check_authorization(policy, caller, groups, target, command) {
                         var ra_flag2 = rule_require_auth(r) & def_req;
                         var az1 = authz_new(AZ_ALLOWED, ra_flag2);
                         store64(az1 + AZ_CAPS, rule_capabilities(r));
+                        store64(az1 + AZ_LOG_SESSION, _shk_effective_log_session(r, defaults));
                         return az1;
                     }
                     ci = ci + 1;

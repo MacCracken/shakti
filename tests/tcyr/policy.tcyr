@@ -136,6 +136,30 @@ fn t_capabilities_bad_name_fails_closed() {
     "unknown cap name fails the set closed");
 }
 
+# ── session logging field (ADR-008) ────────────────────
+
+fn t_log_session_defaults() {
+    var p = _parse_src("[[rules]]\nuser = \"bob\"\n");
+    var d = policy_defaults(p);
+    assert_eq(def_log_session(d), 0, "log_session default off");
+    assert_eq(streq(def_session_log_dir(d), "/var/log/agnos/sessions"), 1,
+    "session_log_dir default path");
+    var r = vec_get(policy_rules(p), 0);
+    assert_eq(rule_log_session(r), 0 - 1, "rule log_session defaults to inherit (-1)");
+}
+
+fn t_log_session_default_and_override() {
+    var p = _parse_src("[defaults]\nlog_session = true\nsession_log_dir = \"/var/log/x\"\n[[rules]]\nuser = \"a\"\n[[rules]]\nuser = \"b\"\nlog_session = false\n");
+    var d = policy_defaults(p);
+    assert_eq(def_log_session(d), 1, "default log_session true parsed");
+    assert_eq(streq(def_session_log_dir(d), "/var/log/x"), 1, "custom session_log_dir");
+    var ra = vec_get(policy_rules(p), 0);
+    var rb = vec_get(policy_rules(p), 1);
+    # Rule a inherits (-1 → default on); rule b explicitly disables.
+    assert_eq(_shk_effective_log_session(ra, d), 1, "rule a inherits default on");
+    assert_eq(_shk_effective_log_session(rb, d), 0, "rule b overrides to off");
+}
+
 fn t_parse_include_dir() {
     var p = _parse_src("[defaults]\ninclude_dir = \"/etc/agnos/sudoers.d\"\n[[rules]]\nuser = \"a\"\n");
     var d = policy_defaults(p);
@@ -345,6 +369,8 @@ fn main() {
     t_capabilities_absent_is_empty();
     t_capabilities_parsed();
     t_capabilities_bad_name_fails_closed();
+    t_log_session_defaults();
+    t_log_session_default_and_override();
     t_parse_include_dir();
 
     test_group("check_authorization");

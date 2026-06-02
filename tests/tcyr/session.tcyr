@@ -1,0 +1,59 @@
+# session.tcyr — tests for src/session.cyr
+#
+# Pure termios raw-mode flag math (no real tty needed). PTY allocation
+# and the relay are exercised by the unprivileged integration probe
+# (tests/integration/session_probe + caps-style driver), not here.
+
+include "src/lib.cyr"
+
+var ALL32 = 4294967295;   # 0xFFFFFFFF
+
+fn t_make_raw_clears_flags() {
+    # Start from an all-ones termios; raw mode must clear the documented
+    # input/output/local bits and force CS8 + VMIN/VTIME.
+    var src = alloc(TERMIOS_SIZE);
+    memset(src, 0, TERMIOS_SIZE);
+    store32(src + 0, ALL32);    # c_iflag
+    store32(src + 4, ALL32);    # c_oflag
+    store32(src + 8, ALL32);    # c_cflag
+    store32(src + 12, ALL32);   # c_lflag
+
+    var dst = alloc(TERMIOS_SIZE);
+    session_termios_make_raw(src, dst);
+
+    # Input flags in IFLAG_RAW_CLEAR are all off.
+    assert_eq(load32(dst + 0) & IFLAG_RAW_CLEAR, 0, "iflag raw bits cleared");
+    # OPOST off.
+    assert_eq(load32(dst + 4) & OPOST_FLAG, 0, "oflag OPOST cleared");
+    # Local flags (ECHO|ICANON|ISIG|IEXTEN|ECHONL) all off.
+    assert_eq(load32(dst + 12) & LFLAG_RAW_CLEAR, 0, "lflag raw bits cleared");
+    # Character size forced to CS8 (CSIZE field == CS8).
+    assert_eq(load32(dst + 8) & CSIZE_MASK, CS8_FLAG, "cflag CS8 set");
+    # Blocking single-byte reads.
+    assert_eq(load8(dst + 17 + VMIN_CC), 1, "VMIN = 1");
+    assert_eq(load8(dst + 17 + VTIME_CC), 0, "VTIME = 0");
+}
+
+fn t_make_raw_preserves_unrelated() {
+    # Bits outside the raw masks must survive untouched. Use a high iflag
+    # bit not in IFLAG_RAW_CLEAR (1515): bit 16 (65536) is unused there.
+    var src = alloc(TERMIOS_SIZE);
+    memset(src, 0, TERMIOS_SIZE);
+    store32(src + 0, 65536);
+    var dst = alloc(TERMIOS_SIZE);
+    session_termios_make_raw(src, dst);
+    assert_eq(load32(dst + 0) & 65536, 65536, "unrelated iflag bit preserved");
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("session termios");
+    t_make_raw_clears_flags();
+    t_make_raw_preserves_unrelated();
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

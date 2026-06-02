@@ -1,0 +1,65 @@
+# session_probe.cyr — exercises src/session.cyr's PTY relay + log writer
+# (ADR-008) end-to-end, unprivileged. Allocates a PTY, forks, runs
+# `echo hello-session-log` on the slave, and relays + tees the output to
+# a log file (path = argv[1]). The driver (session_log.sh) then asserts
+# the transcript captured the output plus a well-formed header/footer.
+#
+# No privilege drop here — that path is covered by the exec tests and a
+# root CI job. This probe verifies the relay/log machinery alone, which
+# needs no root.
+
+include "src/lib.cyr"
+
+fn main() {
+    alloc_init();
+    args_init();
+    if (argc() < 2) {
+        file_write(2, "usage: session_probe <logpath>\n", 31);
+        return 2;
+    }
+    var logpath = argv(1);
+
+    var master = session_openpt();
+    if (master < 0) {
+        file_write(2, "session_probe: openpt failed\n", 29);
+        return 1;
+    }
+    var logfd = syscall(SYS_OPEN, logpath, O_WRONLY | O_CREAT | O_TRUNC, 384);  # 0600
+    if (logfd < 0) {
+        file_write(2, "session_probe: log open failed\n", 31);
+        return 1;
+    }
+    session_log_header(logfd, "tester", "root", "/usr/bin/echo", "probe", 1000);
+
+    var pid = sys_fork();
+    if (pid == 0) {
+        var slave = session_open_slave(master);
+        if (slave < 0) { sys_exit(127); }
+        sys_setsid();
+        syscall(SYS_IOCTL, slave, TIOCSCTTY, 0);
+        sys_dup2(slave, 0);
+        sys_dup2(slave, 1);
+        sys_dup2(slave, 2);
+        sys_close(master);
+        if (slave > 2) { sys_close(slave); }
+        var argv_c = alloc(8 * 3);
+        store64(argv_c + 0, "/usr/bin/echo");
+        store64(argv_c + 8, "hello-session-log");
+        store64(argv_c + 16, 0);
+        var envp = alloc(8);
+        store64(envp, 0);
+        sys_execve("/usr/bin/echo", argv_c, envp);
+        sys_exit(127);
+    }
+
+    session_relay(master, logfd);
+    var st = alloc(8);
+    store64(st, 0);
+    sys_waitpid(pid, st, 0);
+    session_log_footer(logfd, 0, 1000, 1001);
+    sys_close(logfd);
+    return 0;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

@@ -23,20 +23,11 @@ include "src/lib.cyr"
 include "src/cli.cyr"
 
 # ── Additional syscalls used only by the CLI ────────────────────
-var TCGETS = 21505;       # 0x5401
-var TCSETS = 21506;       # 0x5402
 var SYS_CLOSE_RANGE = 436;
 
-# termios struct layout (asm-generic/termbits.h — Linux x86_64):
-#   c_iflag  at 0  (4)
-#   c_oflag  at 4  (4)
-#   c_cflag  at 8  (4)
-#   c_lflag  at 12 (4)
-#   c_line   at 16 (1)
-#   c_cc[19] at 17 — 19 bytes
-# Total: 36 bytes (aligned). We use a 64-byte buffer to be safe.
-var TERMIOS_SIZE = 64;
-var ECHO_FLAG = 8;        # 0o10
+# TTY/termios constants (TCGETS, TCSETS, TERMIOS_SIZE, ECHO_FLAG) and the
+# termios layout now live in src/session.cyr (included via lib.cyr), shared
+# with the session-logging PTY helpers.
 
 # ── Caller identity ────────────────────
 # Lookups live in src/identity.cyr (identity_lookup_uid /
