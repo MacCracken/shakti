@@ -45,11 +45,16 @@ Internal CVE/0-day pass shipped in 0.7.0. Findings:
       "blocked on cyrius" (PAM 0.4.2, NSS 0.6.4 now shipped).
 - [x] Threat model refreshed (T11 mitigation, T12, related-docs).
 
+A post-April web sweep ran as part of this milestone (5 net-new 2026 CVEs
+assessed in the findings doc; CVE-2026-35535 — sudo's non-fatal
+privilege-drop — confirmed N/A by design against shakti's return-checked +
+post-verified `_drop_privileges`; 2 kernel CVEs out of scope). No userspace
+change was required.
+
 **Carried (standing, non-blocking):**
 
-- [ ] **Annual CVE re-scan** — a fresh web-research sweep for net-new
-      sudo/doas/PAM/polkit CVEs published since the 2026-04-20 survey;
-      confirm CVE-2025-8941 (Linux-PAM) against its advisory.
+- [ ] **Next annual CVE re-scan** — re-sweep the sudo/doas/PAM/polkit
+      landscape on the yearly cadence (next due ~2027-06).
 - [ ] **Timestamp Partials** — cross-session reuse + clock-rollback-vs-TTL
       (threat model S8); documented-partial today, revisit if a consumer
       needs hardening.

@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Internal CVE / 0-day security audit (v1.0 criterion). Closes every **Open**
 item from the April survey, re-baselines the rows that were blocked on
-cyrius until PAM/NSS shipped, and adds pwnkit. Full findings:
+cyrius until PAM/NSS shipped, adds pwnkit, and includes a live web sweep of
+post-April 2026 CVEs. Full findings:
 [`docs/audit/2026-06-16-0.7.0-cve-audit.md`](docs/audit/2026-06-16-0.7.0-cve-audit.md).
 
 ### Security
@@ -36,6 +37,12 @@ cyrius until PAM/NSS shipped, and adds pwnkit. Full findings:
 - **pwnkit (CVE-2021-4034)** assessed N/A by construction: shakti never
   indexes `argv` beyond `argc`, handles `argc==0` as a usage message, and
   sanitises the environment unconditionally and independently of argv.
+- **Post-April web sweep** of 2026 sudo/PAM/polkit/util-linux advisories:
+  no net-new userspace change required. Notably **CVE-2026-35535** (sudo's
+  non-fatal `setuid`/`setgid`/`setgroups` during privilege drop) is N/A by
+  design — shakti return-checks every drop syscall *and* post-verifies
+  `getuid`/`getgid`. Two 2026 kernel CVEs ("Copy Fail" CVE-2026-31431,
+  CVE-2026-46333) are out of scope (kernel patching; threat-model A6).
 
 ### Changed
 
