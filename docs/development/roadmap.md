@@ -59,24 +59,34 @@ change was required.
       (threat model S8); documented-partial today, revisit if a consumer
       needs hardening.
 
-## 0.8.x — AGNOS kernel integration
+## 0.8.x — AGNOS kernel integration — BLOCKED on AGNOS (upstream)
 
-Shakti's privilege mechanisms are currently built against the **Linux**
-kernel ABI (setuid/setgroups, capset/prctl, `/proc/self/attr`, PTY ioctls,
-`unix_chkpwd`). AGNOS ships its own kernel; this milestone re-does the same
-work-up against AGNOS's interfaces, ideally behind one abstraction so a
-single source serves both. (The existing x86_64-vs-aarch64 syscall-number
-split already signals the need for a kernel/ABI seam.)
+**Blocked: AGNOS has no privilege model to integrate with (verified against
+AGNOS 1.45.10).** AGNOS is by design a single-user, always-root system —
+`getuid`#15 returns `0` ("always root"), and there is **no `setuid`/`setgid`/
+`setgroups`** in the syscall surface (0–55); the process model is `spawn`#3 /
+`execwait`#37 (no `fork`, no caller-argv on exec). A privilege-*de-escalation*
+tool has nothing to de-escalate into. Every sub-item below depends on an
+AGNOS primitive that does not yet exist.
 
-- [ ] Identity & privilege drop on the AGNOS kernel (uid/gid model,
-      supplementary groups).
-- [ ] Least-privilege / capability equivalent — map ADR-007's model onto
-      AGNOS's mechanism.
-- [ ] Authentication backend on AGNOS — the `unix_chkpwd`/PAM equivalent.
-- [ ] MAC / exec-context equivalent (ADR-009 analogue), if AGNOS provides
-      one.
-- [ ] Session-logging PTY path against AGNOS tty/pty interfaces.
-- [ ] Kernel/ABI abstraction layer so Linux and AGNOS share one source.
+Filed the gap + what shakti needs (prioritised) as an AGNOS issue:
+`agnos/docs/development/issues/2026-06-16-shakti-privilege-model-kernel-gap.md`.
+Unblocks when AGNOS lands **P0 identity (real uid/gid)** + **P0 credentialed
+exec** — or is re-scoped to "Linux/aarch64 only; AGNOS N/A by kernel design"
+if single-user-always-root is AGNOS's intended end state.
+
+- [ ] _(blocked)_ Identity & privilege drop on the AGNOS kernel — needs a
+      real uid/gid model + a `setuid`-equivalent / credentialed exec.
+- [ ] _(blocked)_ Least-privilege / capability equivalent (ADR-007) — needs
+      an AGNOS capability model.
+- [ ] _(blocked)_ Authentication backend (`unix_chkpwd`/PAM equivalent) —
+      needs an AGNOS credential store + verify primitive.
+- [ ] _(blocked)_ MAC / exec-context equivalent (ADR-009) — needs an AGNOS LSM.
+- [ ] _(blocked)_ Session-logging PTY path — needs an AGNOS pty/termios surface
+      (today: blocking kbd stdin only, no pty / no `TIOCSTI`).
+- [ ] Kernel/ABI abstraction seam (Linux + AGNOS one source) — meaningful
+      only once an AGNOS privilege ABI exists; building it now would be
+      speculative (no real second implementation to abstract to).
 
 ## 0.9.x — Consumer integration, v1 closeout, freeze
 
