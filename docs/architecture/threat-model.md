@@ -416,6 +416,11 @@ concern.
   doas / su / PAM / NSS. Every T-entry above has a companion section
   there with the specific CVE references that exemplify the attack
   class. Updated together.
+- [`audit/2026-06-16-0.7.0-cve-audit.md`](../audit/2026-06-16-0.7.0-cve-audit.md)
+  — the 0.7.0 internal audit. Current truth where it differs from the
+  April survey: closes the TIOCSTI Open rows (T11 → mitigated for lateral
+  uid moves, ADR-011), fixes the getgrouplist clamp (F-1), re-baselines
+  the now-shipped PAM/NSS rows, and adds pwnkit (T12-adjacent; N/A).
 - [`overview.md`](overview.md) — architectural view of the same
   surface (modules, auth flow, policy format).
 

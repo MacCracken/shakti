@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-16
+
+Internal CVE / 0-day security audit (v1.0 criterion). Closes every **Open**
+item from the April survey, re-baselines the rows that were blocked on
+cyrius until PAM/NSS shipped, and adds pwnkit. Full findings:
+[`docs/audit/2026-06-16-0.7.0-cve-audit.md`](docs/audit/2026-06-16-0.7.0-cve-audit.md).
+
+### Security
+
+- **TIOCSTI tty-injection mitigation for lateral uid moves (ADR-011,
+  CVE-2023-28339 / CVE-2016-2779).** A target that is neither the caller
+  nor root now runs on a dedicated PTY (reusing the ADR-008 relay, no
+  transcript), so a hostile lateral target can no longer `TIOCSTI`-inject
+  back into the caller's shell. `caller → root` and same-uid keep the
+  direct-exec fast path. The audit trail records `PTY=on/off`. Full
+  `use_pty` parity (covering `caller → root`) is on the roadmap.
+- **F-1: `getgrouplist` return-count clamp (CVE-2003-0689 class).** Audit
+  of the new 0.6.4 NSS code found `_identity_nss_getgrouplist` trusting
+  libc's returned count to bound a heap write. The count is now clamped to
+  the destination capacity before writing (`_identity_widen_gids`), so a
+  contract-violating foreign libc can neither over-read nor over-write.
+- **Re-baselined the PAM/NSS rows** the April survey had deferred as
+  "blocked on cyrius": pam_unix blank-password (CVE-2020-27780) confirmed
+  mitigated (empty passwords are rejected before any auth call);
+  pam_pkcs11 (CVE-2025-24531) and pam_namespace (CVE-2025-6020) N/A — those
+  modules are never loaded (auth is `unix_chkpwd` only).
+- **pwnkit (CVE-2021-4034)** assessed N/A by construction: shakti never
+  indexes `argv` beyond `argc`, handles `argc==0` as a usage message, and
+  sanitises the environment unconditionally and independently of argv.
+
+### Changed
+
+- New regression tests: getgrouplist clamp (`identity.tcyr`) and the
+  `session_needs_pty` PTY decision across every uid relationship
+  (`session.tcyr`). `_exec_target_logged` renamed `_exec_target_pty` (it is
+  now the general PTY-relay path, logged or not).
+
 ## [0.6.4] - 2026-06-16
 
 Real NSS group dispatch — the LDAP/sssd membership gap open since the

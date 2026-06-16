@@ -20,21 +20,18 @@ cross-reference.
 | 2026-04-20 | [2026-04-20-external-cve-review.md](2026-04-20-external-cve-review.md) | Pre-audit known-CVE survey | ~30 known CVEs + attack classes (sudo, doas, su, PAM, NSS, LD_PRELOAD, TTY, timestamp, systemd) mapped against shakti's current implementation. Status per entry: Mitigated / N/A / Blocked-on-cyrius-5.5.x / Open / Review. Surfaced **T11 (TIOCSTI)** — added to the threat model. |
 | 2026-04-20 | [2026-04-20-internal-review.md](2026-04-20-internal-review.md) | Internal adversarial self-review | File-by-file probe of each security-critical `src/*.cyr` against the T1–T11 / S1–S10 registers. Findings H-1 (privilege-drop return checks), H-2 (integer overflow in numeric parsers), M-1 (LSTAT on timestamp dir), M-2 (empty-name entries), I-1 (empty-envp comment) shipped in shakti 0.2.2. L-1 / L-2 / L-3 deferred. |
 | 2026-06-02 | [2026-06-02-internal-review.md](2026-06-02-internal-review.md) | Internal adversarial self-review (0.6.1) | Audit of the 0.5–0.6 exec-path features (capabilities, session logging, LSM contexts). Fixed: session-log dir TOCTOU/symlink + group-writable (H2), AppArmor-vs-SELinux node confusion (H1), relay hang on child-setup failure, capget post-check (M1), relay HUP truncation (M2), x86_64 openat/newfstatat numbers, signal exit status. Shipped in 0.6.1. |
+| 2026-06-16 | [2026-06-16-0.7.0-cve-audit.md](2026-06-16-0.7.0-cve-audit.md) | **0.7.0 internal CVE/0-day audit (v1.0 criterion)** | Closes the April **Open**/Partial items and re-baselines the "Blocked-on-cyrius" rows now that PAM (0.4.2) + NSS (0.6.4) shipped. Fixed: **F-1** getgrouplist return-count clamp (CVE-2003-0689 class, in the new 0.6.4 NSS code) and **TIOCSTI** lateral-uid PTY isolation (CVE-2023-28339/2016-2779, ADR-011). Assessed: pam_unix blank-password (Mitigated), pwnkit CVE-2021-4034 (N/A by construction), pam_pkcs11/pam_namespace (N/A — modules not loaded). Shipped in 0.7.0. |
 
 ## Expected future entries
 
-- **0.7.0 CVE / 0-day research audit** (v1.0 criterion) — the internal,
-  research-driven pass over recent privilege-escalation CVEs/0-days
-  (TIOCSTI, Baron Samedit, sudoedit, pwnkit, capability/ambient, …) with
-  every finding fixed or documented. The two 2026-04-20 surveys are the
-  baseline; external review is expected to arrive organically via consumer
-  usage and downstream testing rather than as a commissioned audit.
-- **Post-helper-trust NSS audit** — when cyrius ships the setuid-safe
-  `fdlopen` helper (see the upstream proposal / shakti 0.6.3) and shakti
-  wires real `getgrouplist`, a new dated review covers the NSS items.
-  (Auth-side NSS already landed via `unix_chkpwd` in 0.4.2.)
+- **Post-helper-trust NSS deep-dive** — real `getgrouplist` landed in 0.6.4
+  and was audited in the 0.7.0 entry (F-1). A future review covers
+  passwd-side NSS (`getpwnam_r`) if/when it is wired.
+- **Unconditional-PTY review** — when the full `use_pty` parity item
+  (covering `caller→root`, see ADR-011 roadmap) lands.
 - **Annual re-scan** — sudo / doas / PAM CVE landscape is active;
-  re-survey at least once per calendar year.
+  re-survey at least once per calendar year. The two 2026-04-20 surveys +
+  the 2026-06-16 audit are the standing baseline.
 
 ## How to add an entry
 

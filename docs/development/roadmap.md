@@ -1,7 +1,7 @@
 # Shakti Roadmap
 
 Shipped feature history lives in [CHANGELOG.md](../../CHANGELOG.md) — this
-roadmap tracks **open work only**. Current release: **0.6.4** (cyrius pin
+roadmap tracks **open work only**. Current release: **0.7.0** (cyrius pin
 6.2.12). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
 policy engine, env sanitization, command validation, timestamp caching,
 audit logging, real PAM auth (ADR-006), capability-based privilege
@@ -30,33 +30,29 @@ for (now archived). Both items below are buildable.
       `lib/tls.cyr` (itself `fdlopen`-backed). Now unblocked by the same
       trusted-helper path; not yet started. ADR before code.
 
-## 0.7.0 — Internal security audit (CVE / 0-day research)
+## 0.7.0 — Internal security audit (CVE / 0-day research) — SHIPPED
 
-A research-driven internal pass: survey recent real-world
-privilege-escalation vulnerabilities and map each against shakti's design,
-fixing or documenting our posture for every one. This is the auditable
-substitute for a commissioned review — *external* review is expected to
-arrive organically through consumer usage and downstream testing (see v1.0
-criteria), not as a gated deliverable.
+Internal CVE/0-day pass shipped in 0.7.0. Findings:
+[`docs/audit/2026-06-16-0.7.0-cve-audit.md`](../audit/2026-06-16-0.7.0-cve-audit.md).
 
-- [ ] Web-research recent CVEs / 0-days in the `sudo` / `doas` / `polkit` /
-      setuid / capability / PTY space and record each in a findings doc
-      under `docs/audit/`. Known classes to cover explicitly:
-      - **TIOCSTI / TIOCSWINSZ input injection** — directly relevant to the
-        new session-logging PTY relay (ADR-008); confirm a less-privileged
-        process can't inject into the controlling tty (the reason `sudo`
-        added `use_pty`).
-      - **Heap/parse overflows** à la CVE-2021-3156 (Baron Samedit) — re-audit
-        the mini-TOML parser and all unescaping/length math.
-      - **argv/escape handling** à la CVE-2023-22809 (sudoedit `--`/`EDITOR`)
-        — re-audit command/arg parsing and the `--` delimiter.
-      - **Environment-trust** à la CVE-2021-4034 (pwnkit) — re-audit env
-        sanitization and argv[0]/empty-argv handling.
-      - **Capability/ambient pitfalls**, **setuid return-value gaps**,
-        **`$HOME`/helper-trust** (already filed upstream — see 0.6.3).
-- [ ] For each finding: fix + regression test, or document why shakti is
-      not affected. Re-run the full cleanliness + benchmark gates.
-- [ ] Refresh the threat model and ADRs with anything the survey surfaces.
+- [x] **TIOCSTI** (CVE-2023-28339/2016-2779) — lateral-uid PTY isolation
+      (ADR-011), fixed + tested.
+- [x] **F-1 getgrouplist clamp** (CVE-2003-0689 class) — heap-write
+      hardening on the new 0.6.4 NSS code, fixed + tested.
+- [x] **Baron Samedit / sudoedit / pwnkit** classes — re-audited; N/A or
+      mitigated by construction, documented in the findings doc.
+- [x] **Re-baselined** the PAM/NSS rows the April survey had deferred as
+      "blocked on cyrius" (PAM 0.4.2, NSS 0.6.4 now shipped).
+- [x] Threat model refreshed (T11 mitigation, T12, related-docs).
+
+**Carried (standing, non-blocking):**
+
+- [ ] **Annual CVE re-scan** — a fresh web-research sweep for net-new
+      sudo/doas/PAM/polkit CVEs published since the 2026-04-20 survey;
+      confirm CVE-2025-8941 (Linux-PAM) against its advisory.
+- [ ] **Timestamp Partials** — cross-session reuse + clock-rollback-vs-TTL
+      (threat model S8); documented-partial today, revisit if a consumer
+      needs hardening.
 
 ## 0.8.x — AGNOS kernel integration
 
@@ -111,11 +107,13 @@ Real but low-priority; pull into a milestone when a consumer needs them.
 - [x] Security-critical feature set shipped — PAM auth, capabilities,
       session logging, LSM exec contexts (see CHANGELOG).
 - [x] Full test coverage of security-critical paths + fuzz harnesses.
-- [x] Documentation complete — architecture, threat model, 9 ADRs, guides.
-- [ ] Internal security audit complete — CVE/0-day research pass with every
-      finding fixed or documented (**0.7.0**). External review is expected
-      to arrive organically via consumer usage and downstream testing
-      rather than a commissioned audit, so it is **not** a release gate.
+- [x] Documentation complete — architecture, threat model, 11 ADRs, guides.
+- [x] Internal security audit complete — CVE/0-day pass shipped in **0.7.0**
+      ([findings](../audit/2026-06-16-0.7.0-cve-audit.md)); every surveyed
+      finding fixed or documented. Standing annual re-scan carried (above).
+      External review is expected to arrive organically via consumer usage
+      and downstream testing rather than a commissioned audit, so it is
+      **not** a release gate.
 - [ ] All three consumers integrated and tested (**0.9.x**).
 - [x] NSS **group** resolution unblocked and shipped (**0.6.4**, ADR-010,
       opt-in). Remote policy fetch is unblocked by the same trusted-helper
