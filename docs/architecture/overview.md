@@ -327,11 +327,11 @@ the git tag would otherwise compile against stale symbols.
 
 The bundle is not versioned separately from the source — shakti's
 `VERSION` file drives everything. Consumers pin the git tag (e.g.
-`tag = "0.6.2"`), which is cut from the same commit that carries
+`tag = "0.6.3"`), which is cut from the same commit that carries
 the matching `dist/shakti.cyr`.
 
 Cyrius toolchain for consumers: the version pinned in `cyrius.cyml`
-(`[package].cyrius`, currently **6.0.33**). Consumers must also carry
+(`[package].cyrius`, currently **6.2.11**). Consumers must also carry
 `"pam"` in their stdlib list and declare the `sakshi` dep (see
 README § Dependencies).
 

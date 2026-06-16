@@ -19,21 +19,24 @@ to track. Update when shakti cuts a new tag.
 ```toml
 [deps.shakti]
 git = "https://github.com/MacCracken/shakti.git"
-tag = "0.6.2"
+tag = "0.6.3"
 modules = ["dist/shakti.cyr"]
 
 # shakti's audit path uses sakshi; Cyrius does not resolve transitive
 # deps, so declare it here too (must match shakti's pinned tag).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.2.5"
+tag = "2.3.0"
 modules = ["dist/sakshi.cyr"]
 
 [deps]
 stdlib = [
     "syscalls", "string", "alloc", "freelist", "fmt", "str", "vec",
-    "io", "fs", "args", "hashmap", "toml", "tagged", "process",
+    "io", "fs", "args", "hashmap", "tagged", "process",
 ]
+# NOTE: the standalone `toml` stdlib module was retired in cyrius 6.2.x
+# (folded into `bayan`). shakti's policy loader is a self-contained
+# mini-TOML parser, so neither shakti nor its consumers need it.
 ```
 
 `cyrius distlib` strips `include` directives from the bundle, so
@@ -83,7 +86,7 @@ matters — each module references symbols defined in earlier modules.
 ```toml
 [deps.shakti]
 git = "https://github.com/MacCracken/shakti.git"
-tag = "0.6.2"
+tag = "0.6.3"
 modules = [
     "src/lib.cyr",        # SHK_ERR_* enum + constants (REQUIRED first;
                           # includes lib/sakshi.cyr + lib/pam.cyr → needs
@@ -105,7 +108,7 @@ modules = [
 # above for the full block).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.2.5"
+tag = "2.3.0"
 modules = ["dist/sakshi.cyr"]
 ```
 

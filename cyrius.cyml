@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.0.33"
+cyrius = "6.2.11"
 repository = "https://github.com/MacCracken/shakti"
 
 [build]
@@ -57,7 +57,13 @@ stdlib = [
     "fs",
     "args",
     "hashmap",
-    "toml",
+    # NOTE: the standalone `toml` stdlib module was retired in cyrius
+    # 6.2.x — its parser folded into the consolidated `bayan` module
+    # (json + base64 + csv + toml + u128). shakti never used the stdlib
+    # parser: policy.cyr ships its own purpose-built mini-TOML loader
+    # (the policy grammar is a deliberate subset — no nested arrays, no
+    # inline tables), so the dep is simply dropped rather than swapped
+    # for `bayan`. See docs note below.
     "regex",
     "grp",
     "pam",
@@ -76,5 +82,5 @@ stdlib = [
 # replicate this block alongside [deps.shakti] (see README § Dependencies).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.2.5"
+tag = "2.3.0"
 modules = ["dist/sakshi.cyr"]

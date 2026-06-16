@@ -100,7 +100,7 @@ sakshi in its own `cyrius.cyml` alongside `[deps.shakti]`:
 ```toml
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.2.5"
+tag = "2.3.0"
 modules = ["dist/sakshi.cyr"]
 ```
 

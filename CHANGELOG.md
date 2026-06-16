@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-15
+
+Toolchain-tracking release: moves shakti onto the cyrius 6.2.x line and
+refreshes pinned deps. No source-behaviour or policy/API changes — the
+binary and bundle are functionally identical to 0.6.2.
+
+### Changed
+
+- **Cyrius pin 6.0.33 → 6.2.11.** Tracks the current toolchain (the
+  pin-drift warning at build time is now silent). Builds, all 16 tests,
+  and the 21-case integration suite pass unchanged on 6.2.11.
+- **sakshi 2.2.5 → 2.3.0** (`[deps.sakshi]`). shakti's audit path uses
+  `sakshi_*` for structured logging; the bump is API-compatible (2.3.0
+  adds an atomic ring-buffer output target that shakti does not select).
+
+### Removed
+
+- **Dropped the vestigial `"toml"` stdlib dep.** Cyrius 6.2.x retired the
+  standalone `toml` stdlib module, folding its parser into the
+  consolidated `bayan` module (json + base64 + csv + toml + u128). shakti
+  never used the stdlib parser — `src/policy.cyr` ships its own
+  purpose-built mini-TOML loader for the (deliberately restricted) policy
+  grammar — so the dependency was simply removed rather than swapped for
+  `bayan`. Consumers of `dist/shakti.cyr` should likewise drop `"toml"`
+  from their replicated `[deps] stdlib` list (see the integration guide).
+
 ## [0.6.2] - 2026-06-02
 
 Linux feature-completion milestone: finishes the session-logging and LSM

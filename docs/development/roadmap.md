@@ -1,8 +1,8 @@
 # Shakti Roadmap
 
 Shipped feature history lives in [CHANGELOG.md](../../CHANGELOG.md) — this
-roadmap tracks **open work only**. Current release: **0.6.2** (cyrius pin
-6.0.33). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
+roadmap tracks **open work only**. Current release: **0.6.3** (cyrius pin
+6.2.11). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
 policy engine, env sanitization, command validation, timestamp caching,
 audit logging, real PAM auth (ADR-006), capability-based privilege
 (ADR-007), session logging + keystroke capture (ADR-008), and
