@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-06-16
+
+Real NSS group dispatch — the LDAP/sssd membership gap open since the
+0.2.0 Cyrius port (ADR-005) is closed, opt-in and default-off.
+
+### Added
+
+- **Real-NSS group resolution via the trusted fdlopen helper (ADR-010).**
+  A new `[defaults]` boolean `nss_groups` (default `false`) selects the
+  group-resolution backend. When enabled, `identity_lookup_groups` /
+  `identity_lookup_gids` resolve membership and names through libc
+  `getgrouplist(3)` / `getgrgid_r(3)`, loaded via cyrius
+  `fdlopen_init_trusted` — picking up LDAP / sssd / nscd. Unblocked by the
+  cyrius 6.1.29 trusted-helper work that arrived on shakti's pin in 0.6.3.
+- **`NSS_BACKEND` audit action.** When `nss_groups` is requested, the
+  backend-selection outcome (NSS ready / fell back to files) is
+  audit-logged once at startup.
+
+### Changed
+
+- **Cyrius pin 6.2.11 → 6.2.12.** Tracks the toolchain patch released
+  during 0.6.4 development. Build, tests, and integration suite unchanged.
+- **`[deps] stdlib`**: added `mmap`, `dynlib`, `fdlopen` (for the NSS
+  path); the standalone `toml` module stays dropped (6.2.x folded it into
+  `bayan`; shakti uses its own mini-TOML parser).
+
+### Security
+
+- The NSS path uses `fdlopen_init_trusted` **exclusively** — it resolves
+  only the root-owned, non-writable, non-symlink `/usr/lib/cyrius/dlopen-helper`
+  and **never** the caller's `$HOME` helper, closing the setuid
+  arbitrary-root-exec vector that kept shakti off `fdlopen` entirely.
+- **Default-off**: a default install presents zero new attack surface. The
+  root `dlopen` path does not exist for any deployment until an admin sets
+  `nss_groups = true`.
+- **Fail-safe fallback**: any bootstrap failure (no helper, non-x86_64,
+  dlopen/dlsym miss) falls back to the `/etc/group` parser, never to the
+  untrusted `$HOME` helper. Files can only return a subset of a user's NSS
+  groups, so a fallback can only deny an escalation, never grant one.
+- New threat-model entry **T12** records the opt-in root foreign-call path.
+
 ## [0.6.3] - 2026-06-15
 
 Toolchain-tracking release: moves shakti onto the cyrius 6.2.x line and

@@ -71,7 +71,7 @@ var DEFAULT_TIMESTAMP_TTL_SECS = 300;
 # has no compile-time value injection, so this lives here as the
 # single in-source reference. cyrius.cyml picks up VERSION itself via
 # `version = "${file:VERSION}"` (v5.1.13).
-fn shakti_version_string() { return "shakti 0.6.3 (cyrius port)"; }
+fn shakti_version_string() { return "shakti 0.6.4 (cyrius port)"; }
 
 fn default_policy_path() { return "/etc/agnos/sudoers.toml"; }
 fn default_timestamp_dir() { return "/var/run/agnos/sudo"; }
@@ -86,6 +86,15 @@ include "lib/sakshi.cyr"
 # pam: non-root password verification via unix_chkpwd(8), used by
 # src/auth.cyr's pam_authenticate() — must precede it.
 include "lib/pam.cyr"
+
+# fdlopen + its requires: foreign-libc bootstrap for the opt-in NSS group
+# backend (ADR-010), used by src/identity.cyr. fdlopen has no self-
+# includes, so its requires (mmap, dynlib → fnptr/result) must precede it
+# here, and the whole chain must precede identity.cyr. Inert unless the
+# nss_groups policy key turns the path on.
+include "lib/mmap.cyr"
+include "lib/dynlib.cyr"
+include "lib/fdlopen.cyr"
 
 include "src/validate.cyr"
 include "src/caps.cyr"

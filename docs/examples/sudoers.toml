@@ -38,6 +38,14 @@ max_command_len = 4096
 # entries are ignored. See fragments/ for an example.
 # include_dir = "/etc/agnos/sudoers.d"
 
+# Group-resolution backend (ADR-010). Default false = local /etc/group
+# only. Set true on LDAP/sssd hosts to resolve group membership AND
+# names through real NSS (libc getgrouplist/getgrgid_r) via the trusted
+# fdlopen helper. Requires the root-owned /usr/lib/cyrius/dlopen-helper
+# (cyrius install.sh, as root); if absent it fails closed to /etc/group.
+# Off by default — a default install adds no root foreign-call path.
+# nss_groups = false
+
 
 # ── Rules ───────────────────────────────────────────────────
 # Evaluated top-down; first match wins. `user` and `group` are OR'd

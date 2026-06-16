@@ -15,12 +15,17 @@ enum AuditAction {
     AUDIT_COMMAND = 0;
     AUDIT_AUTH_FAILURE = 1;
     AUDIT_TIMESTAMP_INVALIDATED = 2;
+    # Group-resolution backend selection at startup (ADR-010). Logged once
+    # per invocation when nss_groups is requested: success=1 → NSS ready,
+    # success=0 → requested-but-unavailable, fell back to /etc/group.
+    AUDIT_NSS_BACKEND = 3;
 }
 
 fn audit_action_str(action) {
     if (action == AUDIT_COMMAND) { return "COMMAND"; }
     if (action == AUDIT_AUTH_FAILURE) { return "AUTH_FAILURE"; }
     if (action == AUDIT_TIMESTAMP_INVALIDATED) { return "TIMESTAMP_INVALIDATED"; }
+    if (action == AUDIT_NSS_BACKEND) { return "NSS_BACKEND"; }
     return "UNKNOWN";
 }
 

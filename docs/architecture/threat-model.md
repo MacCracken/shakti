@@ -11,10 +11,11 @@ escalation tool. It accepts a command from an unprivileged caller,
 authorises it against a TOML policy, authenticates the caller, and
 execs the command as a target user (typically root).
 
-This document covers shakti 0.6.x (cyrius port). The T1–T11 vectors below
+This document covers shakti 0.6.x (cyrius port). The T1–T12 vectors below
 were written against the core auth/policy/exec surface; the newer
 exec-path features — capability drop (ADR-007), session-logging PTY relay
-(ADR-008), and SELinux/AppArmor exec contexts (ADR-009) — are reviewed in
+(ADR-008), SELinux/AppArmor exec contexts (ADR-009), and the opt-in NSS
+group backend (ADR-010, T12) — are reviewed in
 [`../audit/2026-06-02-internal-review.md`](../audit/2026-06-02-internal-review.md)
 and get a dedicated CVE/0-day pass in 0.7.0. The Rust 0.1.x line is
 preserved in `rust-old/` for reference and is not in scope.
@@ -336,6 +337,43 @@ equivalent without pty setup). Absence-of-mitigation documented in
 [`audit/2026-04-20-external-cve-review.md`](../audit/2026-04-20-external-cve-review.md)
 OpenDoas CVE-2023-28339 row.
 
+### T12 — Opt-in NSS root foreign-call path (A2, code-exec as root)
+
+**Attack**: with `nss_groups` enabled (ADR-010), shakti `dlopen`s
+`libc.so.6` — and transitively NSS modules (`nss_ldap`, `nss_sss`) — **as
+root**, via the cyrius `fdlopen` helper. Two sub-vectors: (a) a
+caller-replaceable helper binary would be `execve`'d as root before
+authentication (the original setuid-`fdlopen` hazard); (b) a hostile or
+trojaned NSS module / `nsswitch.conf` could run code in shakti's root
+context. This is the same trust model `sudo` operates under when it does
+NSS lookups.
+
+**Mitigation today**: strong, and **off by default**.
+1. The path is gated behind the opt-in `[defaults] nss_groups` flag — a
+   default install never reaches it (T12 simply does not exist there).
+2. shakti calls `fdlopen_init_trusted` **only**: the helper is resolved at
+   the root-owned `/usr/lib/cyrius/dlopen-helper` and `lstat`-verified
+   (regular file, uid 0, not a symlink, not group/other-writable); the
+   caller's `$HOME` copy is never a candidate. Sub-vector (a) is closed by
+   construction — see ADR-010 and the archived cyrius proposal.
+3. The environment is already sanitised (ADR-004) before the bootstrap, so
+   NSS/resolver env-var influence is removed.
+4. Bootstrap failure fails closed to the `/etc/group` files parser
+   (fail-safe: files can only shrink the group set), and the
+   backend-selection outcome is audit-logged (`NSS_BACKEND`).
+
+**Residual risk**: sub-vector (b) — trust in the host's installed NSS
+modules and `nsswitch.conf` — is inherent to honouring NSS at all and is
+identical to `sudo`'s exposure. An operator who enables `nss_groups`
+accepts that they trust their own NSS configuration. `getpwnam_r`
+(passwd-side NSS) is deliberately *not* wired yet, keeping the foreign-call
+surface to the two group symbols.
+
+**Test coverage**: toggle + fail-safe fallback unit-tested
+(`identity.tcyr` — `nss group backend toggle + fail-safe fallback`); the
+live libc path requires the helper + an NSS source and is an integration
+concern.
+
 ## Non-goals
 
 - **Rate limiting across invocations.** Each shakti invocation gets
@@ -359,7 +397,8 @@ OpenDoas CVE-2023-28339 row.
 
 | Gap | Where tracked | Blocks v1.0? |
 |---|---|---|
-| LDAP / sssd **group** resolution (`getgrouplist` via `fdlopen`) | roadmap 0.6.3 + [ADR-005](../adr/005-identity-backend-port-to-cyrius.md); blocked on the cyrius helper-trust proposal | Maybe — descopable from v1.0 |
+| ~~LDAP / sssd **group** resolution~~ — **shipped 0.6.4** ([ADR-010](../adr/010-nss-group-dispatch-via-fdlopen.md)), opt-in via `nss_groups`; new vector tracked as T12 | done | No — closed |
+| LDAP-only **passwd** (primary GID via `getpwnam_r`) | follow-on to ADR-010; files-based today | No |
 | Internal CVE/0-day audit | roadmap 0.7.0 + [v1.0 Criteria] | Yes — this document is input |
 | Consumer integration (argonaut/agnoshi/daimon/ark) | roadmap 0.9.x + v1.0 Criteria | Yes — consumer-side work |
 

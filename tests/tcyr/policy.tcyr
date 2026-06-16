@@ -195,6 +195,18 @@ fn t_parse_include_dir() {
     assert_eq(streq(inc, "/etc/agnos/sudoers.d"), 1, "include_dir value");
 }
 
+fn t_nss_groups_default_and_parse() {
+    # Default off (ADR-010).
+    var p = _parse_src("[defaults]\ntimestamp_ttl = 300\n[[rules]]\nuser = \"a\"\n");
+    assert_eq(def_nss_groups(policy_defaults(p)), 0, "nss_groups default off");
+    # Explicit true parses.
+    var p2 = _parse_src("[defaults]\nnss_groups = true\n[[rules]]\nuser = \"a\"\n");
+    assert_eq(def_nss_groups(policy_defaults(p2)), 1, "nss_groups = true parsed");
+    # Explicit false parses.
+    var p3 = _parse_src("[defaults]\nnss_groups = false\n[[rules]]\nuser = \"a\"\n");
+    assert_eq(def_nss_groups(policy_defaults(p3)), 0, "nss_groups = false parsed");
+}
+
 # ── Authorization ────────────────────
 
 fn _groups_empty() { return vec_new(); }
@@ -401,6 +413,7 @@ fn main() {
     t_log_input_defaults_and_override();
     t_lsm_context_fields();
     t_parse_include_dir();
+    t_nss_groups_default_and_parse();
 
     test_group("check_authorization");
     t_authz_admin_full_access();

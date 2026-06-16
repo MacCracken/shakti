@@ -18,6 +18,18 @@
 # strips all include directives. Keep this list in sync with the
 # `[deps] stdlib` section of cyrius.cyml.
 
+# NSS group backend (ADR-010): the bundle references libc-via-fdlopen
+# symbols (getgrouplist/getgrgid_r path). A consumer that enables
+# `[defaults] nss_groups` must supply fdlopen + its requires (mmap,
+# dynlib → fnptr/result) — add "mmap", "dynlib", "fdlopen" to [deps]
+# stdlib and include the chain here, ahead of the bundle. Consumers that
+# never enable nss_groups can omit these: the four `undefined function
+# 'fdlopen_*'` warnings are benign (the NSS branch is inert when the flag
+# is off). We include them so this probe builds warning-clean.
+include "lib/mmap.cyr"
+include "lib/dynlib.cyr"
+include "lib/fdlopen.cyr"
+
 include "dist/shakti.cyr"
 
 fn main() {

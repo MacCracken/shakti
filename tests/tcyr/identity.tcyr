@@ -160,6 +160,43 @@ fn t_lookup_gids_missing_user_just_primary() {
     assert_eq(load32(buf), 99, "primary gid stored correctly");
 }
 
+# ── NSS group backend toggle + fail-safe fallback (ADR-010) ────────
+# The trusted fdlopen helper (/usr/lib/cyrius/dlopen-helper) is not
+# present in the test environment, so identity_nss_status() reports
+# unavailable (0) once requested, and every lookup falls back to the
+# /etc/group reader. These tests assert the toggle semantics and that
+# the fallback is transparent — group results are identical to the
+# files backend. (The live NSS path can only be exercised on a host
+# with the helper installed + an NSS source; that is an integration
+# concern, not a unit one.)
+
+fn t_nss_default_not_requested() {
+    # Fresh process default: backend not requested → status -1.
+    assert_eq(identity_nss_status(), 0 - 1, "nss backend default: not requested (-1)");
+}
+
+fn t_nss_enabled_falls_back_when_helper_absent() {
+    identity_set_nss_groups(1);
+    # No system helper in the test env → init_trusted fails closed →
+    # status 0 (requested but unavailable, files fallback in effect).
+    assert_eq(identity_nss_status(), 0, "nss requested but helper absent → 0 (fallback)");
+
+    # Fallback is transparent: root still resolves its groups via files.
+    var groups = identity_lookup_groups("root");
+    assert(vec_len(groups) >= 1, "root groups still resolved via files fallback");
+
+    # And gid collection still yields at least the primary.
+    var buf = alloc(1024);
+    var n = identity_lookup_gids("root", 0, buf, 256);
+    assert(n >= 1, "gid fallback yields >=1 (primary)");
+    assert_eq(load32(buf), 0, "primary gid 0 in slot 0 under fallback");
+}
+
+fn t_nss_toggle_back_off() {
+    identity_set_nss_groups(0);
+    assert_eq(identity_nss_status(), 0 - 1, "toggling off restores not-requested (-1)");
+}
+
 # ── Overflow guard on numeric field parser (H-2 regression) ────────
 # _identity_parse_uint is internal; test via a synthetic buffer that
 # simulates an /etc/passwd line with a huge numeric uid field. The
@@ -226,6 +263,11 @@ fn main() {
     t_lookup_gids_dedup_primary();
     t_lookup_gids_zero_max();
     t_lookup_gids_missing_user_just_primary();
+
+    test_group("nss group backend toggle + fail-safe fallback (ADR-010)");
+    t_nss_default_not_requested();
+    t_nss_enabled_falls_back_when_helper_absent();
+    t_nss_toggle_back_off();
 
     test_group("parse_uint overflow guard (H-2)");
     t_parse_uint_overflow_rejected();

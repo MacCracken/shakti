@@ -1,35 +1,34 @@
 # Shakti Roadmap
 
 Shipped feature history lives in [CHANGELOG.md](../../CHANGELOG.md) — this
-roadmap tracks **open work only**. Current release: **0.6.3** (cyrius pin
-6.2.11). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
+roadmap tracks **open work only**. Current release: **0.6.4** (cyrius pin
+6.2.12). The 0.1–0.6 line delivered the full Linux privilege surface: TOML
 policy engine, env sanitization, command validation, timestamp caching,
 audit logging, real PAM auth (ADR-006), capability-based privilege
 (ADR-007), session logging + keystroke capture (ADR-008), and
 SELinux/AppArmor exec contexts (ADR-009) — all Linux feature surfaces now
 complete.
 
-## 0.6.3 — Proposal-blocked work (NSS + remote policy)
+## Unblocked by cyrius `fdlopen_init_trusted` (6.1.29)
 
-Both items are blocked on the upstream cyrius proposal
-`docs/development/proposals/2026-06-02-fdlopen-helper-trust-for-setuid-consumers.md`
-(in the cyrius repo, filed 2026-06-02): a setuid binary cannot use
-`fdlopen` today because the helper resolves inside the invoking user's
-`$HOME`. They ship once cyrius provides a trusted, root-owned helper path
-(an `fdlopen_init_trusted`-style entry point with ownership/mode/
-non-symlink + integrity checks).
+The setuid-`fdlopen` blocker is **resolved**: cyrius shipped
+`fdlopen_init_trusted` in 6.1.29 (on shakti's pin since 0.6.3). It
+resolves only the root-owned, non-writable, non-symlink
+`/usr/lib/cyrius/dlopen-helper`, never the caller's `$HOME`, and fails
+closed — exactly the helper-trust model shakti's upstream proposal asked
+for (now archived). Both items below are buildable.
 
-- [ ] **Real NSS dispatch (bite 2b — LDAP/sssd group resolution).** Call
-      libc `getgrouplist(3)` via `fdlopen` for full NSS group membership,
-      replacing the local `/etc/group` parser in `src/identity.cyr`. The
-      *auth* side already honours NSS via `unix_chkpwd` (ADR-006); this
-      closes the *group* side. ADR before code.
+- [x] **Real NSS dispatch (LDAP/sssd group resolution).** **Shipped 0.6.4**
+      (ADR-010). `getgrouplist(3)` + `getgrgid_r(3)` via the trusted
+      `fdlopen` helper, opt-in behind `[defaults] nss_groups` (default
+      off), fail-safe fallback to the `/etc/group` parser. Closes the
+      group side; the auth side already honoured NSS via `unix_chkpwd`
+      (ADR-006). *Follow-on:* passwd-side NSS (`getpwnam_r`) for the
+      primary-GID input is still files-based — pull in when a consumer
+      needs LDAP-only target users.
 - [ ] **Remote policy fetch (fleet management).** HTTPS policy pull via
-      `lib/tls.cyr` (itself `fdlopen`-backed), inheriting the same
-      helper-trust requirement.
-
-If cyrius does not land the helper-trust model in time, both are
-explicitly descoped from v1.0 (tracked in the criteria below).
+      `lib/tls.cyr` (itself `fdlopen`-backed). Now unblocked by the same
+      trusted-helper path; not yet started. ADR before code.
 
 ## 0.7.0 — Internal security audit (CVE / 0-day research)
 
@@ -112,5 +111,7 @@ Real but low-priority; pull into a milestone when a consumer needs them.
       to arrive organically via consumer usage and downstream testing
       rather than a commissioned audit, so it is **not** a release gate.
 - [ ] All three consumers integrated and tested (**0.9.x**).
-- [ ] NSS group resolution + remote policy either unblocked and shipped
-      (**0.6.3**) or explicitly descoped from v1.0.
+- [x] NSS **group** resolution unblocked and shipped (**0.6.4**, ADR-010,
+      opt-in). Remote policy fetch is unblocked by the same trusted-helper
+      path but not yet shipped — descoped from the v1.0 gate (pull in when
+      a fleet consumer needs it).

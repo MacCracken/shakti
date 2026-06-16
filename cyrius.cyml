@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "Shakti — AGNOS privilege escalation tool (PAM authentication, TOML policy, audit logging)"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.2.12"
 repository = "https://github.com/MacCracken/shakti"
 
 [build]
@@ -72,6 +72,15 @@ stdlib = [
     "assert",
     "bench",
     "fnptr",
+    # Real-NSS group dispatch (ADR-010, opt-in via [defaults] nss_groups).
+    # fdlopen bootstraps host libc for getgrouplist/getgrgid_r; it requires
+    # mmap + dynlib + fnptr (fnptr already above), and must follow them in
+    # this single-pass include list. Consumers of dist/shakti.cyr that
+    # enable nss_groups must replicate these three in their own [deps]
+    # stdlib (see the integration guide).
+    "mmap",
+    "dynlib",
+    "fdlopen",
 ]
 
 # Sakshi — structured, level-filterable logging (the `tracing` layer the

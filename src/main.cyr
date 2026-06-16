@@ -588,7 +588,9 @@ fn shk_run() {
         return 1;
     }
     var caller = load64(name_ptr);
-    var groups = identity_lookup_groups(caller);
+    # Group lookup is deferred until after policy load — the [defaults]
+    # nss_groups key (ADR-010) selects the resolution backend, so groups
+    # must be resolved with that decision already applied.
 
     # Invalidate mode
     if (load64(cli + CLI_INVALIDATE) == 1) {
@@ -623,8 +625,24 @@ fn shk_run() {
         return 1;
     }
 
+    # Select the group-resolution backend from policy (ADR-010) BEFORE any
+    # group lookup. Defaults off → /etc/group files backend (ADR-005).
+    identity_set_nss_groups(def_nss_groups(policy_defaults(policy)));
+
     # Check mode
     if (load64(cli + CLI_CHECK) == 1) { return _check_policy(policy); }
+
+    # Resolve the caller's groups under the selected backend. When NSS was
+    # requested, audit the outcome once: ready, or fell back to files.
+    var nss_st = identity_nss_status();
+    if (nss_st == 1) {
+        audit_log(AUDIT_NSS_BACKEND, caller, "", "", 1,
+        "nss group dispatch ready (getgrouplist via trusted helper)");
+    } elif (nss_st == 0) {
+        audit_log(AUDIT_NSS_BACKEND, caller, "", "", 0,
+        "nss_groups requested but helper unavailable; using /etc/group");
+    }
+    var groups = identity_lookup_groups(caller);
     # List mode
     if (load64(cli + CLI_LIST) == 1) {
         _list_permissions(policy, caller, groups);

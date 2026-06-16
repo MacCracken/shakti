@@ -7,11 +7,10 @@
 - **Type**: Cyrius binary + library (ships `build/shakti` CLI + `dist/shakti.cyr` consumer bundle)
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer — current in `VERSION` (0.6.3), the single source of truth
+- **Version**: SemVer — current in `VERSION` (0.6.4), the single source of truth
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
-- **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
 ## Consumers
 
@@ -61,8 +60,8 @@ catches this locally.
 7. Deeper tests/benchmarks from review observations
 8. Run benchmarks again — prove the wins
 9. If review heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, cyrius.cyml (via `${file:VERSION}`), `shakti_version_string()` in `src/lib.cyr`, recipe (in zugot) all in sync
+10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, guides and examples for new API surface
+11. Version check — VERSION, cyrius.cyml (via `${file:VERSION}`), `shakti_version_string()` in `src/lib.cyr` all in sync
 12. Return to step 1
 
 ### Task Sizing

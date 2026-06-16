@@ -58,7 +58,7 @@ As a setuid-root binary, Shakti is a high-value attack target. The security desi
 | Password echo on terminal | termios `ECHO` bit cleared via `TCSETS`, original saved and restored |
 | Path traversal in usernames | `/`, `..`, null byte, empty rejection in `validate_username` |
 | Policy file tampering | Root-ownership check (stat uid == 0), world-writable mode bit rejected |
-| Group membership resolution | `/etc/group` parsing in `src/identity.cyr` (local files). LDAP / sssd group resolution via `getgrouplist(3)` needs `fdlopen` and is tracked for 0.6.3, blocked on the cyrius setuid-safe helper-trust proposal. (Auth-side NSS already works via `unix_chkpwd`, ADR-006.) |
+| Group membership resolution | `/etc/group` parsing in `src/identity.cyr` (local files) by default. Real NSS — LDAP / sssd / nscd via libc `getgrouplist(3)` / `getgrgid_r(3)` through the trusted `fdlopen` helper — is opt-in via `[defaults] nss_groups` (ADR-010, shipped 0.6.4), with a fail-safe fallback to the files parser. (Auth-side NSS already works via `unix_chkpwd`, ADR-006.) |
 
 ## Authentication Flow
 
@@ -331,7 +331,7 @@ The bundle is not versioned separately from the source — shakti's
 the matching `dist/shakti.cyr`.
 
 Cyrius toolchain for consumers: the version pinned in `cyrius.cyml`
-(`[package].cyrius`, currently **6.2.11**). Consumers must also carry
+(`[package].cyrius`, currently **6.2.12**). Consumers must also carry
 `"pam"` in their stdlib list and declare the `sakshi` dep (see
 README § Dependencies).
 

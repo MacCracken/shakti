@@ -27,7 +27,8 @@ enum DefOff {
     DEF_LOG_SESSION = 48;
     DEF_SESSION_LOG_DIR = 56;
     DEF_LOG_INPUT = 64;
-    DEF_SZ = 72;
+    DEF_NSS_GROUPS = 72;
+    DEF_SZ = 80;
 }
 
 enum RuleOff {
@@ -85,6 +86,11 @@ fn defaults_new() {
     # Keystroke (input) capture off by default (ADR-008). Only takes
     # effect when log_session is also on — it rides the same PTY relay.
     store64(d + DEF_LOG_INPUT, 0);
+    # Real-NSS group dispatch off by default (ADR-010). When 0, group
+    # lookups use the local /etc/group parser (ADR-005). When 1, they
+    # resolve through libc getgrouplist/getgrgid_r via the trusted
+    # fdlopen helper, with a fail-safe fallback to the files parser.
+    store64(d + DEF_NSS_GROUPS, 0);
     return d;
 }
 
@@ -97,6 +103,7 @@ fn def_include_dir(d) { return load64(d + DEF_INCLUDE_DIR); }
 fn def_log_session(d) { return load64(d + DEF_LOG_SESSION); }
 fn def_session_log_dir(d) { return load64(d + DEF_SESSION_LOG_DIR); }
 fn def_log_input(d) { return load64(d + DEF_LOG_INPUT); }
+fn def_nss_groups(d) { return load64(d + DEF_NSS_GROUPS); }
 
 fn rule_new() {
     var r = alloc(RU_SZ);
@@ -362,6 +369,14 @@ fn _shk_def_set(d, key, raw_val) {
     if (streq(key, "log_input") == 1) {
         var bi = _shk_parse_bool(raw_val);
         if (bi >= 0) { store64(d + DEF_LOG_INPUT, bi); }
+        return 0;
+    }
+    if (streq(key, "nss_groups") == 1) {
+        # Opt-in real-NSS group dispatch (ADR-010). [defaults]-only —
+        # there is no per-rule override; it is a process-wide backend
+        # selection, not a per-authorization toggle.
+        var bn = _shk_parse_bool(raw_val);
+        if (bn >= 0) { store64(d + DEF_NSS_GROUPS, bn); }
         return 0;
     }
     return 0;

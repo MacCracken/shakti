@@ -33,10 +33,22 @@ modules = ["dist/sakshi.cyr"]
 stdlib = [
     "syscalls", "string", "alloc", "freelist", "fmt", "str", "vec",
     "io", "fs", "args", "hashmap", "tagged", "process",
+    # NSS group backend (ADR-010). Required only if you enable
+    # `[defaults] nss_groups`; the bundle references these symbols
+    # either way, so include them to build warning-clean (omitting them
+    # is harmless when nss_groups stays off — see the note below).
+    "mmap", "dynlib", "fdlopen",
 ]
 # NOTE: the standalone `toml` stdlib module was retired in cyrius 6.2.x
 # (folded into `bayan`). shakti's policy loader is a self-contained
 # mini-TOML parser, so neither shakti nor its consumers need it.
+#
+# NSS NOTE: when `nss_groups` is enabled, shakti loads libc
+# (getgrouplist/getgrgid_r) via the trusted fdlopen helper, which must
+# be installed root-owned at /usr/lib/cyrius/dlopen-helper (cyrius
+# install.sh, run as root). Without it the path fails closed to the
+# /etc/group parser. fdlopen needs mmap + dynlib + fnptr ahead of it in
+# the single-pass include order.
 ```
 
 `cyrius distlib` strips `include` directives from the bundle, so
