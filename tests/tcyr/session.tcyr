@@ -45,12 +45,34 @@ fn t_make_raw_preserves_unrelated() {
     assert_eq(load32(dst + 0) & 65536, 65536, "unrelated iflag bit preserved");
 }
 
+# session_needs_pty: the PTY-relay decision (ADR-008 + ADR-011 TIOCSTI).
+# Security-critical — a regression here silently drops tty isolation for
+# lateral uid moves.
+fn t_needs_pty_decision() {
+    # Logging on → always PTY, regardless of uid relationship.
+    assert_eq(session_needs_pty(1, 1000, 1000), 1, "log_session forces PTY (same uid)");
+    assert_eq(session_needs_pty(1, 1000, 0), 1, "log_session forces PTY (->root)");
+
+    # Logging off:
+    #   caller -> root        : direct exec (target_uid 0)
+    assert_eq(session_needs_pty(0, 1000, 0), 0, "caller->root uses direct exec");
+    #   same uid              : direct exec
+    assert_eq(session_needs_pty(0, 1000, 1000), 0, "same-uid uses direct exec");
+    #   lateral (dev->svc)    : PTY isolation (TIOCSTI)
+    assert_eq(session_needs_pty(0, 1000, 1001), 1, "lateral uid move forces PTY");
+    #   root caller -> user   : also lateral (target != caller, != 0)
+    assert_eq(session_needs_pty(0, 0, 1000), 1, "root->user is lateral → PTY");
+}
+
 fn main() {
     alloc_init();
 
     test_group("session termios");
     t_make_raw_clears_flags();
     t_make_raw_preserves_unrelated();
+
+    test_group("session_needs_pty decision (ADR-011 TIOCSTI)");
+    t_needs_pty_decision();
 
     return assert_summary();
 }

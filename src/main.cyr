@@ -452,15 +452,22 @@ fn _open_session_log(dir, caller, suffix) {
     return fd;
 }
 
-# Session-logged exec path (ADR-008). shakti stays alive as the relay
-# parent; a forked child drops privilege and execs the target on a PTY
-# slave, while the parent tees the terminal output to `logfd`. Returns the
-# child's exit status for shk_run to propagate. `logfd` must already be
-# open (see _open_session_log); the caller owns closing it on early error.
-fn _exec_target_logged(resolved, argv_vec, env_vec, target_user, target_uid,
+# PTY-relay exec path (ADR-008 logging + ADR-011 TIOCSTI isolation). shakti
+# stays alive as the relay parent; a forked child drops privilege and execs
+# the target on a PTY slave, while the parent relays terminal I/O and, when
+# logfd >= 0, tees it to the transcript. Returns the child's exit status for
+# shk_run to propagate. With logfd == inlogfd == -1 it is a pure relay (no
+# transcript) — the TIOCSTI-isolation case for a lateral uid move. Any
+# passed log fds must already be open (see _open_session_log); the caller
+# owns closing them on early error.
+fn _exec_target_pty(resolved, argv_vec, env_vec, target_user, target_uid,
 target_gid, cap_mask, logfd, inlogfd, caller, se_ctx, aa_prof) {
     var start = _shk_now_secs();
-    session_log_header(logfd, caller, target_user, resolved, _shk_tty_session(), start);
+    # Headers only when actually logging — logfd == -1 is the no-transcript
+    # PTY case (ADR-011 lateral-move isolation).
+    if (logfd >= 0) {
+        session_log_header(logfd, caller, target_user, resolved, _shk_tty_session(), start);
+    }
     if (inlogfd >= 0) {
         session_log_header(inlogfd, caller, target_user, resolved, _shk_tty_session(), start);
     }
@@ -718,6 +725,11 @@ fn shk_run() {
     # securely created, refuse rather than run the command unlogged.
     var sess_dir = def_session_log_dir(policy_defaults(policy));
     var do_log = eval_log_session(eval);
+    # TIOCSTI isolation (ADR-011): a lateral uid move also runs on a PTY,
+    # even with logging off. caller_uid is the real invoking uid (line ~580).
+    var use_pty = session_needs_pty(do_log, caller_uid, target_uid);
+    var lateral_only = 0;
+    if (use_pty == 1) { if (do_log == 0) { lateral_only = 1; } }
     var logfd = 0 - 1;
     # Keystroke capture rides the same PTY relay, so it only applies when
     # session logging is on (its own opt-in switch, log_input).
@@ -755,6 +767,12 @@ fn shk_run() {
     str_builder_add_cstr(areason, " ; INPUT_LOG=");
     if (do_input == 1) { str_builder_add_cstr(areason, "on"); }
     else { str_builder_add_cstr(areason, "off"); }
+    # PTY isolation (ADR-011): record whether a dedicated PTY was used and,
+    # when it was allocated purely for a lateral uid move (logging off), why.
+    str_builder_add_cstr(areason, " ; PTY=");
+    if (use_pty == 1) { str_builder_add_cstr(areason, "on"); }
+    else { str_builder_add_cstr(areason, "off"); }
+    if (lateral_only == 1) { str_builder_add_cstr(areason, " (lateral-uid TIOCSTI isolation)"); }
     str_builder_add_cstr(areason, " ; LSM=");
     str_builder_add_cstr(areason,
     lsm_describe(eval_selinux_context(eval), eval_apparmor_profile(eval)));
@@ -764,8 +782,11 @@ fn shk_run() {
     var se_ctx = eval_selinux_context(eval);
     var aa_prof = eval_apparmor_profile(eval);
 
-    if (do_log == 1) {
-        return _exec_target_logged(eval_resolved_command(eval),
+    # PTY path when logging OR a lateral uid move (ADR-011). For the
+    # lateral-only case logfd/inlogfd are -1, so the relay runs without
+    # writing a transcript.
+    if (use_pty == 1) {
+        return _exec_target_pty(eval_resolved_command(eval),
         load64(cli + CLI_ARGV), eval_environment(eval),
         target, target_uid, target_gid, cap_mask, logfd, inlogfd, caller, se_ctx, aa_prof);
     }

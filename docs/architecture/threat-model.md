@@ -326,11 +326,18 @@ are real usage and do expose this.
    allocates a per-invocation PTY and relays I/O, which naturally
    defeats TIOCSTI injection — the target runs on a fresh slave and the
    parent holds the master, never a writable fd against the caller's
-   original tty. This mitigation applies **only when session logging is
-   enabled**; the default direct-exec path still shares the caller's tty,
-   so residual-risk #1 (the `legacy_tiocsti` sysctl backstop) remains the
-   mitigation there. Making the PTY path unconditional is a candidate for
-   the 0.7.0 CVE-audit review.
+   original tty.
+3. **Shipped (0.7.0, ADR-011):** the PTY path is now also taken — with no
+   transcript — for a **lateral uid move** (target is neither the caller
+   nor root), the direction this attack actually exploits
+   (`developer → service-account`). `session_needs_pty` gates it; a hostile
+   lateral target therefore never holds a writable fd to the caller's tty.
+   The remaining direct-exec cases are `caller → root` and same-uid, where
+   TIOCSTI back-injection is not a privilege gain (root could act directly;
+   same-uid is already the caller). Residual-risk #1 (the `legacy_tiocsti`
+   sysctl, default-restricted on Linux ≥ 6.2) backstops `caller → root`.
+   **Unconditional PTY** (covering even `caller → root`, full `sudo
+   use_pty` parity) is on the roadmap behind its own ADR.
 
 **Test coverage**: none today (the CVE class has no unit-testable
 equivalent without pty setup). Absence-of-mitigation documented in

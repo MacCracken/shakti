@@ -184,6 +184,21 @@ fn _session_slave_echo_on(master) {
 #
 # Uses poll(2). pollfd is packed as two u32s: fd at +0, (events |
 # revents<<16) at +4, so revents = high 16 bits of the +4 word.
+# PTY-relay decision (ADR-008 + ADR-011). Returns 1 if a target must run on
+# a dedicated PTY rather than the caller's shared tty:
+#   - session logging is on (ADR-008), OR
+#   - the target is a lateral uid move — neither the caller nor root —
+#     which would otherwise share the caller's tty and be exposed to
+#     TIOCSTI keystroke injection (ADR-011, CVE-2023-28339 / CVE-2016-2779).
+# caller->root (target_uid == 0) and same-uid targets take the direct-exec
+# fast path. Pure arithmetic — unit-tested without the fork/pty machinery.
+fn session_needs_pty(do_log, caller_uid, target_uid) {
+    if (do_log == 1) { return 1; }
+    if (target_uid == caller_uid) { return 0; }
+    if (target_uid == 0) { return 0; }
+    return 1;
+}
+
 fn session_relay(master, logfd, inlogfd) {
     session_copy_winsize(0, master);
     var winch_fd = _session_sigwinch_fd();

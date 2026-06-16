@@ -201,6 +201,21 @@ fn identity_nss_status() {
     return _identity_nss_init();
 }
 
+# Widen `count` u32 gids from src (4-byte stride) into dst (i64 stride),
+# clamping `count` into [0, max] FIRST. A foreign-libc return value is
+# never trusted to bound the write (CVE-2003-0689 class — getgrouplist
+# overflow): a contract-violating count can neither over-read src nor
+# over-write dst. Returns the clamped count actually written. Pure +
+# unit-tested (identity.tcyr).
+fn _identity_widen_gids(src, count, max, dst) {
+    var n = count;
+    if (n > max) { n = max; }
+    if (n < 0) { n = 0; }
+    var i = 0;
+    while (i < n) { store64(dst + i * 8, load32(src + i * 4)); i = i + 1; }
+    return n;
+}
+
 # libc getgrouplist(3) wrapper mirroring grp_getgrouplist's contract:
 # writes i64-stride gids into gid_buf and returns the count (>=1), or
 # -2 if the caller buffer filled (max entries written), or -3 if NSS is
@@ -215,14 +230,16 @@ fn _identity_nss_getgrouplist(user, primary_gid, gid_buf, max) {
     var rc = fncall4(_identity_nss_ggl, user, primary_gid & 4294967295, u32buf, ng);
     # rc < 0: array too small; getgrouplist still filled `max` entries
     # and set *ng to the total needed. Honour the caller's cap (-2).
+    # array too small: getgrouplist filled `max` entries and set *ng to
+    # the total needed. Widen exactly max, honour the caller's cap (-2).
     if (rc < 0) {
-        var k = 0;
-        while (k < max) { store64(gid_buf + k * 8, load32(u32buf + k * 4)); k = k + 1; }
+        _identity_widen_gids(u32buf, max, max, gid_buf);
         return 0 - 2;
     }
-    var i = 0;
-    while (i < rc) { store64(gid_buf + i * 8, load32(u32buf + i * 4)); i = i + 1; }
-    return rc;
+    # Success. The widen helper clamps rc into [0, max] before writing —
+    # the foreign-libc count never bounds the write directly (F-1,
+    # CVE-2003-0689 defence-in-depth). Return the clamped count.
+    return _identity_widen_gids(u32buf, rc, max, gid_buf);
 }
 
 # libc getgrgid_r(3) name resolution. Returns a freshly-allocated,

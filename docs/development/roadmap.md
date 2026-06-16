@@ -99,6 +99,12 @@ Real but low-priority; pull into a milestone when a consumer needs them.
 - [ ] Audit **L-2** — env-read buffer leak on grow (bump-allocator `free()`
       limitation; affects long-running library consumers, not the
       single-shot CLI).
+- [ ] **Unconditional PTY** (full `sudo use_pty` parity). 0.7.0 (ADR-011)
+      put lateral uid moves on a PTY; this would extend it to *every*
+      target, including `caller → root`, closing TIOCSTI on the shared-tty
+      path without relying on the `legacy_tiocsti` sysctl. Deferred for the
+      tty-semantics change + per-invocation relay overhead — land behind
+      its own ADR with measured overhead.
 
 ## v1.0 Criteria
 
